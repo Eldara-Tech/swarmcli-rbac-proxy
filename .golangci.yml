@@ -1,3 +1,21 @@
+version: "2"
+
 linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (io.Closer).Close
+        - (*net/http.Server).Close
+        - (*net/http.Server).Serve
+        - (*bufio.ReadWriter).Read
+        - (*bufio.Writer).WriteString
+        - (*bufio.Writer).Flush
+        - io.Copy
+        - fmt.Fprint
+        - os.Remove
+
+formatters:
   enable:
     - gofmt

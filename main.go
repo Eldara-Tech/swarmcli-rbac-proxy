@@ -76,10 +76,14 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, socketPath string) {
 	defer clientConn.Close()
 
 	// Flush any buffered data from the hijacked reader first.
-	if clientBuf.Reader.Buffered() > 0 {
-		buffered := make([]byte, clientBuf.Reader.Buffered())
-		clientBuf.Read(buffered)
-		backConn.Write(buffered)
+	if n := clientBuf.Reader.Buffered(); n > 0 {
+		buffered := make([]byte, n)
+		if _, err := clientBuf.Read(buffered); err != nil {
+			return
+		}
+		if _, err := backConn.Write(buffered); err != nil {
+			return
+		}
 	}
 
 	done := make(chan struct{})
