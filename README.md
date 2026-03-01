@@ -61,3 +61,12 @@ docker ps  # routed through the proxy
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for build, test, lint commands and architecture details.
+
+## Dev Container
+
+This repository includes a VS Code Dev Container in `.devcontainer/`.
+
+1. Open the repo in VS Code.
+2. Run **Dev Containers: Reopen in Container**.
+
+The container mounts `/var/run/docker.sock` for local Docker access and supports optional corporate proxy certs via `.devcontainer/certs/corporate-proxy.crt`.

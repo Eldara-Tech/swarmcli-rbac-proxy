@@ -1,0 +1,22 @@
+# Go build cache and module cache inside repo
+.go/
+.cache/
+
+# VS Code settings
+.vscode/
+
+# Devcontainer metadata
+.devcontainer/*.log
+.devcontainer/devcontainer.local.json
+.devcontainer/certs/*.pem
+.devcontainer/certs/*.crt
+.devcontainer/certs/corporate-proxy.crt
+.devcontainer/shared/*
+!.devcontainer/shared/.docker/
+.devcontainer/shared/.docker/*
+!.devcontainer/shared/.docker/.gitkeep
+
+debug.log
+swarm-rbac-proxy
+
+.idea
