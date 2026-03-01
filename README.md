@@ -18,9 +18,18 @@ All configuration is via environment variables.
 | Variable | Default | Description |
 |---|---|---|
 | `PROXY_LISTEN` | `:2376` | TCP listen address |
-| `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket |
+| `PROXY_DOCKER_URL` | _(none)_ | Docker endpoint URL (`unix:///path` or `tcp://host:port`). Takes precedence over `PROXY_DOCKER_SOCKET` |
+| `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket (legacy; prefer `PROXY_DOCKER_URL`) |
 | `PROXY_TLS_CERT` | _(none)_ | TLS certificate path |
 | `PROXY_TLS_KEY` | _(none)_ | TLS key path |
+
+### Remote Docker (TCP)
+
+Point the proxy at a remote Docker daemon instead of a local socket:
+
+```bash
+PROXY_DOCKER_URL=tcp://remote-host:2375 ./swarm-rbac-proxy
+```
 
 ### TLS
 

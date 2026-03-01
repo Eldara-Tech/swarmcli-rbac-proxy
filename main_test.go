@@ -51,7 +51,7 @@ func TestProxy_GetContainers(t *testing.T) {
 	sock, cleanup := startMockSocket(t, mock)
 	defer cleanup()
 
-	proxy := newProxy(sock)
+	proxy := newProxy(backend{network: "unix", address: sock})
 	ts := httptest.NewServer(proxy)
 	defer ts.Close()
 
@@ -93,7 +93,7 @@ func TestProxy_PostRequest(t *testing.T) {
 	sock, cleanup := startMockSocket(t, mock)
 	defer cleanup()
 
-	proxy := newProxy(sock)
+	proxy := newProxy(backend{network: "unix", address: sock})
 	ts := httptest.NewServer(proxy)
 	defer ts.Close()
 
@@ -130,7 +130,7 @@ func TestProxy_StreamingResponse(t *testing.T) {
 	sock, cleanup := startMockSocket(t, mock)
 	defer cleanup()
 
-	proxy := newProxy(sock)
+	proxy := newProxy(backend{network: "unix", address: sock})
 	ts := httptest.NewServer(proxy)
 	defer ts.Close()
 
@@ -181,7 +181,7 @@ func TestProxy_UpgradeConnection(t *testing.T) {
 	sock, cleanup := startMockSocket(t, mock)
 	defer cleanup()
 
-	proxy := newProxy(sock)
+	proxy := newProxy(backend{network: "unix", address: sock})
 	ts := httptest.NewServer(proxy)
 	defer ts.Close()
 
@@ -225,5 +225,35 @@ func TestProxy_UpgradeConnection(t *testing.T) {
 	}
 	if reply != "echo:hello\n" {
 		t.Errorf("reply = %q, want %q", reply, "echo:hello\n")
+	}
+}
+
+func TestParseBackend(t *testing.T) {
+	tests := []struct {
+		input       string
+		wantNetwork string
+		wantAddress string
+		wantErr     bool
+	}{
+		{"unix:///var/run/docker.sock", "unix", "/var/run/docker.sock", false},
+		{"tcp://remote:2375", "tcp", "remote:2375", false},
+		{"/tmp/my.sock", "unix", "/tmp/my.sock", false},
+		{"", "", "", true},
+		{"ftp://host:21", "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			b, err := parseBackend(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseBackend(%q) err = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if err != nil {
+				return
+			}
+			if b.network != tt.wantNetwork || b.address != tt.wantAddress {
+				t.Errorf("parseBackend(%q) = {%q, %q}, want {%q, %q}",
+					tt.input, b.network, b.address, tt.wantNetwork, tt.wantAddress)
+			}
+		})
 	}
 }
