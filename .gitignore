@@ -12,10 +12,11 @@
 .devcontainer/certs/*.crt
 .devcontainer/certs/corporate-proxy.crt
 .devcontainer/shared/*
-
-dist/
+!.devcontainer/shared/.docker/
+.devcontainer/shared/.docker/*
+!.devcontainer/shared/.docker/.gitkeep
 
 debug.log
-swarmcli
+swarm-rbac-proxy
 
 .idea
