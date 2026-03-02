@@ -20,7 +20,7 @@ docker stack deploy -c stack.yml rbac  # deploy to Swarm
 | Variable | Default | Description |
 |---|---|---|
 | `PROXY_LISTEN` | `:2376` | TCP listen address |
-| `PROXY_DOCKER_URL` | _(none)_ | Docker endpoint URL (`unix:///path` or `tcp://host:port`). Takes precedence over `PROXY_DOCKER_SOCKET` |
+| `PROXY_DOCKER_URL` | _(none)_ | Docker endpoint URL (`unix:///path` or `tcp://host:port`). Mutually exclusive with `PROXY_DOCKER_SOCKET` |
 | `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket (legacy; prefer `PROXY_DOCKER_URL`) |
 | `PROXY_TLS_CERT` | _(none)_ | TLS certificate path (optional) |
 | `PROXY_TLS_KEY` | _(none)_ | TLS key path (optional) |

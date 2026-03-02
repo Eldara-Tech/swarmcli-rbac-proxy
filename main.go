@@ -146,8 +146,7 @@ func main() {
 	var raw string
 	switch {
 	case dockerURL != "" && dockerSocket != "":
-		log.Printf("both PROXY_DOCKER_URL and PROXY_DOCKER_SOCKET set, using PROXY_DOCKER_URL")
-		raw = dockerURL
+		log.Fatal("PROXY_DOCKER_URL and PROXY_DOCKER_SOCKET are mutually exclusive, set only one")
 	case dockerURL != "":
 		raw = dockerURL
 	case dockerSocket != "":
