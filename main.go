@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log"
@@ -21,12 +23,51 @@ func env(key, fallback string) string {
 
 // backend represents a Docker daemon endpoint (Unix socket or TCP).
 type backend struct {
-	network string // "unix" or "tcp"
-	address string // socket path or host:port
+	network   string      // "unix" or "tcp"
+	address   string      // socket path or host:port
+	tlsConfig *tls.Config // non-nil enables TLS for backend connections
 }
 
 func (b backend) dial() (net.Conn, error) {
+	if b.tlsConfig != nil {
+		return tls.Dial(b.network, b.address, b.tlsConfig)
+	}
 	return net.Dial(b.network, b.address)
+}
+
+// buildBackendTLS constructs a tls.Config from optional CA, cert, and key files.
+// Any non-empty parameter enables TLS on the backend connection.
+func buildBackendTLS(caFile, certFile, keyFile string) (*tls.Config, error) {
+	if certFile == "" && keyFile == "" && caFile == "" {
+		return nil, nil
+	}
+	if (certFile == "") != (keyFile == "") {
+		return nil, fmt.Errorf("PROXY_DOCKER_TLS_CERT and PROXY_DOCKER_TLS_KEY must both be set or both be empty")
+	}
+
+	cfg := &tls.Config{}
+
+	if caFile != "" {
+		caPEM, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert %s: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("no valid certificates in CA file %s", caFile)
+		}
+		cfg.RootCAs = pool
+	}
+
+	if certFile != "" {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return cfg, nil
 }
 
 // parseBackend parses a Docker endpoint URL into a backend.
@@ -136,9 +177,14 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 }
 
 func main() {
-	listenAddr := env("PROXY_LISTEN", ":2376")
 	tlsCert := os.Getenv("PROXY_TLS_CERT")
 	tlsKey := os.Getenv("PROXY_TLS_KEY")
+
+	defaultPort := ":2375"
+	if tlsCert != "" && tlsKey != "" {
+		defaultPort = ":2376"
+	}
+	listenAddr := env("PROXY_LISTEN", defaultPort)
 
 	dockerURL := os.Getenv("PROXY_DOCKER_URL")
 	dockerSocket := os.Getenv("PROXY_DOCKER_SOCKET")
@@ -160,11 +206,23 @@ func main() {
 		log.Fatalf("invalid docker backend: %v", err)
 	}
 
+	b.tlsConfig, err = buildBackendTLS(
+		os.Getenv("PROXY_DOCKER_TLS_CA"),
+		os.Getenv("PROXY_DOCKER_TLS_CERT"),
+		os.Getenv("PROXY_DOCKER_TLS_KEY"),
+	)
+	if err != nil {
+		log.Fatalf("invalid backend TLS config: %v", err)
+	}
+
 	handler := newProxy(b)
 
 	log.Printf("proxy listening on %s → %s://%s", listenAddr, b.network, b.address)
+	if b.tlsConfig != nil {
+		log.Printf("backend TLS enabled")
+	}
 	if tlsCert != "" && tlsKey != "" {
-		log.Printf("TLS enabled (cert=%s key=%s)", tlsCert, tlsKey)
+		log.Printf("frontend TLS enabled (cert=%s key=%s)", tlsCert, tlsKey)
 		log.Fatal(http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, handler))
 	} else {
 		log.Fatal(http.ListenAndServe(listenAddr, handler))
