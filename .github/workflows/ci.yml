@@ -22,6 +22,8 @@ jobs:
         run: go test -race ./...
 
       - uses: golangci/golangci-lint-action@v7
+        with:
+          cache-invalidation-interval: 1
 
   integration:
     runs-on: ubuntu-latest
