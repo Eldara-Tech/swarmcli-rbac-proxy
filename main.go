@@ -219,7 +219,16 @@ func main() {
 	}
 
 	var userStore store.UserStore
-	switch env("PROXY_STORE", "memory") {
+	switch env("PROXY_STORE", "sqlite") {
+	case "sqlite":
+		dbPath := env("PROXY_DATABASE_PATH", "proxy.db")
+		sq, err := store.NewSQLiteStore(context.Background(), dbPath)
+		if err != nil {
+			log.Fatalf("sqlite store: %v", err)
+		}
+		defer sq.Close()
+		userStore = sq
+		log.Printf("using sqlite store (path=%s)", dbPath)
 	case "memory":
 		userStore = store.NewMemoryStore()
 		log.Printf("using in-memory store")
@@ -236,7 +245,7 @@ func main() {
 		userStore = pg
 		log.Printf("using postgres store")
 	default:
-		log.Fatalf("unknown PROXY_STORE value %q (expected memory or postgres)", os.Getenv("PROXY_STORE"))
+		log.Fatalf("unknown PROXY_STORE value %q (expected sqlite, memory, or postgres)", os.Getenv("PROXY_STORE"))
 	}
 
 	mux := http.NewServeMux()

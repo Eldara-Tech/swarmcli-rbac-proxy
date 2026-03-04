@@ -31,7 +31,8 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 | `PROXY_DOCKER_TLS_CA` | _(none)_ | CA cert to verify remote Docker server |
 | `PROXY_DOCKER_TLS_CERT` | _(none)_ | Client cert for backend mTLS |
 | `PROXY_DOCKER_TLS_KEY` | _(none)_ | Client key for backend mTLS |
-| `PROXY_STORE` | `memory` | Store backend: `memory` or `postgres` |
+| `PROXY_STORE` | `sqlite` | Store backend: `sqlite`, `memory`, or `postgres` |
+| `PROXY_DATABASE_PATH` | `proxy.db` | SQLite database file path (used when `PROXY_STORE=sqlite`) |
 | `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
 
 ## Architecture
@@ -47,9 +48,11 @@ swarm-rbac-proxy/
     store/
       store.go          — UserStore interface, User type, sentinel errors, UUID helper
       memory.go         — in-memory UserStore (dev/testing)
+      sqlite.go         — SQLite UserStore (modernc.org/sqlite, default)
       postgres.go       — PostgreSQL UserStore (pgx/v5)
-      contract_test.go  — shared contract tests for both store implementations
+      contract_test.go  — shared contract tests for all store implementations
       memory_test.go    — memory store unit tests
+      sqlite_test.go    — SQLite store unit tests (contract + WAL)
       postgres_test.go  — postgres integration tests (//go:build integration)
     api/
       users.go          — UserHandler: POST/GET /api/v1/users
@@ -77,4 +80,5 @@ go build . && go test -race ./... && gofmt -l . && go vet ./... && golangci-lint
 
 ## Dependencies
 
+- `modernc.org/sqlite` — Pure Go SQLite driver (used by `internal/store/sqlite.go`)
 - `github.com/jackc/pgx/v5` — PostgreSQL driver (used only by `internal/store/postgres.go`)
