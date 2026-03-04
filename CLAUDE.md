@@ -19,19 +19,24 @@ docker stack deploy -c stack.yml rbac  # deploy to Swarm
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROXY_LISTEN` | `:2376` | TCP listen address |
-| `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket |
-| `PROXY_TLS_CERT` | _(none)_ | TLS certificate path (optional) |
-| `PROXY_TLS_KEY` | _(none)_ | TLS key path (optional) |
+| `PROXY_LISTEN` | `:2375` (`:2376` with frontend TLS) | TCP listen address |
+| `PROXY_DOCKER_URL` | _(none)_ | Docker endpoint URL (`unix:///path` or `tcp://host:port`). Mutually exclusive with `PROXY_DOCKER_SOCKET` |
+| `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket (legacy; prefer `PROXY_DOCKER_URL`) |
+| `PROXY_TLS_CERT` | _(none)_ | Frontend TLS certificate path |
+| `PROXY_TLS_KEY` | _(none)_ | Frontend TLS key path |
+| `PROXY_DOCKER_TLS_CA` | _(none)_ | CA cert to verify remote Docker server |
+| `PROXY_DOCKER_TLS_CERT` | _(none)_ | Client cert for backend mTLS |
+| `PROXY_DOCKER_TLS_KEY` | _(none)_ | Client key for backend mTLS |
 
 ## Architecture
 
 ```
 swarm-rbac-proxy/
-  main.go          — reverse proxy: TCP → docker.sock, with HTTP upgrade support
-  main_test.go     — table tests against mock Unix socket
-  Dockerfile       — multi-stage build (golang:1.25-alpine → alpine:3.21)
-  stack.yml        — Docker Swarm stack definition
+  main.go               — reverse proxy: TCP → docker.sock/remote, with HTTP upgrade and backend TLS support
+  main_test.go          — unit tests against mock Unix socket
+  integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS)
+  Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
+  stack.yml             — Docker Swarm stack definition
 ```
 
 ## CI
