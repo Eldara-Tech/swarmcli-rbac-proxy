@@ -68,6 +68,13 @@ GitHub Actions (`.github/workflows/ci.yml`): two jobs.
 - `ci`: gofmt check, `go test -race`, golangci-lint (fast, no DB).
 - `integration`: PostgreSQL 17 service container, `go test -race -tags=integration`.
 
+## Pre-push Checklist
+
+Always run before pushing:
+```bash
+go build . && go test -race ./... && gofmt -l . && go vet ./... && golangci-lint run
+```
+
 ## Dependencies
 
 - `github.com/jackc/pgx/v5` — PostgreSQL driver (used only by `internal/store/postgres.go`)
