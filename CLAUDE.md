@@ -1,18 +1,22 @@
 # swarm-rbac-proxy
 
-Transparent reverse proxy that relays Docker API requests from TCP to a Unix socket. Designed to sit between `docker context` clients and the Docker daemon, with RBAC enrichment planned for later.
+Transparent reverse proxy that relays Docker API requests from TCP to a Unix socket. Includes a management API for user CRUD, the foundation for future RBAC.
 
 ## Build / Test / Run
 
 ```bash
 go build .                           # compile
-go test -v -race ./...               # run tests
+go test -v -race ./...               # run unit tests
 gofmt -l .                           # check formatting
 go vet ./...                         # lint
 golangci-lint run                    # lint (superset, used by CI)
 ./swarm-rbac-proxy                   # run (needs docker.sock)
 docker build -t swarm-rbac-proxy .   # container image
 docker stack deploy -c stack.yml rbac  # deploy to Swarm
+
+# Integration tests (requires PostgreSQL)
+TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
+  go test -race -tags=integration ./...
 ```
 
 ## Environment Variables
@@ -27,20 +31,43 @@ docker stack deploy -c stack.yml rbac  # deploy to Swarm
 | `PROXY_DOCKER_TLS_CA` | _(none)_ | CA cert to verify remote Docker server |
 | `PROXY_DOCKER_TLS_CERT` | _(none)_ | Client cert for backend mTLS |
 | `PROXY_DOCKER_TLS_KEY` | _(none)_ | Client key for backend mTLS |
+| `PROXY_STORE` | `memory` | Store backend: `memory` or `postgres` |
+| `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
 
 ## Architecture
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy: TCP → docker.sock/remote, with HTTP upgrade and backend TLS support
+  main.go               — reverse proxy + mux routing (/api/v1/ → handlers, / → Docker proxy)
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS)
   Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
   stack.yml             — Docker Swarm stack definition
+  internal/
+    store/
+      store.go          — UserStore interface, User type, sentinel errors, UUID helper
+      memory.go         — in-memory UserStore (dev/testing)
+      postgres.go       — PostgreSQL UserStore (pgx/v5)
+      contract_test.go  — shared contract tests for both store implementations
+      memory_test.go    — memory store unit tests
+      postgres_test.go  — postgres integration tests (//go:build integration)
+    api/
+      users.go          — UserHandler: POST/GET /api/v1/users
+      users_test.go     — handler tests using MemoryStore
 ```
+
+## API Endpoints
+
+- `POST /api/v1/users` — Create user (`{"username":"alice"}` → 201 with user object)
+- `GET /api/v1/users` — List all users (200, always returns array)
+- `/*` — Proxied to Docker daemon
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`): gofmt check, `go test -race`, golangci-lint. Runs on push to `main` and PRs. Single job to conserve private-repo minutes.
+GitHub Actions (`.github/workflows/ci.yml`): two jobs.
+- `ci`: gofmt check, `go test -race`, golangci-lint (fast, no DB).
+- `integration`: PostgreSQL 17 service container, `go test -race -tags=integration`.
 
-Single-file stdlib-only Go proxy. `httputil.ReverseProxy` handles normal requests; a custom hijack handler covers `Connection: Upgrade` (exec, attach). No external dependencies.
+## Dependencies
+
+- `github.com/jackc/pgx/v5` — PostgreSQL driver (used only by `internal/store/postgres.go`)

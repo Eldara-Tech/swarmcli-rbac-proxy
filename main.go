@@ -12,6 +12,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+
+	"swarm-rbac-proxy/internal/api"
+	"swarm-rbac-proxy/internal/store"
 )
 
 func env(key, fallback string) string {
@@ -215,7 +218,30 @@ func main() {
 		log.Fatalf("invalid backend TLS config: %v", err)
 	}
 
-	handler := newProxy(b)
+	var userStore store.UserStore
+	switch env("PROXY_STORE", "memory") {
+	case "memory":
+		userStore = store.NewMemoryStore()
+		log.Printf("using in-memory store")
+	case "postgres":
+		dbURL := os.Getenv("PROXY_DATABASE_URL")
+		if dbURL == "" {
+			log.Fatal("PROXY_DATABASE_URL is required when PROXY_STORE=postgres")
+		}
+		pg, err := store.NewPostgresStore(context.Background(), dbURL)
+		if err != nil {
+			log.Fatalf("postgres store: %v", err)
+		}
+		defer pg.Close()
+		userStore = pg
+		log.Printf("using postgres store")
+	default:
+		log.Fatalf("unknown PROXY_STORE value %q (expected memory or postgres)", os.Getenv("PROXY_STORE"))
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/users", api.NewUserHandler(userStore))
+	mux.Handle("/", newProxy(b))
 
 	log.Printf("proxy listening on %s → %s://%s", listenAddr, b.network, b.address)
 	if b.tlsConfig != nil {
@@ -223,8 +249,8 @@ func main() {
 	}
 	if tlsCert != "" && tlsKey != "" {
 		log.Printf("frontend TLS enabled (cert=%s key=%s)", tlsCert, tlsKey)
-		log.Fatal(http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, handler))
+		log.Fatal(http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, mux))
 	} else {
-		log.Fatal(http.ListenAndServe(listenAddr, handler))
+		log.Fatal(http.ListenAndServe(listenAddr, mux))
 	}
 }
