@@ -88,6 +88,8 @@ docker ps  # routed through the proxy
 
 See [CLAUDE.md](CLAUDE.md) for build, test, lint commands and architecture details.
 
+See [API.md](API.md) for management API usage and curl examples.
+
 ## Dev Container
 
 This repository includes a VS Code Dev Container in `.devcontainer/`.
