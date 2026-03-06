@@ -10,3 +10,4 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PROXY_LISTEN=:2376
+      # - PROXY_ADMIN_TOKEN=change-me

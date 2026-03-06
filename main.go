@@ -12,6 +12,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+
+	"swarm-rbac-proxy/internal/api"
+	"swarm-rbac-proxy/internal/store"
 )
 
 func env(key, fallback string) string {
@@ -215,7 +218,44 @@ func main() {
 		log.Fatalf("invalid backend TLS config: %v", err)
 	}
 
-	handler := newProxy(b)
+	var userStore store.UserStore
+	switch env("PROXY_STORE", "sqlite") {
+	case "sqlite":
+		dbPath := env("PROXY_DATABASE_PATH", "proxy.db")
+		sq, err := store.NewSQLiteStore(context.Background(), dbPath)
+		if err != nil {
+			log.Fatalf("sqlite store: %v", err)
+		}
+		defer sq.Close()
+		userStore = sq
+		log.Printf("using sqlite store (path=%s)", dbPath)
+	case "memory":
+		userStore = store.NewMemoryStore()
+		log.Printf("using in-memory store")
+	case "postgres":
+		dbURL := os.Getenv("PROXY_DATABASE_URL")
+		if dbURL == "" {
+			log.Fatal("PROXY_DATABASE_URL is required when PROXY_STORE=postgres")
+		}
+		pg, err := store.NewPostgresStore(context.Background(), dbURL)
+		if err != nil {
+			log.Fatalf("postgres store: %v", err)
+		}
+		defer pg.Close()
+		userStore = pg
+		log.Printf("using postgres store")
+	default:
+		log.Fatalf("unknown PROXY_STORE value %q (expected sqlite, memory, or postgres)", os.Getenv("PROXY_STORE"))
+	}
+
+	adminToken := os.Getenv("PROXY_ADMIN_TOKEN")
+	if adminToken == "" {
+		log.Printf("WARNING: PROXY_ADMIN_TOKEN is not set, management API is unauthenticated")
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/users", api.RequireToken(adminToken, api.NewUserHandler(userStore)))
+	mux.Handle("/", newProxy(b))
 
 	log.Printf("proxy listening on %s → %s://%s", listenAddr, b.network, b.address)
 	if b.tlsConfig != nil {
@@ -223,8 +263,8 @@ func main() {
 	}
 	if tlsCert != "" && tlsKey != "" {
 		log.Printf("frontend TLS enabled (cert=%s key=%s)", tlsCert, tlsKey)
-		log.Fatal(http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, handler))
+		log.Fatal(http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, mux))
 	} else {
-		log.Fatal(http.ListenAndServe(listenAddr, handler))
+		log.Fatal(http.ListenAndServe(listenAddr, mux))
 	}
 }
