@@ -34,6 +34,7 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 | `PROXY_STORE` | `sqlite` | Store backend: `sqlite`, `memory`, or `postgres` |
 | `PROXY_DATABASE_PATH` | `proxy.db` | SQLite database file path (used when `PROXY_STORE=sqlite`) |
 | `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
+| `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token for management API auth. When set, `/api/v1/*` requires `Authorization: Bearer <token>` |
 
 ## Architecture
 
@@ -55,6 +56,8 @@ swarm-rbac-proxy/
       sqlite_test.go    — SQLite store unit tests (contract + WAL)
       postgres_test.go  — postgres integration tests (//go:build integration)
     api/
+      auth.go           — RequireToken middleware (bearer token validation)
+      auth_test.go      — auth middleware tests
       users.go          — UserHandler: POST/GET /api/v1/users
       users_test.go     — handler tests using MemoryStore
 ```

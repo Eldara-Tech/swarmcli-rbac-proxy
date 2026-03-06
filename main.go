@@ -248,8 +248,13 @@ func main() {
 		log.Fatalf("unknown PROXY_STORE value %q (expected sqlite, memory, or postgres)", os.Getenv("PROXY_STORE"))
 	}
 
+	adminToken := os.Getenv("PROXY_ADMIN_TOKEN")
+	if adminToken == "" {
+		log.Printf("WARNING: PROXY_ADMIN_TOKEN is not set, management API is unauthenticated")
+	}
+
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.NewUserHandler(userStore))
+	mux.Handle("/api/v1/users", api.RequireToken(adminToken, api.NewUserHandler(userStore)))
 	mux.Handle("/", newProxy(b))
 
 	log.Printf("proxy listening on %s → %s://%s", listenAddr, b.network, b.address)

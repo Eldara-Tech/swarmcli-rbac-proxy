@@ -2,6 +2,23 @@
 
 The proxy exposes a management API alongside the Docker proxy. By default the proxy listens on `:2375`.
 
+## Authentication
+
+When `PROXY_ADMIN_TOKEN` is set, all management API requests require a bearer token:
+
+```bash
+curl -s http://localhost:2375/api/v1/users \
+  -H "Authorization: Bearer <token>"
+```
+
+Missing or invalid token (`401 Unauthorized`):
+
+```json
+{"error": "unauthorized"}
+```
+
+When `PROXY_ADMIN_TOKEN` is not set, the API is open (no authentication required).
+
 ## Create a user
 
 ```bash
