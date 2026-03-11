@@ -32,7 +32,6 @@ func (s *MemoryStore) CreateUser(_ context.Context, u *User) error {
 
 	for _, existing := range s.users {
 		if existing.Username == u.Username {
-			lMemory().Warnw("duplicate username", "username", u.Username)
 			return ErrUsernameExists
 		}
 	}

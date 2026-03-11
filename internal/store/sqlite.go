@@ -70,10 +70,8 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u *User) error {
 	)
 	if err != nil {
 		if isSQLiteUniqueViolation(err) {
-			lSqlite().Warnw("duplicate username", "username", u.Username)
 			return ErrUsernameExists
 		}
-		lSqlite().Errorw("insert failed", "error", err)
 		return err
 	}
 
@@ -88,7 +86,6 @@ func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, username, enabled, created_at, updated_at FROM users ORDER BY created_at`)
 	if err != nil {
-		lSqlite().Errorw("query failed", "error", err)
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
@@ -99,7 +96,6 @@ func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 		var enabled int
 		var createdAt, updatedAt string
 		if err := rows.Scan(&u.ID, &u.Username, &enabled, &createdAt, &updatedAt); err != nil {
-			lSqlite().Errorw("scan failed", "error", err)
 			return nil, err
 		}
 		u.Enabled = enabled != 0
@@ -114,7 +110,6 @@ func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {
-		lSqlite().Errorw("rows iteration failed", "error", err)
 		return nil, err
 	}
 	return users, nil

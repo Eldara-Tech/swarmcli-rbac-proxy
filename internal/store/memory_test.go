@@ -2,9 +2,18 @@ package store
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
+
+	proxylog "swarm-rbac-proxy/internal/log"
 )
+
+func TestMain(m *testing.M) {
+	proxylog.InitTestIfTestLogEnv()
+	defer proxylog.Sync()
+	os.Exit(m.Run())
+}
 
 func TestMemoryStore_Contract(t *testing.T) {
 	testUserStoreContract(t, func() UserStore { return NewMemoryStore() })
