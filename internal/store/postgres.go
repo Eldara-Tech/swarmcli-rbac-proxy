@@ -5,9 +5,13 @@ import (
 	"errors"
 	"time"
 
+	proxylog "swarm-rbac-proxy/internal/log"
+
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func lPostgres() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.postgres") }
 
 const schema = `CREATE TABLE IF NOT EXISTS users (
     id         UUID PRIMARY KEY,
@@ -26,12 +30,15 @@ type PostgresStore struct {
 func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, error) {
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
+		lPostgres().Errorw("connect failed", "error", err)
 		return nil, err
 	}
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		pool.Close()
+		lPostgres().Errorw("schema migration failed", "error", err)
 		return nil, err
 	}
+	lPostgres().Infow("store initialized")
 	return &PostgresStore{pool: pool}, nil
 }
 
@@ -59,8 +66,10 @@ func (s *PostgresStore) CreateUser(ctx context.Context, u *User) error {
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			lPostgres().Warnw("duplicate username", "username", u.Username)
 			return ErrUsernameExists
 		}
+		lPostgres().Errorw("insert failed", "error", err)
 		return err
 	}
 
@@ -75,6 +84,7 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, username, enabled, created_at, updated_at FROM users ORDER BY created_at`)
 	if err != nil {
+		lPostgres().Errorw("query failed", "error", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -83,11 +93,13 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 	for rows.Next() {
 		var u User
 		if err := rows.Scan(&u.ID, &u.Username, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			lPostgres().Errorw("scan failed", "error", err)
 			return nil, err
 		}
 		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {
+		lPostgres().Errorw("rows iteration failed", "error", err)
 		return nil, err
 	}
 	return users, nil

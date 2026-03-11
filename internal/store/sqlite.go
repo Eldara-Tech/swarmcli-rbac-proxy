@@ -6,8 +6,12 @@ import (
 	"errors"
 	"time"
 
+	proxylog "swarm-rbac-proxy/internal/log"
+
 	_ "modernc.org/sqlite"
 )
+
+func lSqlite() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.sqlite") }
 
 const sqliteSchema = `CREATE TABLE IF NOT EXISTS users (
     id         TEXT PRIMARY KEY,
@@ -26,16 +30,20 @@ type SQLiteStore struct {
 func NewSQLiteStore(ctx context.Context, dsn string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		lSqlite().Errorw("open failed", "dsn", dsn, "error", err)
 		return nil, err
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
+		lSqlite().Errorw("WAL pragma failed", "error", err)
 		return nil, err
 	}
 	if _, err := db.ExecContext(ctx, sqliteSchema); err != nil {
 		_ = db.Close()
+		lSqlite().Errorw("schema migration failed", "error", err)
 		return nil, err
 	}
+	lSqlite().Infow("store initialized", "dsn", dsn)
 	return &SQLiteStore{db: db}, nil
 }
 
@@ -62,8 +70,10 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u *User) error {
 	)
 	if err != nil {
 		if isSQLiteUniqueViolation(err) {
+			lSqlite().Warnw("duplicate username", "username", u.Username)
 			return ErrUsernameExists
 		}
+		lSqlite().Errorw("insert failed", "error", err)
 		return err
 	}
 
@@ -78,6 +88,7 @@ func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, username, enabled, created_at, updated_at FROM users ORDER BY created_at`)
 	if err != nil {
+		lSqlite().Errorw("query failed", "error", err)
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
@@ -88,6 +99,7 @@ func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 		var enabled int
 		var createdAt, updatedAt string
 		if err := rows.Scan(&u.ID, &u.Username, &enabled, &createdAt, &updatedAt); err != nil {
+			lSqlite().Errorw("scan failed", "error", err)
 			return nil, err
 		}
 		u.Enabled = enabled != 0
@@ -102,6 +114,7 @@ func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 		users = append(users, u)
 	}
 	if err := rows.Err(); err != nil {
+		lSqlite().Errorw("rows iteration failed", "error", err)
 		return nil, err
 	}
 	return users, nil

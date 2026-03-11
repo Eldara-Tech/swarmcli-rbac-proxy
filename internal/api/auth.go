@@ -14,6 +14,7 @@ func RequireToken(token string, next http.Handler) http.Handler {
 	expected := []byte("Bearer " + token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), expected) != 1 {
+			l().Warnw("unauthorized request")
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
