@@ -1,6 +1,10 @@
-# swarm-rbac-proxy
+# swarmcli-rbac-proxy
 
 Transparent reverse proxy that relays Docker API requests from TCP to a Unix socket. Includes a management API for user CRUD, the foundation for future RBAC.
+
+## Maintaining this file
+
+Keep CLAUDE.md up to date. When adding new files, endpoints, env vars, CI jobs, or dependencies, update the relevant sections here as part of the same change.
 
 ## Build / Test / Run
 
@@ -11,7 +15,7 @@ gofmt -l .                           # check formatting
 go vet ./...                         # lint
 golangci-lint run                    # lint (superset, used by CI)
 ./swarm-rbac-proxy                   # run (needs docker.sock)
-docker build -t swarm-rbac-proxy .   # container image
+docker build -t swarmcli-rbac-proxy .   # container image
 docker stack deploy -c stack.yml rbac  # deploy to Swarm
 
 # Integration tests (requires PostgreSQL)
@@ -70,9 +74,17 @@ swarm-rbac-proxy/
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`): two jobs.
+GitHub Actions (`.github/workflows/ci.yml`): three jobs.
 - `ci`: gofmt check, `go test -race`, golangci-lint (fast, no DB).
+- `docker-build`: builds Docker image (depends on `ci`).
 - `integration`: PostgreSQL 17 service container, `go test -race -tags=integration`.
+
+## Release
+
+GitHub Actions (`.github/workflows/release.yml`): triggered on `v*` tags.
+- Builds and pushes Docker image to Docker Hub as `eldaratech/swarmcli-rbac-proxy`.
+- Tags: `{version}` and `{major}.{minor}` (via `docker/metadata-action`).
+- Requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets.
 
 ## Pre-push Checklist
 
