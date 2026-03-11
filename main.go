@@ -6,7 +6,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,6 +13,7 @@ import (
 	"os"
 
 	"swarm-rbac-proxy/internal/api"
+	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
 )
 
@@ -23,6 +23,8 @@ func env(key, fallback string) string {
 	}
 	return fallback
 }
+
+func l() *proxylog.ProxyLogger { return proxylog.L().With("component", "proxy") }
 
 // backend represents a Docker daemon endpoint (Unix socket or TCP).
 type backend struct {
@@ -132,14 +134,18 @@ func newProxy(b backend) http.Handler {
 // handleUpgrade proxies HTTP upgrade (hijack) requests used by
 // docker exec, docker attach, and raw streaming endpoints.
 func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
+	l().Debugw("upgrade request", "path", r.URL.Path, "method", r.Method)
+
 	hj, ok := w.(http.Hijacker)
 	if !ok {
+		l().Errorw("hijack not supported")
 		http.Error(w, "hijack not supported", http.StatusInternalServerError)
 		return
 	}
 
 	backConn, err := b.dial()
 	if err != nil {
+		l().Errorw("backend dial failed", "error", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -147,6 +153,7 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 
 	// Write the original request verbatim to the backend.
 	if err := r.Write(backConn); err != nil {
+		l().Errorw("backend write failed", "error", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -154,6 +161,7 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 	// Hijack the client connection and bidirectionally copy bytes.
 	clientConn, clientBuf, err := hj.Hijack()
 	if err != nil {
+		l().Errorw("client hijack failed", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -180,6 +188,9 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 }
 
 func main() {
+	proxylog.Init()
+	defer proxylog.Sync()
+
 	tlsCert := os.Getenv("PROXY_TLS_CERT")
 	tlsKey := os.Getenv("PROXY_TLS_KEY")
 
@@ -195,7 +206,7 @@ func main() {
 	var raw string
 	switch {
 	case dockerURL != "" && dockerSocket != "":
-		log.Fatal("PROXY_DOCKER_URL and PROXY_DOCKER_SOCKET are mutually exclusive, set only one")
+		l().Fatalw("mutually exclusive config", "error", "PROXY_DOCKER_URL and PROXY_DOCKER_SOCKET cannot both be set")
 	case dockerURL != "":
 		raw = dockerURL
 	case dockerSocket != "":
@@ -206,7 +217,7 @@ func main() {
 
 	b, err := parseBackend(raw)
 	if err != nil {
-		log.Fatalf("invalid docker backend: %v", err)
+		l().Fatalw("invalid docker backend", "error", err)
 	}
 
 	b.tlsConfig, err = buildBackendTLS(
@@ -215,7 +226,7 @@ func main() {
 		os.Getenv("PROXY_DOCKER_TLS_KEY"),
 	)
 	if err != nil {
-		log.Fatalf("invalid backend TLS config: %v", err)
+		l().Fatalw("invalid backend TLS config", "error", err)
 	}
 
 	var userStore store.UserStore
@@ -224,47 +235,48 @@ func main() {
 		dbPath := env("PROXY_DATABASE_PATH", "proxy.db")
 		sq, err := store.NewSQLiteStore(context.Background(), dbPath)
 		if err != nil {
-			log.Fatalf("sqlite store: %v", err)
+			l().Fatalw("sqlite store init failed", "error", err)
 		}
 		defer sq.Close()
 		userStore = sq
-		log.Printf("using sqlite store (path=%s)", dbPath)
 	case "memory":
 		userStore = store.NewMemoryStore()
-		log.Printf("using in-memory store")
 	case "postgres":
 		dbURL := os.Getenv("PROXY_DATABASE_URL")
 		if dbURL == "" {
-			log.Fatal("PROXY_DATABASE_URL is required when PROXY_STORE=postgres")
+			l().Fatalw("missing required config", "error", "PROXY_DATABASE_URL is required when PROXY_STORE=postgres")
 		}
 		pg, err := store.NewPostgresStore(context.Background(), dbURL)
 		if err != nil {
-			log.Fatalf("postgres store: %v", err)
+			l().Fatalw("postgres store init failed", "error", err)
 		}
 		defer pg.Close()
 		userStore = pg
-		log.Printf("using postgres store")
 	default:
-		log.Fatalf("unknown PROXY_STORE value %q (expected sqlite, memory, or postgres)", os.Getenv("PROXY_STORE"))
+		l().Fatalw("unknown store type", "PROXY_STORE", os.Getenv("PROXY_STORE"))
 	}
 
 	adminToken := os.Getenv("PROXY_ADMIN_TOKEN")
 	if adminToken == "" {
-		log.Printf("WARNING: PROXY_ADMIN_TOKEN is not set, management API is unauthenticated")
+		l().Warnw("PROXY_ADMIN_TOKEN not set, management API is unauthenticated")
 	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/users", api.RequireToken(adminToken, api.NewUserHandler(userStore)))
 	mux.Handle("/", newProxy(b))
 
-	log.Printf("proxy listening on %s → %s://%s", listenAddr, b.network, b.address)
+	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)
 	if b.tlsConfig != nil {
-		log.Printf("backend TLS enabled")
+		l().Infow("backend TLS enabled")
 	}
 	if tlsCert != "" && tlsKey != "" {
-		log.Printf("frontend TLS enabled (cert=%s key=%s)", tlsCert, tlsKey)
-		log.Fatal(http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, mux))
+		l().Infow("frontend TLS enabled", "cert", tlsCert, "key", tlsKey)
+		if err := http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, mux); err != nil {
+			l().Fatalw("server exited", "error", err)
+		}
 	} else {
-		log.Fatal(http.ListenAndServe(listenAddr, mux))
+		if err := http.ListenAndServe(listenAddr, mux); err != nil {
+			l().Fatalw("server exited", "error", err)
+		}
 	}
 }

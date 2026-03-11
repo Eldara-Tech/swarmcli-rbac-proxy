@@ -6,8 +6,12 @@ import (
 	"errors"
 	"time"
 
+	proxylog "swarm-rbac-proxy/internal/log"
+
 	_ "modernc.org/sqlite"
 )
+
+func lSqlite() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.sqlite") }
 
 const sqliteSchema = `CREATE TABLE IF NOT EXISTS users (
     id         TEXT PRIMARY KEY,
@@ -26,16 +30,20 @@ type SQLiteStore struct {
 func NewSQLiteStore(ctx context.Context, dsn string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		lSqlite().Errorw("open failed", "dsn", dsn, "error", err)
 		return nil, err
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
+		lSqlite().Errorw("WAL pragma failed", "error", err)
 		return nil, err
 	}
 	if _, err := db.ExecContext(ctx, sqliteSchema); err != nil {
 		_ = db.Close()
+		lSqlite().Errorw("schema migration failed", "error", err)
 		return nil, err
 	}
+	lSqlite().Infow("store initialized", "dsn", dsn)
 	return &SQLiteStore{db: db}, nil
 }
 

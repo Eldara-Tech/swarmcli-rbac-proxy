@@ -4,11 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
+	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
 )
+
+func TestMain(m *testing.M) {
+	proxylog.InitTestIfTestLogEnv()
+	defer proxylog.Sync()
+	os.Exit(m.Run())
+}
 
 func newTestHandler() *UserHandler {
 	return NewUserHandler(store.NewMemoryStore())

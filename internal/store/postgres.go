@@ -5,9 +5,13 @@ import (
 	"errors"
 	"time"
 
+	proxylog "swarm-rbac-proxy/internal/log"
+
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func lPostgres() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.postgres") }
 
 const schema = `CREATE TABLE IF NOT EXISTS users (
     id         UUID PRIMARY KEY,
@@ -26,12 +30,15 @@ type PostgresStore struct {
 func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, error) {
 	pool, err := pgxpool.New(ctx, connString)
 	if err != nil {
+		lPostgres().Errorw("connect failed", "error", err)
 		return nil, err
 	}
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		pool.Close()
+		lPostgres().Errorw("schema migration failed", "error", err)
 		return nil, err
 	}
+	lPostgres().Infow("store initialized")
 	return &PostgresStore{pool: pool}, nil
 }
 

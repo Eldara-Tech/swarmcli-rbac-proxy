@@ -39,6 +39,8 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 | `PROXY_DATABASE_PATH` | `proxy.db` | SQLite database file path (used when `PROXY_STORE=sqlite`) |
 | `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
 | `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token for management API auth. When set, `/api/v1/*` requires `Authorization: Bearer <token>` |
+| `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder) |
+| `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error` |
 
 ## Architecture
 
@@ -50,6 +52,9 @@ swarm-rbac-proxy/
   Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
   stack.yml             — Docker Swarm stack definition
   internal/
+    log/
+      logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
+      logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
       store.go          — UserStore interface, User type, sentinel errors, UUID helper
       memory.go         — in-memory UserStore (dev/testing)
@@ -97,3 +102,4 @@ go build . && go test -race ./... && gofmt -l . && go vet ./... && golangci-lint
 
 - `modernc.org/sqlite` — Pure Go SQLite driver (used by `internal/store/sqlite.go`)
 - `github.com/jackc/pgx/v5` — PostgreSQL driver (used only by `internal/store/postgres.go`)
+- `go.uber.org/zap` — Structured logging (used by `internal/log/logger.go`)

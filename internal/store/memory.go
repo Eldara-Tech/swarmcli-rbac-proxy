@@ -4,7 +4,11 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	proxylog "swarm-rbac-proxy/internal/log"
 )
+
+func lMemory() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.memory") }
 
 // MemoryStore is an in-memory UserStore for development and testing.
 type MemoryStore struct {
@@ -14,6 +18,7 @@ type MemoryStore struct {
 
 // NewMemoryStore creates a new in-memory store.
 func NewMemoryStore() *MemoryStore {
+	lMemory().Infow("store initialized")
 	return &MemoryStore{users: make(map[string]User)}
 }
 
