@@ -239,10 +239,8 @@ func main() {
 		}
 		defer sq.Close()
 		userStore = sq
-		l().Infow("store initialized", "type", "sqlite", "path", dbPath)
 	case "memory":
 		userStore = store.NewMemoryStore()
-		l().Infow("store initialized", "type", "memory")
 	case "postgres":
 		dbURL := os.Getenv("PROXY_DATABASE_URL")
 		if dbURL == "" {
@@ -254,7 +252,6 @@ func main() {
 		}
 		defer pg.Close()
 		userStore = pg
-		l().Infow("store initialized", "type", "postgres")
 	default:
 		l().Fatalw("unknown store type", "PROXY_STORE", os.Getenv("PROXY_STORE"))
 	}

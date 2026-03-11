@@ -118,6 +118,8 @@ func detectLogLevel() zapcore.Level {
 	switch strings.ToLower(os.Getenv("PROXY_LOG_LEVEL")) {
 	case "debug":
 		return zap.DebugLevel
+	case "info":
+		return zap.InfoLevel
 	case "warn", "warning":
 		return zap.WarnLevel
 	case "error":

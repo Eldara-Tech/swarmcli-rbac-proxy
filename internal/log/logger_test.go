@@ -48,6 +48,14 @@ func TestDetectLogLevel_Error(t *testing.T) {
 	}
 }
 
+func TestDetectLogLevel_Info(t *testing.T) {
+	t.Setenv("PROXY_LOG_LEVEL", "info")
+	t.Setenv("PROXY_ENV", "dev")
+	if got := detectLogLevel(); got != zap.InfoLevel {
+		t.Errorf("detectLogLevel() = %v, want %v", got, zap.InfoLevel)
+	}
+}
+
 func TestDetectLogLevel_DefaultDev(t *testing.T) {
 	t.Setenv("PROXY_LOG_LEVEL", "")
 	t.Setenv("PROXY_ENV", "dev")
