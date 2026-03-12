@@ -27,6 +27,7 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 | Variable | Default | Description |
 |---|---|---|
+| `PROXY_CONFIG` | _(none)_ | Path to a `config.json` file. When set, values are loaded from the file first, then overridden by any env vars that are set |
 | `PROXY_LISTEN` | `:2375` (`:2376` with frontend TLS) | TCP listen address |
 | `PROXY_DOCKER_URL` | _(none)_ | Docker endpoint URL (`unix:///path` or `tcp://host:port`). Mutually exclusive with `PROXY_DOCKER_SOCKET` |
 | `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket (legacy; prefer `PROXY_DOCKER_URL`) |
@@ -52,6 +53,9 @@ swarm-rbac-proxy/
   Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
   stack.yml             — Docker Swarm stack definition
   internal/
+    config/
+      config.go         — Config struct, Load(path) merges JSON file + env vars + defaults
+      config_test.go    — config loading unit tests
     log/
       logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)

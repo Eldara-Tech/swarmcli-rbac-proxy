@@ -13,16 +13,10 @@ import (
 	"os"
 
 	"swarm-rbac-proxy/internal/api"
+	"swarm-rbac-proxy/internal/config"
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
 )
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
 
 func l() *proxylog.ProxyLogger { return proxylog.L().With("component", "proxy") }
 
@@ -188,29 +182,32 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 }
 
 func main() {
-	proxylog.Init()
+	cfg, err := config.Load(os.Getenv("PROXY_CONFIG"))
+	if err != nil {
+		// Logger not ready yet; fall back to stderr.
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+
+	proxylog.Init(cfg.Env, cfg.LogLevel)
 	defer proxylog.Sync()
 
-	tlsCert := os.Getenv("PROXY_TLS_CERT")
-	tlsKey := os.Getenv("PROXY_TLS_KEY")
-
-	defaultPort := ":2375"
-	if tlsCert != "" && tlsKey != "" {
-		defaultPort = ":2376"
+	listenAddr := cfg.Listen
+	if listenAddr == "" {
+		listenAddr = ":2375"
+		if cfg.TLSCert != "" && cfg.TLSKey != "" {
+			listenAddr = ":2376"
+		}
 	}
-	listenAddr := env("PROXY_LISTEN", defaultPort)
-
-	dockerURL := os.Getenv("PROXY_DOCKER_URL")
-	dockerSocket := os.Getenv("PROXY_DOCKER_SOCKET")
 
 	var raw string
 	switch {
-	case dockerURL != "" && dockerSocket != "":
-		l().Fatalw("mutually exclusive config", "error", "PROXY_DOCKER_URL and PROXY_DOCKER_SOCKET cannot both be set")
-	case dockerURL != "":
-		raw = dockerURL
-	case dockerSocket != "":
-		raw = "unix://" + dockerSocket
+	case cfg.DockerURL != "" && cfg.DockerSocket != "":
+		l().Fatalw("mutually exclusive config", "error", "docker_url and docker_socket cannot both be set")
+	case cfg.DockerURL != "":
+		raw = cfg.DockerURL
+	case cfg.DockerSocket != "":
+		raw = "unix://" + cfg.DockerSocket
 	default:
 		raw = "unix:///var/run/docker.sock"
 	}
@@ -220,20 +217,15 @@ func main() {
 		l().Fatalw("invalid docker backend", "error", err)
 	}
 
-	b.tlsConfig, err = buildBackendTLS(
-		os.Getenv("PROXY_DOCKER_TLS_CA"),
-		os.Getenv("PROXY_DOCKER_TLS_CERT"),
-		os.Getenv("PROXY_DOCKER_TLS_KEY"),
-	)
+	b.tlsConfig, err = buildBackendTLS(cfg.DockerTLSCA, cfg.DockerTLSCert, cfg.DockerTLSKey)
 	if err != nil {
 		l().Fatalw("invalid backend TLS config", "error", err)
 	}
 
 	var userStore store.UserStore
-	switch env("PROXY_STORE", "sqlite") {
+	switch cfg.Store {
 	case "sqlite":
-		dbPath := env("PROXY_DATABASE_PATH", "proxy.db")
-		sq, err := store.NewSQLiteStore(context.Background(), dbPath)
+		sq, err := store.NewSQLiteStore(context.Background(), cfg.DatabasePath)
 		if err != nil {
 			l().Fatalw("sqlite store init failed", "error", err)
 		}
@@ -242,36 +234,34 @@ func main() {
 	case "memory":
 		userStore = store.NewMemoryStore()
 	case "postgres":
-		dbURL := os.Getenv("PROXY_DATABASE_URL")
-		if dbURL == "" {
-			l().Fatalw("missing required config", "error", "PROXY_DATABASE_URL is required when PROXY_STORE=postgres")
+		if cfg.DatabaseURL == "" {
+			l().Fatalw("missing required config", "error", "database_url is required when store=postgres")
 		}
-		pg, err := store.NewPostgresStore(context.Background(), dbURL)
+		pg, err := store.NewPostgresStore(context.Background(), cfg.DatabaseURL)
 		if err != nil {
 			l().Fatalw("postgres store init failed", "error", err)
 		}
 		defer pg.Close()
 		userStore = pg
 	default:
-		l().Fatalw("unknown store type", "PROXY_STORE", os.Getenv("PROXY_STORE"))
+		l().Fatalw("unknown store type", "store", cfg.Store)
 	}
 
-	adminToken := os.Getenv("PROXY_ADMIN_TOKEN")
-	if adminToken == "" {
-		l().Warnw("PROXY_ADMIN_TOKEN not set, management API is unauthenticated")
+	if cfg.AdminToken == "" {
+		l().Warnw("admin_token not set, management API is unauthenticated")
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken(adminToken, api.NewUserHandler(userStore)))
+	mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, api.NewUserHandler(userStore)))
 	mux.Handle("/", newProxy(b))
 
 	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)
 	if b.tlsConfig != nil {
 		l().Infow("backend TLS enabled")
 	}
-	if tlsCert != "" && tlsKey != "" {
-		l().Infow("frontend TLS enabled", "cert", tlsCert, "key", tlsKey)
-		if err := http.ListenAndServeTLS(listenAddr, tlsCert, tlsKey, mux); err != nil {
+	if cfg.TLSCert != "" && cfg.TLSKey != "" {
+		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)
+		if err := http.ListenAndServeTLS(listenAddr, cfg.TLSCert, cfg.TLSKey, mux); err != nil {
 			l().Fatalw("server exited", "error", err)
 		}
 	} else {
