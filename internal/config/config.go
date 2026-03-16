@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -55,7 +56,9 @@ func Load(path string) (Config, error) {
 		if err != nil {
 			return cfg, fmt.Errorf("read config file: %w", err)
 		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
 			return cfg, fmt.Errorf("parse config file: %w", err)
 		}
 	}

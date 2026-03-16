@@ -24,6 +24,62 @@ func TestLoad_JSONOnly(t *testing.T) {
 	}
 }
 
+func TestLoad_JSONAllFields(t *testing.T) {
+	f := writeJSON(t, `{
+		"listen":          ":9999",
+		"docker_url":      "tcp://remote:2375",
+		"docker_socket":   "/tmp/docker.sock",
+		"tls_cert":        "/cert.pem",
+		"tls_key":         "/key.pem",
+		"docker_tls_ca":   "/ca.pem",
+		"docker_tls_cert": "/dcert.pem",
+		"docker_tls_key":  "/dkey.pem",
+		"store":           "memory",
+		"database_path":   "/data/proxy.db",
+		"database_url":    "postgres://localhost/db",
+		"admin_token":     "secret",
+		"env":             "dev",
+		"log_level":       "debug"
+	}`)
+
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []struct {
+		name, got, want string
+	}{
+		{"Listen", cfg.Listen, ":9999"},
+		{"DockerURL", cfg.DockerURL, "tcp://remote:2375"},
+		{"DockerSocket", cfg.DockerSocket, "/tmp/docker.sock"},
+		{"TLSCert", cfg.TLSCert, "/cert.pem"},
+		{"TLSKey", cfg.TLSKey, "/key.pem"},
+		{"DockerTLSCA", cfg.DockerTLSCA, "/ca.pem"},
+		{"DockerTLSCert", cfg.DockerTLSCert, "/dcert.pem"},
+		{"DockerTLSKey", cfg.DockerTLSKey, "/dkey.pem"},
+		{"Store", cfg.Store, "memory"},
+		{"DatabasePath", cfg.DatabasePath, "/data/proxy.db"},
+		{"DatabaseURL", cfg.DatabaseURL, "postgres://localhost/db"},
+		{"AdminToken", cfg.AdminToken, "secret"},
+		{"Env", cfg.Env, "dev"},
+		{"LogLevel", cfg.LogLevel, "debug"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestLoad_UnknownJSONKey(t *testing.T) {
+	f := writeJSON(t, `{"listen":":9999","UnknownField":"value"}`)
+
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("expected error for unknown JSON key")
+	}
+}
+
 func TestLoad_EnvOverridesJSON(t *testing.T) {
 	f := writeJSON(t, `{"listen":":9999","store":"memory"}`)
 	t.Setenv("PROXY_LISTEN", ":8888")

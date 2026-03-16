@@ -43,6 +43,22 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 | `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder) |
 | `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error` |
 
+### Config JSON field names
+
+When using `PROXY_CONFIG`, JSON keys must use snake_case (matching the `json` struct tags). Unknown keys are rejected at startup. Example:
+
+```json
+{
+  "listen": ":9999",
+  "docker_url": "tcp://remote:2375",
+  "docker_tls_ca": "/path/to/ca.crt",
+  "docker_tls_cert": "/path/to/client.crt",
+  "docker_tls_key": "/path/to/client.key",
+  "store": "memory",
+  "admin_token": "secret"
+}
+```
+
 ## Architecture
 
 ```
