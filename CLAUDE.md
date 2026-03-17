@@ -23,41 +23,9 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
   go test -race -tags=integration ./...
 ```
 
-## Environment Variables
+## Configuration
 
-| Variable | Default | Description |
-|---|---|---|
-| `PROXY_CONFIG` | _(none)_ | Path to a `config.json` file. When set, values are loaded from the file first, then overridden by any env vars that are set |
-| `PROXY_LISTEN` | `:2375` (`:2376` with frontend TLS) | TCP listen address |
-| `PROXY_DOCKER_URL` | _(none)_ | Docker endpoint URL (`unix:///path` or `tcp://host:port`). Mutually exclusive with `PROXY_DOCKER_SOCKET` |
-| `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket (legacy; prefer `PROXY_DOCKER_URL`) |
-| `PROXY_TLS_CERT` | _(none)_ | Frontend TLS certificate path |
-| `PROXY_TLS_KEY` | _(none)_ | Frontend TLS key path |
-| `PROXY_DOCKER_TLS_CA` | _(none)_ | CA cert to verify remote Docker server |
-| `PROXY_DOCKER_TLS_CERT` | _(none)_ | Client cert for backend mTLS |
-| `PROXY_DOCKER_TLS_KEY` | _(none)_ | Client key for backend mTLS |
-| `PROXY_STORE` | `sqlite` | Store backend: `sqlite`, `memory`, or `postgres` |
-| `PROXY_DATABASE_PATH` | `proxy.db` | SQLite database file path (used when `PROXY_STORE=sqlite`) |
-| `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
-| `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token for management API auth. When set, `/api/v1/*` requires `Authorization: Bearer <token>` |
-| `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder) |
-| `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error` |
-
-### Config JSON field names
-
-When using `PROXY_CONFIG`, JSON keys must use snake_case (matching the `json` struct tags). Unknown keys are rejected at startup. Example:
-
-```json
-{
-  "listen": ":9999",
-  "docker_url": "tcp://remote:2375",
-  "docker_tls_ca": "/path/to/ca.crt",
-  "docker_tls_cert": "/path/to/client.crt",
-  "docker_tls_key": "/path/to/client.key",
-  "store": "memory",
-  "admin_token": "secret"
-}
-```
+See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
 ## Architecture
 
