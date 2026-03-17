@@ -6,69 +6,57 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestDetectMode_Dev(t *testing.T) {
-	t.Setenv("PROXY_ENV", "dev")
-	if got := detectMode(); got != "dev" {
-		t.Errorf("detectMode() = %q, want %q", got, "dev")
+func TestParseMode_Dev(t *testing.T) {
+	if got := parseMode("dev"); got != "dev" {
+		t.Errorf("parseMode(\"dev\") = %q, want %q", got, "dev")
 	}
 }
 
-func TestDetectMode_Development(t *testing.T) {
-	t.Setenv("PROXY_ENV", "development")
-	if got := detectMode(); got != "dev" {
-		t.Errorf("detectMode() = %q, want %q", got, "dev")
+func TestParseMode_Development(t *testing.T) {
+	if got := parseMode("development"); got != "dev" {
+		t.Errorf("parseMode(\"development\") = %q, want %q", got, "dev")
 	}
 }
 
-func TestDetectMode_Prod(t *testing.T) {
-	t.Setenv("PROXY_ENV", "prod")
-	if got := detectMode(); got != "prod" {
-		t.Errorf("detectMode() = %q, want %q", got, "prod")
+func TestParseMode_Prod(t *testing.T) {
+	if got := parseMode("prod"); got != "prod" {
+		t.Errorf("parseMode(\"prod\") = %q, want %q", got, "prod")
 	}
 }
 
-func TestDetectMode_Empty(t *testing.T) {
-	t.Setenv("PROXY_ENV", "")
-	if got := detectMode(); got != "prod" {
-		t.Errorf("detectMode() = %q, want %q", got, "prod")
+func TestParseMode_Empty(t *testing.T) {
+	if got := parseMode(""); got != "prod" {
+		t.Errorf("parseMode(\"\") = %q, want %q", got, "prod")
 	}
 }
 
-func TestDetectLogLevel_Debug(t *testing.T) {
-	t.Setenv("PROXY_LOG_LEVEL", "debug")
-	if got := detectLogLevel(); got != zap.DebugLevel {
-		t.Errorf("detectLogLevel() = %v, want %v", got, zap.DebugLevel)
+func TestParseLogLevel_Debug(t *testing.T) {
+	if got := parseLogLevel("debug", "prod"); got != zap.DebugLevel {
+		t.Errorf("parseLogLevel(\"debug\", \"prod\") = %v, want %v", got, zap.DebugLevel)
 	}
 }
 
-func TestDetectLogLevel_Error(t *testing.T) {
-	t.Setenv("PROXY_LOG_LEVEL", "error")
-	if got := detectLogLevel(); got != zap.ErrorLevel {
-		t.Errorf("detectLogLevel() = %v, want %v", got, zap.ErrorLevel)
+func TestParseLogLevel_Error(t *testing.T) {
+	if got := parseLogLevel("error", "prod"); got != zap.ErrorLevel {
+		t.Errorf("parseLogLevel(\"error\", \"prod\") = %v, want %v", got, zap.ErrorLevel)
 	}
 }
 
-func TestDetectLogLevel_Info(t *testing.T) {
-	t.Setenv("PROXY_LOG_LEVEL", "info")
-	t.Setenv("PROXY_ENV", "dev")
-	if got := detectLogLevel(); got != zap.InfoLevel {
-		t.Errorf("detectLogLevel() = %v, want %v", got, zap.InfoLevel)
+func TestParseLogLevel_Info(t *testing.T) {
+	if got := parseLogLevel("info", "dev"); got != zap.InfoLevel {
+		t.Errorf("parseLogLevel(\"info\", \"dev\") = %v, want %v", got, zap.InfoLevel)
 	}
 }
 
-func TestDetectLogLevel_DefaultDev(t *testing.T) {
-	t.Setenv("PROXY_LOG_LEVEL", "")
-	t.Setenv("PROXY_ENV", "dev")
-	if got := detectLogLevel(); got != zap.DebugLevel {
-		t.Errorf("detectLogLevel() = %v, want %v", got, zap.DebugLevel)
+func TestParseLogLevel_DefaultDev(t *testing.T) {
+	if got := parseLogLevel("", "dev"); got != zap.DebugLevel {
+		t.Errorf("parseLogLevel(\"\", \"dev\") = %v, want %v", got, zap.DebugLevel)
 	}
 }
 
-func TestDetectLogLevel_DefaultProd(t *testing.T) {
-	t.Setenv("PROXY_LOG_LEVEL", "")
-	t.Setenv("PROXY_ENV", "prod")
-	if got := detectLogLevel(); got != zap.InfoLevel {
-		t.Errorf("detectLogLevel() = %v, want %v", got, zap.InfoLevel)
+func TestParseLogLevel_DefaultProd(t *testing.T) {
+	if got := parseLogLevel("", "prod"); got != zap.InfoLevel {
+		t.Errorf("parseLogLevel(\"\", \"prod\") = %v, want %v", got, zap.InfoLevel)
 	}
 }
 

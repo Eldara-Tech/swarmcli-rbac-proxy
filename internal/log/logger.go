@@ -40,19 +40,16 @@ func L() *ProxyLogger {
 
 // Init initializes the global logger.
 //
-// It reads PROXY_ENV to select the encoder:
-//   - PROXY_ENV=dev → human-readable console output on stdout
-//   - PROXY_ENV=prod (default) → JSON output on stdout
-//
-// Log level is controlled via PROXY_LOG_LEVEL (debug, info, warn, error).
-// Defaults to debug in dev mode and info in prod mode.
-func Init() {
+// mode selects the encoder: "dev" → console, anything else → JSON.
+// level selects the minimum log level: "debug", "info", "warn", "error".
+// Empty strings use defaults (prod mode, info level — or debug in dev mode).
+func Init(mode, level string) {
 	if raw != nil {
 		_ = raw.Sync()
 	}
 
-	mode := detectMode()
-	atomicLevel = zap.NewAtomicLevelAt(detectLogLevel())
+	mode = parseMode(mode)
+	atomicLevel = zap.NewAtomicLevelAt(parseLogLevel(level, mode))
 
 	writer := zapcore.AddSync(os.Stdout)
 
@@ -102,10 +99,9 @@ func SetLevel(level zapcore.Level) {
 	}
 }
 
-// detectMode determines dev or prod mode from PROXY_ENV.
-func detectMode() string {
-	env := strings.ToLower(os.Getenv("PROXY_ENV"))
-	switch env {
+// parseMode normalizes a mode string to "dev" or "prod".
+func parseMode(s string) string {
+	switch strings.ToLower(s) {
 	case "dev", "development":
 		return "dev"
 	default:
@@ -113,9 +109,10 @@ func detectMode() string {
 	}
 }
 
-// detectLogLevel picks the initial log level from PROXY_LOG_LEVEL.
-func detectLogLevel() zapcore.Level {
-	switch strings.ToLower(os.Getenv("PROXY_LOG_LEVEL")) {
+// parseLogLevel converts a level string to a zapcore.Level.
+// Falls back to debug in dev mode and info in prod mode.
+func parseLogLevel(level, mode string) zapcore.Level {
+	switch strings.ToLower(level) {
 	case "debug":
 		return zap.DebugLevel
 	case "info":
@@ -125,7 +122,7 @@ func detectLogLevel() zapcore.Level {
 	case "error":
 		return zap.ErrorLevel
 	default:
-		if detectMode() == "dev" {
+		if mode == "dev" {
 			return zap.DebugLevel
 		}
 		return zap.InfoLevel
