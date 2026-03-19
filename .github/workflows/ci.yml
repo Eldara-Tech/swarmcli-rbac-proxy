@@ -18,6 +18,11 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 
+      - name: Check go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code || (echo "Run go mod tidy locally" && exit 1)
+
       - name: Test
         run: go test -race ./...
 
