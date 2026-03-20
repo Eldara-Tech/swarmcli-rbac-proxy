@@ -23,6 +23,7 @@ type Config struct {
 	AdminToken    string `json:"admin_token"`
 	Env           string `json:"env"`
 	LogLevel      string `json:"log_level"`
+	AgentProxyURL string `json:"agent_proxy_url"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -44,6 +45,7 @@ var envOverrides = []struct {
 	{"PROXY_ADMIN_TOKEN", func(c *Config) *string { return &c.AdminToken }},
 	{"PROXY_ENV", func(c *Config) *string { return &c.Env }},
 	{"PROXY_LOG_LEVEL", func(c *Config) *string { return &c.LogLevel }},
+	{"PROXY_AGENT_URL", func(c *Config) *string { return &c.AgentProxyURL }},
 }
 
 // Load reads configuration from an optional JSON file, then applies

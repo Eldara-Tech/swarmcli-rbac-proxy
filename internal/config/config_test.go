@@ -39,7 +39,8 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		"database_url":    "postgres://localhost/db",
 		"admin_token":     "secret",
 		"env":             "dev",
-		"log_level":       "debug"
+		"log_level":       "debug",
+		"agent_proxy_url": "tcp://agent:9090"
 	}`)
 
 	cfg, err := Load(f)
@@ -63,6 +64,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		{"AdminToken", cfg.AdminToken, "secret"},
 		{"Env", cfg.Env, "dev"},
 		{"LogLevel", cfg.LogLevel, "debug"},
+		{"AgentProxyURL", cfg.AgentProxyURL, "tcp://agent:9090"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -158,6 +160,7 @@ func TestLoad_AllEnvVars(t *testing.T) {
 		"PROXY_ADMIN_TOKEN":     "tok",
 		"PROXY_ENV":             "dev",
 		"PROXY_LOG_LEVEL":       "debug",
+		"PROXY_AGENT_URL":       "tcp://agent:9090",
 	}
 	for k, v := range envs {
 		t.Setenv(k, v)
@@ -208,6 +211,9 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q", cfg.LogLevel)
+	}
+	if cfg.AgentProxyURL != "tcp://agent:9090" {
+		t.Errorf("AgentProxyURL = %q", cfg.AgentProxyURL)
 	}
 }
 

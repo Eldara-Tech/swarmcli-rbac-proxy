@@ -27,11 +27,15 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
+## Agent Proxy Forwarding
+
+When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-host:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
+
 ## Architecture
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + mux routing (/api/v1/ → handlers, / → Docker proxy)
+  main.go               — reverse proxy + mux routing (/api/v1/ → handlers, /v1/ → agent proxy, / → Docker proxy)
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS)
   Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
@@ -63,6 +67,7 @@ swarm-rbac-proxy/
 
 - `POST /api/v1/users` — Create user (`{"username":"alice"}` → 201 with user object)
 - `GET /api/v1/users` — List all users (200, always returns array)
+- `/v1/*` — Forwarded to agent proxy (when `PROXY_AGENT_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
 
 ## CI
