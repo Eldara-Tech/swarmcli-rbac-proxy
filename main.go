@@ -253,6 +253,16 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, api.NewUserHandler(userStore)))
+
+	if cfg.AgentProxyURL != "" {
+		agentBE, err := parseBackend(cfg.AgentProxyURL)
+		if err != nil {
+			l().Fatalw("parse agent proxy URL", "error", err)
+		}
+		mux.Handle("/v1/", newProxy(agentBE))
+		l().Infow("agent proxy forwarding enabled", "url", cfg.AgentProxyURL)
+	}
+
 	mux.Handle("/", newProxy(b))
 
 	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)

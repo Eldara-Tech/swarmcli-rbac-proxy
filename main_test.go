@@ -228,6 +228,92 @@ func TestProxy_UpgradeConnection(t *testing.T) {
 	}
 }
 
+func TestProxy_AgentUpgradeForwarding(t *testing.T) {
+	// Mock TCP server acting as the agent proxy backend.
+	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agentLn.Close()
+
+	go func() {
+		conn, err := agentLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Read the forwarded HTTP request.
+		reader := bufio.NewReader(conn)
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		_ = req
+
+		// Send a 101 Switching Protocols response.
+		fmt.Fprint(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+
+		// Echo: read one line, write it back.
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		fmt.Fprint(conn, "agent:"+line)
+	}()
+
+	agentBE := backend{network: "tcp", address: agentLn.Addr().String()}
+
+	// Build a mux with the agent route on /v1/.
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", newProxy(agentBE))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	// Connect to the test proxy with a raw TCP connection.
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Send an upgrade request to /v1/exec.
+	rawReq := "POST /v1/exec HTTP/1.1\r\n" +
+		"Host: test\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Upgrade: websocket\r\n" +
+		"\r\n"
+	fmt.Fprint(conn, rawReq)
+
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("expected 101, got: %s", statusLine)
+	}
+
+	// Consume remaining headers.
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil || line == "\r\n" {
+			break
+		}
+	}
+
+	// Send data through the upgraded connection.
+	fmt.Fprint(conn, "hello\n")
+	reply, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "agent:hello\n" {
+		t.Errorf("reply = %q, want %q", reply, "agent:hello\n")
+	}
+}
+
 func TestParseBackend(t *testing.T) {
 	tests := []struct {
 		input       string
