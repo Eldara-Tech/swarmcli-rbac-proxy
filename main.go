@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"time"
 
 	"swarm-rbac-proxy/internal/api"
 	"swarm-rbac-proxy/internal/config"
@@ -96,9 +97,19 @@ func parseBackend(raw string) (backend, error) {
 // newProxy builds the reverse-proxy handler for the given Docker backend.
 func newProxy(b backend) http.Handler {
 	transport := &http.Transport{
-		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-			return b.dial()
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			conn, err := b.dial()
+			if err != nil {
+				return nil, err
+			}
+			if tc, ok := conn.(*net.TCPConn); ok {
+				_ = tc.SetKeepAlive(true)
+				_ = tc.SetKeepAlivePeriod(30 * time.Second)
+			}
+			return conn, nil
 		},
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
 	}
 
 	target := &url.URL{Scheme: "http", Host: "docker"}
