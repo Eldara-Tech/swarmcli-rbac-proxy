@@ -8,10 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"time"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"time"
 
 	"swarm-rbac-proxy/internal/api"
 	"swarm-rbac-proxy/internal/config"
