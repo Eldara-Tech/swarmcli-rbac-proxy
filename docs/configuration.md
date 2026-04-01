@@ -18,6 +18,7 @@ PROXY_CONFIG=/etc/swarm-rbac-proxy/config.json ./swarm-rbac-proxy
 | `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket (legacy; prefer `PROXY_DOCKER_URL`) |
 | `PROXY_TLS_CERT` | _(none)_ | Frontend TLS certificate path |
 | `PROXY_TLS_KEY` | _(none)_ | Frontend TLS key path |
+| `PROXY_TLS_CLIENT_CA` | _(none)_ | CA certificate to verify client certificates. When set (along with `PROXY_TLS_CERT` and `PROXY_TLS_KEY`), enables frontend mTLS: clients must present a certificate signed by this CA. The proxy extracts the username from the certificate (SAN email if present, otherwise Subject CN) and looks it up in the user store |
 | `PROXY_DOCKER_TLS_CA` | _(none)_ | CA cert to verify remote Docker server |
 | `PROXY_DOCKER_TLS_CERT` | _(none)_ | Client cert for backend mTLS |
 | `PROXY_DOCKER_TLS_KEY` | _(none)_ | Client key for backend mTLS |
@@ -39,6 +40,7 @@ JSON keys must use snake_case (matching the Go struct tags). Unknown keys are re
   "docker_socket":   "/var/run/docker.sock",
   "tls_cert":        "/path/to/server-cert.pem",
   "tls_key":         "/path/to/server-key.pem",
+  "tls_client_ca":   "/path/to/client-ca.pem",
   "docker_tls_ca":   "/path/to/ca.pem",
   "docker_tls_cert": "/path/to/client-cert.pem",
   "docker_tls_key":  "/path/to/client-key.pem",
@@ -83,6 +85,36 @@ Set both `PROXY_TLS_CERT` and `PROXY_TLS_KEY` to serve TLS to clients (default p
 
 ```bash
 PROXY_TLS_CERT=/path/to/cert.pem PROXY_TLS_KEY=/path/to/key.pem ./swarm-rbac-proxy
+```
+
+### Frontend mTLS (multi-user Docker CLI access)
+
+Enable client certificate authentication by setting `PROXY_TLS_CLIENT_CA` alongside the server TLS cert/key. Each Docker CLI user connects with their own client certificate:
+
+```bash
+PROXY_TLS_CERT=/path/to/server-cert.pem \
+  PROXY_TLS_KEY=/path/to/server-key.pem \
+  PROXY_TLS_CLIENT_CA=/path/to/client-ca.pem \
+  PROXY_ADMIN_TOKEN=my-secret-token \
+  ./swarm-rbac-proxy
+```
+
+Users must be registered in the store first (username must match the certificate's Subject CN or SAN email):
+
+```bash
+curl -s -X POST http://localhost:2375/api/v1/users \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer my-secret-token" \
+  -d '{"username":"alice"}'
+```
+
+Each user creates a Docker context with their client certificate:
+
+```bash
+docker context create rbac-proxy \
+  --docker "host=tcp://proxy.example.com:2376,ca=ca.pem,cert=alice.pem,key=alice-key.pem"
+
+docker --context rbac-proxy ps
 ```
 
 ### Data store

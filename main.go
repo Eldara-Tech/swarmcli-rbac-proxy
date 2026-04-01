@@ -265,16 +265,25 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, api.NewUserHandler(userStore)))
 
+	var proxyAuth func(http.Handler) http.Handler
+	if cfg.TLSClientCA != "" {
+		proxyAuth = func(next http.Handler) http.Handler {
+			return api.RequireClientCert(userStore, next)
+		}
+	} else {
+		proxyAuth = func(next http.Handler) http.Handler { return next }
+	}
+
 	if cfg.AgentProxyURL != "" {
 		agentBE, err := parseBackend(cfg.AgentProxyURL)
 		if err != nil {
 			l().Fatalw("parse agent proxy URL", "error", err)
 		}
-		mux.Handle("/v1/", newProxy(agentBE))
+		mux.Handle("/v1/", proxyAuth(newProxy(agentBE)))
 		l().Infow("agent proxy forwarding enabled", "url", cfg.AgentProxyURL)
 	}
 
-	mux.Handle("/", newProxy(b))
+	mux.Handle("/", proxyAuth(newProxy(b)))
 
 	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)
 	if b.tlsConfig != nil {
@@ -282,10 +291,34 @@ func main() {
 	}
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)
-		if err := http.ListenAndServeTLS(listenAddr, cfg.TLSCert, cfg.TLSKey, mux); err != nil {
+
+		tlsCfg := &tls.Config{}
+		if cfg.TLSClientCA != "" {
+			caPEM, err := os.ReadFile(cfg.TLSClientCA)
+			if err != nil {
+				l().Fatalw("read client CA", "error", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(caPEM) {
+				l().Fatalw("no valid certs in client CA file", "path", cfg.TLSClientCA)
+			}
+			tlsCfg.ClientCAs = pool
+			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+			l().Infow("frontend mTLS enabled", "client_ca", cfg.TLSClientCA)
+		}
+
+		srv := &http.Server{
+			Addr:      listenAddr,
+			Handler:   mux,
+			TLSConfig: tlsCfg,
+		}
+		if err := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil {
 			l().Fatalw("server exited", "error", err)
 		}
 	} else {
+		if cfg.TLSClientCA != "" {
+			l().Warnw("tls_client_ca is set but tls_cert/tls_key are not; mTLS will not be enabled")
+		}
 		if err := http.ListenAndServe(listenAddr, mux); err != nil {
 			l().Fatalw("server exited", "error", err)
 		}

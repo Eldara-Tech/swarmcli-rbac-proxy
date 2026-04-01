@@ -82,6 +82,33 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u *User) error {
 	return nil
 }
 
+func (s *SQLiteStore) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, username, enabled, created_at, updated_at FROM users WHERE username = ?`,
+		username,
+	)
+	var u User
+	var enabled int
+	var createdAt, updatedAt string
+	if err := row.Scan(&u.ID, &u.Username, &enabled, &createdAt, &updatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	u.Enabled = enabled != 0
+	var err error
+	u.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return nil, err
+	}
+	u.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 func (s *SQLiteStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, username, enabled, created_at, updated_at FROM users ORDER BY created_at`)

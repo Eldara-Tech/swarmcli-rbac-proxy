@@ -21,11 +21,13 @@ type User struct {
 type UserStore interface {
 	CreateUser(ctx context.Context, u *User) error
 	ListUsers(ctx context.Context) ([]User, error)
+	GetUserByUsername(ctx context.Context, username string) (*User, error)
 }
 
 var (
 	ErrUsernameExists   = errors.New("username already exists")
 	ErrUsernameRequired = errors.New("username is required")
+	ErrUserNotFound     = errors.New("user not found")
 )
 
 // newUUID generates a UUID v4 using crypto/rand.

@@ -14,6 +14,7 @@ type Config struct {
 	DockerSocket  string `json:"docker_socket"`
 	TLSCert       string `json:"tls_cert"`
 	TLSKey        string `json:"tls_key"`
+	TLSClientCA   string `json:"tls_client_ca"`
 	DockerTLSCA   string `json:"docker_tls_ca"`
 	DockerTLSCert string `json:"docker_tls_cert"`
 	DockerTLSKey  string `json:"docker_tls_key"`
@@ -36,6 +37,7 @@ var envOverrides = []struct {
 	{"PROXY_DOCKER_SOCKET", func(c *Config) *string { return &c.DockerSocket }},
 	{"PROXY_TLS_CERT", func(c *Config) *string { return &c.TLSCert }},
 	{"PROXY_TLS_KEY", func(c *Config) *string { return &c.TLSKey }},
+	{"PROXY_TLS_CLIENT_CA", func(c *Config) *string { return &c.TLSClientCA }},
 	{"PROXY_DOCKER_TLS_CA", func(c *Config) *string { return &c.DockerTLSCA }},
 	{"PROXY_DOCKER_TLS_CERT", func(c *Config) *string { return &c.DockerTLSCert }},
 	{"PROXY_DOCKER_TLS_KEY", func(c *Config) *string { return &c.DockerTLSKey }},
