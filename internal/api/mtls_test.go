@@ -150,3 +150,30 @@ func TestExtractIdentity_CNFallback(t *testing.T) {
 		t.Errorf("got %q, want %q", got, "alice")
 	}
 }
+
+func TestExtractIdentity_EmptyCert(t *testing.T) {
+	cert := &x509.Certificate{
+		Subject: pkix.Name{CommonName: ""},
+	}
+	got := extractIdentity(cert)
+	if got != "" {
+		t.Errorf("got %q, want empty string", got)
+	}
+}
+
+func TestRequireClientCert_EmptyIdentity(t *testing.T) {
+	s := &mockUserStore{users: map[string]*store.User{}}
+	h := RequireClientCert(s, okHandler)
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.TLS = &tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{
+			{Subject: pkix.Name{CommonName: ""}},
+		},
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}

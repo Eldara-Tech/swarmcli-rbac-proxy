@@ -528,6 +528,113 @@ func TestIntegration_FrontendMTLS_NoClientCert(t *testing.T) {
 	}
 }
 
+// TestIntegration_FrontendMTLS_ManagementAPINotWrapped verifies that the
+// management API (/api/v1/users) is NOT behind RequireClientCert middleware.
+// A client with a valid CA-signed cert (but CN not in the store) can still
+// access the management API using the bearer token.
+func TestIntegration_FrontendMTLS_ManagementAPINotWrapped(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("notinstore"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+
+	// Build mux with both management API and Docker proxy,
+	// matching the wiring in main.go.
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s)))
+	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	// Management API: cert CN "notinstore" is not in the store,
+	// but the route is not wrapped in RequireClientCert.
+	req, _ := http.NewRequest(http.MethodGet, "https://"+ln.Addr().String()+"/api/v1/users", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("management API: status = %d, want 200", resp.StatusCode)
+	}
+
+	// Docker proxy: same cert should be rejected (CN not in store).
+	resp2, err := client.Get("https://" + ln.Addr().String() + "/v1.45/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("docker proxy: status = %d, want 403", resp2.StatusCode)
+	}
+}
+
+// TestIntegration_FrontendMTLS_SeedUser verifies that a seed user (created
+// at startup) can authenticate via mTLS and access the Docker proxy.
+func TestIntegration_FrontendMTLS_SeedUser(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("seedadmin"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+
+	// Seed user at startup, same as main.go does.
+	if err := s.CreateUser(context.Background(), &store.User{Username: "seedadmin"}); err != nil {
+		t.Fatal(err)
+	}
+
+	addr := startMTLSFrontend(t, serverCert, caPool, s, dockerMock())
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	resp, err := client.Get("https://" + addr + "/v1.45/containers/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "/v1.45/containers/json") {
+		t.Errorf("unexpected body: %s", body)
+	}
+}
+
 // TestBuildBackendTLS_FromFiles verifies the buildBackendTLS function
 // loads CA, cert, and key files correctly.
 func TestBuildBackendTLS_FromFiles(t *testing.T) {
