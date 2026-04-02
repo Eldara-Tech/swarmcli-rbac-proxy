@@ -41,7 +41,8 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		"admin_token":     "secret",
 		"env":             "dev",
 		"log_level":       "debug",
-		"agent_proxy_url": "tcp://agent:9090"
+		"agent_proxy_url": "tcp://agent:9090",
+		"seed_username":   "admin"
 	}`)
 
 	cfg, err := Load(f)
@@ -67,6 +68,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		{"Env", cfg.Env, "dev"},
 		{"LogLevel", cfg.LogLevel, "debug"},
 		{"AgentProxyURL", cfg.AgentProxyURL, "tcp://agent:9090"},
+		{"SeedUsername", cfg.SeedUsername, "admin"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -164,6 +166,7 @@ func TestLoad_AllEnvVars(t *testing.T) {
 		"PROXY_ENV":             "dev",
 		"PROXY_LOG_LEVEL":       "debug",
 		"PROXY_AGENT_URL":       "tcp://agent:9090",
+		"PROXY_SEED_USERNAME":   "admin",
 	}
 	for k, v := range envs {
 		t.Setenv(k, v)
@@ -220,6 +223,9 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	}
 	if cfg.AgentProxyURL != "tcp://agent:9090" {
 		t.Errorf("AgentProxyURL = %q", cfg.AgentProxyURL)
+	}
+	if cfg.SeedUsername != "admin" {
+		t.Errorf("SeedUsername = %q", cfg.SeedUsername)
 	}
 }
 

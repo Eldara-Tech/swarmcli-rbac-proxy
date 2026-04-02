@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -256,6 +257,19 @@ func main() {
 		userStore = pg
 	default:
 		l().Fatalw("unknown store type", "store", cfg.Store)
+	}
+
+	if cfg.SeedUsername != "" {
+		u := &store.User{Username: cfg.SeedUsername}
+		if err := userStore.CreateUser(context.Background(), u); err != nil {
+			if errors.Is(err, store.ErrUsernameExists) {
+				l().Infow("seed user already exists", "username", cfg.SeedUsername)
+			} else {
+				l().Fatalw("seed user creation failed", "error", err)
+			}
+		} else {
+			l().Infow("seed user created", "username", cfg.SeedUsername, "id", u.ID)
+		}
 	}
 
 	if cfg.AdminToken == "" {

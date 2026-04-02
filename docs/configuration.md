@@ -26,6 +26,7 @@ PROXY_CONFIG=/etc/swarm-rbac-proxy/config.json ./swarm-rbac-proxy
 | `PROXY_DATABASE_PATH` | `proxy.db` | SQLite database file path (used when `PROXY_STORE=sqlite`) |
 | `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
 | `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token for management API auth. When set, `/api/v1/*` requires `Authorization: Bearer <token>` |
+| `PROXY_SEED_USERNAME` | _(none)_ | Username to create at startup if it does not already exist. Used to bootstrap the first user for mTLS access |
 | `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder) |
 | `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error` |
 
@@ -48,6 +49,7 @@ JSON keys must use snake_case (matching the Go struct tags). Unknown keys are re
   "database_path":   "proxy.db",
   "database_url":    "postgres://user:pass@host:5432/db",
   "admin_token":     "my-secret-token",
+  "seed_username":   "admin",
   "env":             "prod",
   "log_level":       "info"
 }
@@ -89,20 +91,23 @@ PROXY_TLS_CERT=/path/to/cert.pem PROXY_TLS_KEY=/path/to/key.pem ./swarm-rbac-pro
 
 ### Frontend mTLS (multi-user Docker CLI access)
 
-Enable client certificate authentication by setting `PROXY_TLS_CLIENT_CA` alongside the server TLS cert/key. Each Docker CLI user connects with their own client certificate:
+Enable client certificate authentication by setting `PROXY_TLS_CLIENT_CA` alongside the server TLS cert/key. Use `PROXY_SEED_USERNAME` to bootstrap the first admin user:
 
 ```bash
 PROXY_TLS_CERT=/path/to/server-cert.pem \
   PROXY_TLS_KEY=/path/to/server-key.pem \
   PROXY_TLS_CLIENT_CA=/path/to/client-ca.pem \
   PROXY_ADMIN_TOKEN=my-secret-token \
+  PROXY_SEED_USERNAME=admin \
   ./swarm-rbac-proxy
 ```
 
-Users must be registered in the store first (username must match the certificate's Subject CN or SAN email):
+With mTLS enabled, all connections require a valid client certificate — including the management API. The admin uses their cert (whose CN matches the seed username) plus the bearer token to create additional users:
 
 ```bash
-curl -s -X POST http://localhost:2375/api/v1/users \
+curl -s -X POST https://localhost:2376/api/v1/users \
+  --cacert ca.pem \
+  --cert admin.pem --key admin-key.pem \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer my-secret-token" \
   -d '{"username":"alice"}'
