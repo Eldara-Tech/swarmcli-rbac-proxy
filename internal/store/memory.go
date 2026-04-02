@@ -51,6 +51,18 @@ func (s *MemoryStore) CreateUser(_ context.Context, u *User) error {
 	return nil
 }
 
+func (s *MemoryStore) GetUserByUsername(_ context.Context, username string) (*User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, u := range s.users {
+		if u.Username == username {
+			cp := u
+			return &cp, nil
+		}
+	}
+	return nil, ErrUserNotFound
+}
+
 func (s *MemoryStore) ListUsers(_ context.Context) ([]User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

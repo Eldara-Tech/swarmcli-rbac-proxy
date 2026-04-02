@@ -18,6 +18,7 @@ PROXY_CONFIG=/etc/swarm-rbac-proxy/config.json ./swarm-rbac-proxy
 | `PROXY_DOCKER_SOCKET` | `/var/run/docker.sock` | Path to Docker socket (legacy; prefer `PROXY_DOCKER_URL`) |
 | `PROXY_TLS_CERT` | _(none)_ | Frontend TLS certificate path |
 | `PROXY_TLS_KEY` | _(none)_ | Frontend TLS key path |
+| `PROXY_TLS_CLIENT_CA` | _(none)_ | CA certificate to verify client certificates. When set (along with `PROXY_TLS_CERT` and `PROXY_TLS_KEY`), enables frontend mTLS: clients must present a certificate signed by this CA. The proxy extracts the username from the certificate (SAN email if present, otherwise Subject CN) and looks it up in the user store |
 | `PROXY_DOCKER_TLS_CA` | _(none)_ | CA cert to verify remote Docker server |
 | `PROXY_DOCKER_TLS_CERT` | _(none)_ | Client cert for backend mTLS |
 | `PROXY_DOCKER_TLS_KEY` | _(none)_ | Client key for backend mTLS |
@@ -25,6 +26,7 @@ PROXY_CONFIG=/etc/swarm-rbac-proxy/config.json ./swarm-rbac-proxy
 | `PROXY_DATABASE_PATH` | `proxy.db` | SQLite database file path (used when `PROXY_STORE=sqlite`) |
 | `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
 | `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token for management API auth. When set, `/api/v1/*` requires `Authorization: Bearer <token>` |
+| `PROXY_SEED_USERNAME` | _(none)_ | Username to create at startup if it does not already exist. Used to bootstrap the first user for mTLS access |
 | `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder) |
 | `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error` |
 
@@ -39,6 +41,7 @@ JSON keys must use snake_case (matching the Go struct tags). Unknown keys are re
   "docker_socket":   "/var/run/docker.sock",
   "tls_cert":        "/path/to/server-cert.pem",
   "tls_key":         "/path/to/server-key.pem",
+  "tls_client_ca":   "/path/to/client-ca.pem",
   "docker_tls_ca":   "/path/to/ca.pem",
   "docker_tls_cert": "/path/to/client-cert.pem",
   "docker_tls_key":  "/path/to/client-key.pem",
@@ -46,6 +49,7 @@ JSON keys must use snake_case (matching the Go struct tags). Unknown keys are re
   "database_path":   "proxy.db",
   "database_url":    "postgres://user:pass@host:5432/db",
   "admin_token":     "my-secret-token",
+  "seed_username":   "admin",
   "env":             "prod",
   "log_level":       "info"
 }
@@ -83,6 +87,39 @@ Set both `PROXY_TLS_CERT` and `PROXY_TLS_KEY` to serve TLS to clients (default p
 
 ```bash
 PROXY_TLS_CERT=/path/to/cert.pem PROXY_TLS_KEY=/path/to/key.pem ./swarm-rbac-proxy
+```
+
+### Frontend mTLS (multi-user Docker CLI access)
+
+Enable client certificate authentication by setting `PROXY_TLS_CLIENT_CA` alongside the server TLS cert/key. Use `PROXY_SEED_USERNAME` to bootstrap the first admin user:
+
+```bash
+PROXY_TLS_CERT=/path/to/server-cert.pem \
+  PROXY_TLS_KEY=/path/to/server-key.pem \
+  PROXY_TLS_CLIENT_CA=/path/to/client-ca.pem \
+  PROXY_ADMIN_TOKEN=my-secret-token \
+  PROXY_SEED_USERNAME=admin \
+  ./swarm-rbac-proxy
+```
+
+With mTLS enabled, all connections require a valid client certificate — including the management API. The admin uses their cert (whose CN matches the seed username) plus the bearer token to create additional users:
+
+```bash
+curl -s -X POST https://localhost:2376/api/v1/users \
+  --cacert ca.pem \
+  --cert admin.pem --key admin-key.pem \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer my-secret-token" \
+  -d '{"username":"alice"}'
+```
+
+Each user creates a Docker context with their client certificate:
+
+```bash
+docker context create rbac-proxy \
+  --docker "host=tcp://proxy.example.com:2376,ca=ca.pem,cert=alice.pem,key=alice-key.pem"
+
+docker --context rbac-proxy ps
 ```
 
 ### Data store

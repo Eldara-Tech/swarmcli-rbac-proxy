@@ -70,6 +70,39 @@ func testUserStoreContract(t *testing.T, newStore func() UserStore) {
 		}
 	})
 
+	t.Run("GetUserByUsername_Found", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		created := &User{Username: "getme"}
+		if err := s.CreateUser(ctx, created); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.GetUserByUsername(ctx, "getme")
+		if err != nil {
+			t.Fatalf("GetUserByUsername: %v", err)
+		}
+		if got.ID != created.ID {
+			t.Errorf("ID = %q, want %q", got.ID, created.ID)
+		}
+		if got.Username != "getme" {
+			t.Errorf("Username = %q, want %q", got.Username, "getme")
+		}
+		if !got.Enabled {
+			t.Error("expected Enabled to be true")
+		}
+	})
+
+	t.Run("GetUserByUsername_NotFound", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		_, err := s.GetUserByUsername(ctx, "nobody")
+		if !errors.Is(err, ErrUserNotFound) {
+			t.Fatalf("got %v, want ErrUserNotFound", err)
+		}
+	})
+
 	t.Run("ListEmpty", func(t *testing.T) {
 		s := newStore()
 		ctx := context.Background()

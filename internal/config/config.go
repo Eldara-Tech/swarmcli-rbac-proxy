@@ -14,6 +14,7 @@ type Config struct {
 	DockerSocket  string `json:"docker_socket"`
 	TLSCert       string `json:"tls_cert"`
 	TLSKey        string `json:"tls_key"`
+	TLSClientCA   string `json:"tls_client_ca"`
 	DockerTLSCA   string `json:"docker_tls_ca"`
 	DockerTLSCert string `json:"docker_tls_cert"`
 	DockerTLSKey  string `json:"docker_tls_key"`
@@ -24,6 +25,7 @@ type Config struct {
 	Env           string `json:"env"`
 	LogLevel      string `json:"log_level"`
 	AgentProxyURL string `json:"agent_proxy_url"`
+	SeedUsername  string `json:"seed_username"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -36,6 +38,7 @@ var envOverrides = []struct {
 	{"PROXY_DOCKER_SOCKET", func(c *Config) *string { return &c.DockerSocket }},
 	{"PROXY_TLS_CERT", func(c *Config) *string { return &c.TLSCert }},
 	{"PROXY_TLS_KEY", func(c *Config) *string { return &c.TLSKey }},
+	{"PROXY_TLS_CLIENT_CA", func(c *Config) *string { return &c.TLSClientCA }},
 	{"PROXY_DOCKER_TLS_CA", func(c *Config) *string { return &c.DockerTLSCA }},
 	{"PROXY_DOCKER_TLS_CERT", func(c *Config) *string { return &c.DockerTLSCert }},
 	{"PROXY_DOCKER_TLS_KEY", func(c *Config) *string { return &c.DockerTLSKey }},
@@ -46,6 +49,7 @@ var envOverrides = []struct {
 	{"PROXY_ENV", func(c *Config) *string { return &c.Env }},
 	{"PROXY_LOG_LEVEL", func(c *Config) *string { return &c.LogLevel }},
 	{"PROXY_AGENT_URL", func(c *Config) *string { return &c.AgentProxyURL }},
+	{"PROXY_SEED_USERNAME", func(c *Config) *string { return &c.SeedUsername }},
 }
 
 // Load reads configuration from an optional JSON file, then applies

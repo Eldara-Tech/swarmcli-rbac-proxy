@@ -7,6 +7,7 @@ import (
 
 	proxylog "swarm-rbac-proxy/internal/log"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -76,6 +77,21 @@ func (s *PostgresStore) CreateUser(ctx context.Context, u *User) error {
 	u.CreatedAt = now
 	u.UpdatedAt = now
 	return nil
+}
+
+func (s *PostgresStore) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, username, enabled, created_at, updated_at FROM users WHERE username = $1`,
+		username,
+	)
+	var u User
+	if err := row.Scan(&u.ID, &u.Username, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	return &u, nil
 }
 
 func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {

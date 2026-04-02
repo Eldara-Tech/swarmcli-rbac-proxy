@@ -27,6 +27,8 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup for mTLS).
+
 ## Agent Proxy Forwarding
 
 When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-host:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
@@ -37,7 +39,7 @@ When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1
 swarm-rbac-proxy/
   main.go               — reverse proxy + mux routing (/api/v1/ → handlers, /v1/ → agent proxy, / → Docker proxy)
   main_test.go          — unit tests against mock Unix socket
-  integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS)
+  integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
   Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
   stack.yml             — Docker Swarm stack definition
   internal/
@@ -48,7 +50,7 @@ swarm-rbac-proxy/
       logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
-      store.go          — UserStore interface, User type, sentinel errors, UUID helper
+      store.go          — UserStore interface (CreateUser, ListUsers, GetUserByUsername), User type, sentinel errors, UUID helper
       memory.go         — in-memory UserStore (dev/testing)
       sqlite.go         — SQLite UserStore (modernc.org/sqlite, default)
       postgres.go       — PostgreSQL UserStore (pgx/v5)
@@ -59,6 +61,8 @@ swarm-rbac-proxy/
     api/
       auth.go           — RequireToken middleware (bearer token validation)
       auth_test.go      — auth middleware tests
+      mtls.go           — RequireClientCert middleware (mTLS client cert → user lookup)
+      mtls_test.go      — mTLS middleware unit tests
       users.go          — UserHandler: POST/GET /api/v1/users
       users_test.go     — handler tests using MemoryStore
 ```

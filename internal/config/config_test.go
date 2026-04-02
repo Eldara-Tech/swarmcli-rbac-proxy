@@ -31,6 +31,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		"docker_socket":   "/tmp/docker.sock",
 		"tls_cert":        "/cert.pem",
 		"tls_key":         "/key.pem",
+		"tls_client_ca":   "/client-ca.pem",
 		"docker_tls_ca":   "/ca.pem",
 		"docker_tls_cert": "/dcert.pem",
 		"docker_tls_key":  "/dkey.pem",
@@ -40,7 +41,8 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		"admin_token":     "secret",
 		"env":             "dev",
 		"log_level":       "debug",
-		"agent_proxy_url": "tcp://agent:9090"
+		"agent_proxy_url": "tcp://agent:9090",
+		"seed_username":   "admin"
 	}`)
 
 	cfg, err := Load(f)
@@ -55,6 +57,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		{"DockerSocket", cfg.DockerSocket, "/tmp/docker.sock"},
 		{"TLSCert", cfg.TLSCert, "/cert.pem"},
 		{"TLSKey", cfg.TLSKey, "/key.pem"},
+		{"TLSClientCA", cfg.TLSClientCA, "/client-ca.pem"},
 		{"DockerTLSCA", cfg.DockerTLSCA, "/ca.pem"},
 		{"DockerTLSCert", cfg.DockerTLSCert, "/dcert.pem"},
 		{"DockerTLSKey", cfg.DockerTLSKey, "/dkey.pem"},
@@ -65,6 +68,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		{"Env", cfg.Env, "dev"},
 		{"LogLevel", cfg.LogLevel, "debug"},
 		{"AgentProxyURL", cfg.AgentProxyURL, "tcp://agent:9090"},
+		{"SeedUsername", cfg.SeedUsername, "admin"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -151,6 +155,7 @@ func TestLoad_AllEnvVars(t *testing.T) {
 		"PROXY_DOCKER_SOCKET":   "/tmp/docker.sock",
 		"PROXY_TLS_CERT":        "/cert.pem",
 		"PROXY_TLS_KEY":         "/key.pem",
+		"PROXY_TLS_CLIENT_CA":   "/client-ca.pem",
 		"PROXY_DOCKER_TLS_CA":   "/ca.pem",
 		"PROXY_DOCKER_TLS_CERT": "/dcert.pem",
 		"PROXY_DOCKER_TLS_KEY":  "/dkey.pem",
@@ -161,6 +166,7 @@ func TestLoad_AllEnvVars(t *testing.T) {
 		"PROXY_ENV":             "dev",
 		"PROXY_LOG_LEVEL":       "debug",
 		"PROXY_AGENT_URL":       "tcp://agent:9090",
+		"PROXY_SEED_USERNAME":   "admin",
 	}
 	for k, v := range envs {
 		t.Setenv(k, v)
@@ -184,6 +190,9 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	}
 	if cfg.TLSKey != "/key.pem" {
 		t.Errorf("TLSKey = %q", cfg.TLSKey)
+	}
+	if cfg.TLSClientCA != "/client-ca.pem" {
+		t.Errorf("TLSClientCA = %q", cfg.TLSClientCA)
 	}
 	if cfg.DockerTLSCA != "/ca.pem" {
 		t.Errorf("DockerTLSCA = %q", cfg.DockerTLSCA)
@@ -214,6 +223,9 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	}
 	if cfg.AgentProxyURL != "tcp://agent:9090" {
 		t.Errorf("AgentProxyURL = %q", cfg.AgentProxyURL)
+	}
+	if cfg.SeedUsername != "admin" {
+		t.Errorf("SeedUsername = %q", cfg.SeedUsername)
 	}
 }
 
