@@ -9,23 +9,24 @@ import (
 
 // Config holds all proxy configuration values.
 type Config struct {
-	Listen        string `json:"listen"`
-	DockerURL     string `json:"docker_url"`
-	DockerSocket  string `json:"docker_socket"`
-	TLSCert       string `json:"tls_cert"`
-	TLSKey        string `json:"tls_key"`
-	TLSClientCA   string `json:"tls_client_ca"`
-	DockerTLSCA   string `json:"docker_tls_ca"`
-	DockerTLSCert string `json:"docker_tls_cert"`
-	DockerTLSKey  string `json:"docker_tls_key"`
-	Store         string `json:"store"`
-	DatabasePath  string `json:"database_path"`
-	DatabaseURL   string `json:"database_url"`
-	AdminToken    string `json:"admin_token"`
-	Env           string `json:"env"`
-	LogLevel      string `json:"log_level"`
-	AgentProxyURL string `json:"agent_proxy_url"`
-	SeedUsername  string `json:"seed_username"`
+	Listen         string `json:"listen"`
+	DockerURL      string `json:"docker_url"`
+	DockerSocket   string `json:"docker_socket"`
+	TLSCert        string `json:"tls_cert"`
+	TLSKey         string `json:"tls_key"`
+	TLSClientCA    string `json:"tls_client_ca"`
+	TLSClientCAKey string `json:"tls_client_ca_key"`
+	DockerTLSCA    string `json:"docker_tls_ca"`
+	DockerTLSCert  string `json:"docker_tls_cert"`
+	DockerTLSKey   string `json:"docker_tls_key"`
+	Store          string `json:"store"`
+	DatabasePath   string `json:"database_path"`
+	DatabaseURL    string `json:"database_url"`
+	AdminToken     string `json:"admin_token"`
+	Env            string `json:"env"`
+	LogLevel       string `json:"log_level"`
+	AgentProxyURL  string `json:"agent_proxy_url"`
+	SeedUsername   string `json:"seed_username"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -39,6 +40,7 @@ var envOverrides = []struct {
 	{"PROXY_TLS_CERT", func(c *Config) *string { return &c.TLSCert }},
 	{"PROXY_TLS_KEY", func(c *Config) *string { return &c.TLSKey }},
 	{"PROXY_TLS_CLIENT_CA", func(c *Config) *string { return &c.TLSClientCA }},
+	{"PROXY_TLS_CLIENT_CA_KEY", func(c *Config) *string { return &c.TLSClientCAKey }},
 	{"PROXY_DOCKER_TLS_CA", func(c *Config) *string { return &c.DockerTLSCA }},
 	{"PROXY_DOCKER_TLS_CERT", func(c *Config) *string { return &c.DockerTLSCert }},
 	{"PROXY_DOCKER_TLS_KEY", func(c *Config) *string { return &c.DockerTLSKey }},

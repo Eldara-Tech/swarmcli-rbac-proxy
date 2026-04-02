@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"swarm-rbac-proxy/internal/certauth"
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
 )
@@ -14,11 +15,13 @@ func l() *proxylog.ProxyLogger { return proxylog.L().With("component", "api") }
 // UserHandler handles /api/v1/users requests.
 type UserHandler struct {
 	store store.UserStore
+	ca    *certauth.CA
 }
 
 // NewUserHandler creates a handler backed by the given store.
-func NewUserHandler(s store.UserStore) *UserHandler {
-	return &UserHandler{store: s}
+// When ca is non-nil, user creation auto-generates a client certificate.
+func NewUserHandler(s store.UserStore, ca *certauth.CA) *UserHandler {
+	return &UserHandler{store: s, ca: ca}
 }
 
 func (h *UserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -69,11 +72,39 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	l().Infow("user created", "id", u.ID, "username", u.Username)
 
+	resp := createUserResponse{User: *u}
+
+	if h.ca != nil {
+		certPEM, keyPEM, err := h.ca.IssueCert(u.Username)
+		if err != nil {
+			l().Errorw("cert issuance failed", "error", err, "username", u.Username)
+			writeError(w, http.StatusInternalServerError, "certificate generation failed")
+			return
+		}
+		resp.Certificate = &certBundle{
+			CertPEM: string(certPEM),
+			KeyPEM:  string(keyPEM),
+			CAPEM:   string(h.ca.CACertPEM()),
+		}
+		l().Infow("client certificate issued", "username", u.Username)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(u); err != nil {
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		l().Errorw("encode response failed", "error", err)
 	}
+}
+
+type createUserResponse struct {
+	store.User
+	Certificate *certBundle `json:"certificate,omitempty"`
+}
+
+type certBundle struct {
+	CertPEM string `json:"cert_pem"`
+	KeyPEM  string `json:"key_pem"`
+	CAPEM   string `json:"ca_pem"`
 }
 
 func (h *UserHandler) list(w http.ResponseWriter, r *http.Request) {

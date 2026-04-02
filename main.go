@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"swarm-rbac-proxy/internal/api"
+	"swarm-rbac-proxy/internal/certauth"
 	"swarm-rbac-proxy/internal/config"
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
@@ -272,12 +273,24 @@ func main() {
 		}
 	}
 
+	var ca *certauth.CA
+	if cfg.TLSClientCAKey != "" {
+		if cfg.TLSClientCA == "" {
+			l().Fatalw("tls_client_ca_key is set but tls_client_ca is not")
+		}
+		ca, err = certauth.LoadCA(cfg.TLSClientCA, cfg.TLSClientCAKey)
+		if err != nil {
+			l().Fatalw("load client CA for cert issuance", "error", err)
+		}
+		l().Infow("client certificate auto-generation enabled")
+	}
+
 	if cfg.AdminToken == "" {
 		l().Warnw("admin_token not set, management API is unauthenticated")
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, api.NewUserHandler(userStore)))
+	mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, api.NewUserHandler(userStore, ca)))
 
 	var proxyAuth func(http.Handler) http.Handler
 	if cfg.TLSClientCA != "" {

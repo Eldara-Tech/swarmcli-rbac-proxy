@@ -19,6 +19,7 @@ PROXY_CONFIG=/etc/swarm-rbac-proxy/config.json ./swarm-rbac-proxy
 | `PROXY_TLS_CERT` | _(none)_ | Frontend TLS certificate path |
 | `PROXY_TLS_KEY` | _(none)_ | Frontend TLS key path |
 | `PROXY_TLS_CLIENT_CA` | _(none)_ | CA certificate to verify client certificates. When set (along with `PROXY_TLS_CERT` and `PROXY_TLS_KEY`), enables frontend mTLS: clients must present a certificate signed by this CA. The proxy extracts the username from the certificate (SAN email if present, otherwise Subject CN) and looks it up in the user store |
+| `PROXY_TLS_CLIENT_CA_KEY` | _(none)_ | Private key for the client CA certificate. When set, the proxy auto-generates a client certificate (ECDSA P-256, 1-year validity) for each new user created via `POST /api/v1/users` and returns it in the response. Requires `PROXY_TLS_CLIENT_CA` to also be set |
 | `PROXY_DOCKER_TLS_CA` | _(none)_ | CA cert to verify remote Docker server |
 | `PROXY_DOCKER_TLS_CERT` | _(none)_ | Client cert for backend mTLS |
 | `PROXY_DOCKER_TLS_KEY` | _(none)_ | Client key for backend mTLS |
@@ -41,7 +42,8 @@ JSON keys must use snake_case (matching the Go struct tags). Unknown keys are re
   "docker_socket":   "/var/run/docker.sock",
   "tls_cert":        "/path/to/server-cert.pem",
   "tls_key":         "/path/to/server-key.pem",
-  "tls_client_ca":   "/path/to/client-ca.pem",
+  "tls_client_ca":     "/path/to/client-ca.pem",
+  "tls_client_ca_key": "/path/to/client-ca-key.pem",
   "docker_tls_ca":   "/path/to/ca.pem",
   "docker_tls_cert": "/path/to/client-cert.pem",
   "docker_tls_key":  "/path/to/client-key.pem",
@@ -121,6 +123,113 @@ docker context create rbac-proxy \
 
 docker --context rbac-proxy ps
 ```
+
+### Auto-generating user certificates
+
+When `PROXY_TLS_CLIENT_CA_KEY` is set alongside the mTLS config, the proxy automatically generates a client certificate for each new user. The admin no longer needs to run openssl manually:
+
+```bash
+PROXY_TLS_CERT=/path/to/server-cert.pem \
+  PROXY_TLS_KEY=/path/to/server-key.pem \
+  PROXY_TLS_CLIENT_CA=/path/to/client-ca.pem \
+  PROXY_TLS_CLIENT_CA_KEY=/path/to/client-ca-key.pem \
+  PROXY_ADMIN_TOKEN=my-secret-token \
+  PROXY_SEED_USERNAME=admin \
+  ./swarm-rbac-proxy
+```
+
+Creating a user now returns the certificate bundle in the response:
+
+```bash
+curl -s -X POST https://localhost:2376/api/v1/users \
+  --cacert ca.pem \
+  --cert admin.pem --key admin-key.pem \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer my-secret-token" \
+  -d '{"username":"alice"}'
+```
+
+Response:
+
+```json
+{
+  "id": "a1b2c3d4-...",
+  "username": "alice",
+  "enabled": true,
+  "created_at": "2026-04-02T12:00:00Z",
+  "updated_at": "2026-04-02T12:00:00Z",
+  "certificate": {
+    "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+    "key_pem": "-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----\n",
+    "ca_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+  }
+}
+```
+
+The private key is generated in memory and **never stored** on the server. The certificate bundle is only available in this response.
+
+### Forwarding a certificate to a user
+
+After creating a user, the admin needs to securely deliver the three PEM files to the user. Here is a step-by-step guide:
+
+**1. Extract the PEM files from the API response**
+
+Save the JSON response to a file, then extract each field:
+
+```bash
+# Create user and save the full response
+curl -s -X POST https://localhost:2376/api/v1/users \
+  --cacert ca.pem --cert admin.pem --key admin-key.pem \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer my-secret-token" \
+  -d '{"username":"alice"}' > alice-response.json
+
+# Extract the three PEM files
+jq -r '.certificate.cert_pem' alice-response.json > alice-cert.pem
+jq -r '.certificate.key_pem'  alice-response.json > alice-key.pem
+jq -r '.certificate.ca_pem'   alice-response.json > ca.pem
+
+# Delete the response file (contains the private key)
+rm alice-response.json
+```
+
+**2. Deliver the files securely to the user**
+
+The three files (`alice-cert.pem`, `alice-key.pem`, `ca.pem`) must reach the user through a secure channel. Some options:
+
+- **Password-protected archive**: Bundle the files and share via a corporate file sharing tool.
+  ```bash
+  zip -e alice-certs.zip alice-cert.pem alice-key.pem ca.pem
+  # Share the zip via one channel, the password via another (e.g. chat + phone)
+  ```
+- **Direct transfer**: Copy files to the user's machine via `scp` or a secure corporate tool.
+- **Secrets manager**: Store temporarily in a shared vault (e.g. 1Password, Vault) and revoke after the user retrieves them.
+
+**3. User sets up their Docker context**
+
+Once the user has the three files, they configure Docker CLI:
+
+```bash
+# Create a Docker context pointing at the proxy
+docker context create my-cluster \
+  --docker "host=tcp://proxy.example.com:2376,ca=ca.pem,cert=alice-cert.pem,key=alice-key.pem"
+
+# Verify access
+docker --context my-cluster ps
+
+# Optionally set as default
+docker context use my-cluster
+```
+
+**4. Clean up admin-side copies**
+
+After confirming the user can authenticate, the admin should delete their local copies of the user's private key:
+
+```bash
+rm alice-cert.pem alice-key.pem
+```
+
+**Important**: If the certificate is lost, there is no way to re-download it. The admin must disable the user and create a new one to issue a fresh certificate.
 
 ### Data store
 
