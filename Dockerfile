@@ -7,4 +7,4 @@ RUN go build -o /proxy .
 
 FROM alpine:3.23
 COPY --from=build /proxy /proxy
-ENTRYPOINT ["/proxy"]
+CMD ["/proxy"]

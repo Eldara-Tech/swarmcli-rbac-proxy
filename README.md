@@ -23,6 +23,9 @@ docker run -d \
   -p 2376:2376 \
   -v /var/run/docker.sock:/var/run/docker.sock \
   swarm-rbac-proxy
+
+# Open a shell in the image when needed.
+docker run --rm -it swarm-rbac-proxy sh
 ```
 
 ## Swarm deployment

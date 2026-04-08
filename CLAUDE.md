@@ -40,7 +40,7 @@ swarm-rbac-proxy/
   main.go               — reverse proxy + mux routing (/api/v1/ → handlers, /v1/ → agent proxy, / → Docker proxy)
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
-  Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
+  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23, runtime defaults to /proxy via CMD so /bin/sh stays directly usable)
   stack.yml             — Docker Swarm stack definition
   internal/
     certauth/
