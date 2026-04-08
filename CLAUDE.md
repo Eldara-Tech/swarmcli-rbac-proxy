@@ -27,7 +27,7 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup for mTLS).
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup for mTLS).
 
 ## Agent Proxy Forwarding
 
@@ -40,9 +40,12 @@ swarm-rbac-proxy/
   main.go               — reverse proxy + mux routing (/api/v1/ → handlers, /v1/ → agent proxy, / → Docker proxy)
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
-  Dockerfile            — multi-stage build (golang:1.25-alpine → alpine:3.21)
+  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23, runtime defaults to /proxy via CMD so /bin/sh stays directly usable)
   stack.yml             — Docker Swarm stack definition
   internal/
+    certauth/
+      certauth.go       — CA loading + client certificate issuance (ECDSA P-256)
+      certauth_test.go  — unit tests (load, issue, serial uniqueness, round-trip)
     config/
       config.go         — Config struct, Load(path) merges JSON file + env vars + defaults
       config_test.go    — config loading unit tests
@@ -69,7 +72,7 @@ swarm-rbac-proxy/
 
 ## API Endpoints
 
-- `POST /api/v1/users` — Create user (`{"username":"alice"}` → 201 with user object)
+- `POST /api/v1/users` — Create user (`{"username":"alice"}` → 201 with user object; includes `certificate` bundle when `PROXY_TLS_CLIENT_CA_KEY` is set)
 - `GET /api/v1/users` — List all users (200, always returns array)
 - `/v1/*` — Forwarded to agent proxy (when `PROXY_AGENT_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon

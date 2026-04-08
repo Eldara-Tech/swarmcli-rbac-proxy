@@ -1,13 +1,22 @@
 package api
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"swarm-rbac-proxy/internal/certauth"
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
 )
@@ -19,7 +28,7 @@ func TestMain(m *testing.M) {
 }
 
 func newTestHandler() *UserHandler {
-	return NewUserHandler(store.NewMemoryStore())
+	return NewUserHandler(store.NewMemoryStore(), nil)
 }
 
 func TestCreateUser(t *testing.T) {
@@ -155,6 +164,134 @@ func TestListUsers_AfterCreate(t *testing.T) {
 	}
 	if users[0].Username != "carol" {
 		t.Errorf("username = %q, want %q", users[0].Username, "carol")
+	}
+}
+
+// testCAForHandler creates a certauth.CA backed by a temporary self-signed CA.
+func testCAForHandler(t *testing.T) *certauth.CA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	dir := t.TempDir()
+	certPath := dir + "/ca.pem"
+	keyPath := dir + "/ca-key.pem"
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ca, err := certauth.LoadCA(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ca
+}
+
+func TestCreateUser_WithCertificate(t *testing.T) {
+	ca := testCAForHandler(t)
+	h := NewUserHandler(store.NewMemoryStore(), ca)
+
+	body := `{"username":"alice"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	var resp struct {
+		Username    string `json:"username"`
+		Certificate *struct {
+			CertPEM string `json:"cert_pem"`
+			KeyPEM  string `json:"key_pem"`
+			CAPEM   string `json:"ca_pem"`
+		} `json:"certificate"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Certificate == nil {
+		t.Fatal("expected certificate in response")
+	}
+
+	// Verify cert CN matches username.
+	block, _ := pem.Decode([]byte(resp.Certificate.CertPEM))
+	if block == nil {
+		t.Fatal("no PEM block in cert_pem")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	if cert.Subject.CommonName != "alice" {
+		t.Errorf("CN = %q, want %q", cert.Subject.CommonName, "alice")
+	}
+
+	// Verify key is valid ECDSA P-256.
+	keyBlock, _ := pem.Decode([]byte(resp.Certificate.KeyPEM))
+	if keyBlock == nil {
+		t.Fatal("no PEM block in key_pem")
+	}
+	ecKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		t.Fatalf("parse key: %v", err)
+	}
+	if ecKey.Curve != elliptic.P256() {
+		t.Errorf("curve = %v, want P-256", ecKey.Curve)
+	}
+
+	// Verify CA PEM is parseable.
+	caBlock, _ := pem.Decode([]byte(resp.Certificate.CAPEM))
+	if caBlock == nil {
+		t.Fatal("no PEM block in ca_pem")
+	}
+}
+
+func TestCreateUser_WithoutCA(t *testing.T) {
+	h := NewUserHandler(store.NewMemoryStore(), nil)
+
+	body := `{"username":"bob"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	// Verify no certificate field in response.
+	raw := w.Body.String()
+	if strings.Contains(raw, "certificate") {
+		t.Errorf("response should not contain certificate field: %s", raw)
 	}
 }
 

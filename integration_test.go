@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"swarm-rbac-proxy/internal/api"
+	"swarm-rbac-proxy/internal/certauth"
 	"swarm-rbac-proxy/internal/store"
 )
 
@@ -548,7 +550,7 @@ func TestIntegration_FrontendMTLS_ManagementAPINotWrapped(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil)))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -699,5 +701,118 @@ func TestBuildBackendTLS_CAOnly(t *testing.T) {
 	}
 	if len(cfg.Certificates) != 0 {
 		t.Error("expected no client certificates")
+	}
+}
+
+// TestIntegration_CreateUserWithCert_ThenMTLSAccess verifies the full flow:
+// admin creates a user → API returns a cert bundle → the returned cert
+// authenticates successfully through the mTLS proxy.
+func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	adminCert := ca.issueCert(t, clientTemplateWithCN("admin"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	// Write CA cert+key so certauth.LoadCA can read them.
+	caCertPath := writePEM(t, ca.certPEM, "ca.pem")
+	caKeyDER, err := x509.MarshalECPrivateKey(ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: caKeyDER})
+	caKeyPath := writePEM(t, caKeyPEM, "ca-key.pem")
+
+	issuer, err := certauth.LoadCA(caCertPath, caKeyPath)
+	if err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+
+	s := store.NewMemoryStore()
+	// Seed admin user.
+	if err := s.CreateUser(context.Background(), &store.User{Username: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer)))
+	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	// Step 1: Admin creates user "alice" via management API.
+	adminClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{adminCert},
+		},
+	}}
+
+	createReq, _ := http.NewRequest(http.MethodPost,
+		"https://"+ln.Addr().String()+"/api/v1/users",
+		strings.NewReader(`{"username":"alice"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Bearer secret")
+	createResp, err := adminClient.Do(createReq)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(createResp.Body)
+		t.Fatalf("create user: status = %d, body = %s", createResp.StatusCode, body)
+	}
+
+	// Parse the cert bundle from the response.
+	var resp struct {
+		Username    string `json:"username"`
+		Certificate *struct {
+			CertPEM string `json:"cert_pem"`
+			KeyPEM  string `json:"key_pem"`
+			CAPEM   string `json:"ca_pem"`
+		} `json:"certificate"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Certificate == nil {
+		t.Fatal("expected certificate bundle in response")
+	}
+
+	// Step 2: Use the returned cert to authenticate through the mTLS proxy.
+	aliceCert, err := tls.X509KeyPair([]byte(resp.Certificate.CertPEM), []byte(resp.Certificate.KeyPEM))
+	if err != nil {
+		t.Fatalf("parse returned cert+key: %v", err)
+	}
+	aliceClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{aliceCert},
+		},
+	}}
+
+	dockerResp, err := aliceClient.Get("https://" + ln.Addr().String() + "/v1.45/containers/json")
+	if err != nil {
+		t.Fatalf("docker request: %v", err)
+	}
+	defer dockerResp.Body.Close()
+	if dockerResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(dockerResp.Body)
+		t.Fatalf("docker request: status = %d, body = %s", dockerResp.StatusCode, body)
 	}
 }
