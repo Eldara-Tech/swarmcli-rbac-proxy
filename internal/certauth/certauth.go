@@ -42,9 +42,16 @@ func LoadCA(certPath, keyPath string) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read CA key: %w", err)
 	}
-	keyBlock, _ := pem.Decode(keyPEM)
-	if keyBlock == nil {
-		return nil, fmt.Errorf("no PEM block in CA key %s", keyPath)
+	var keyBlock *pem.Block
+	rest := keyPEM
+	for {
+		keyBlock, rest = pem.Decode(rest)
+		if keyBlock == nil {
+			return nil, fmt.Errorf("no EC PRIVATE KEY block in %s", keyPath)
+		}
+		if keyBlock.Type == "EC PRIVATE KEY" {
+			break
+		}
 	}
 	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
 	if err != nil {

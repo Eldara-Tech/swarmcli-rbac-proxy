@@ -153,6 +153,28 @@ func TestLoadCA_RSAKey(t *testing.T) {
 	}
 }
 
+func TestLoadCA_MultiBlockKeyPEM(t *testing.T) {
+	certPath, keyPath := testCA(t)
+
+	// Prepend an EC PARAMETERS block (as openssl ecparam -genkey produces).
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := pem.EncodeToMemory(&pem.Block{Type: "EC PARAMETERS", Bytes: []byte{0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07}})
+	if err := os.WriteFile(keyPath, append(params, keyPEM...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ca, err := LoadCA(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("LoadCA with multi-block PEM: %v", err)
+	}
+	if ca.cert == nil || ca.key == nil {
+		t.Fatal("cert or key is nil")
+	}
+}
+
 func TestIssueCert(t *testing.T) {
 	certPath, keyPath := testCA(t)
 	ca, err := LoadCA(certPath, keyPath)
