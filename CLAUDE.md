@@ -27,7 +27,7 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup for mTLS).
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375").
 
 ## Agent Proxy Forwarding
 
@@ -37,14 +37,17 @@ When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + mux routing (/api/v1/ → handlers, /v1/ → agent proxy, / → Docker proxy)
+  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS)
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
-  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23, runtime defaults to /proxy via CMD so /bin/sh stays directly usable)
+  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23), builds proxy + swcproxy, CMD so /bin/sh stays usable
   stack.yml             — Docker Swarm stack definition
+  cmd/
+    swcproxy/
+      main.go           — Admin CLI: user ls/add/delete/regenerate-token (direct store access)
   internal/
     certauth/
-      certauth.go       — CA loading + client certificate issuance (ECDSA P-256)
+      certauth.go       — CA loading, generation (GenerateCA), client certificate issuance (ECDSA P-256)
       certauth_test.go  — unit tests (load, issue, serial uniqueness, round-trip)
     config/
       config.go         — Config struct, Load(path) merges JSON file + env vars + defaults
@@ -53,10 +56,10 @@ swarm-rbac-proxy/
       logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
-      store.go          — UserStore interface (CreateUser, ListUsers, GetUserByUsername), User type, sentinel errors, UUID helper
+      store.go          — UserStore interface (CRUD + DeleteUser + onboard tokens), User type (with Role), sentinel errors
       memory.go         — in-memory UserStore (dev/testing)
-      sqlite.go         — SQLite UserStore (modernc.org/sqlite, default)
-      postgres.go       — PostgreSQL UserStore (pgx/v5)
+      sqlite.go         — SQLite UserStore (modernc.org/sqlite, default, with migrations)
+      postgres.go       — PostgreSQL UserStore (pgx/v5, with migrations)
       contract_test.go  — shared contract tests for all store implementations
       memory_test.go    — memory store unit tests
       sqlite_test.go    — SQLite store unit tests (contract + WAL)
@@ -66,16 +69,38 @@ swarm-rbac-proxy/
       auth_test.go      — auth middleware tests
       mtls.go           — RequireClientCert middleware (mTLS client cert → user lookup)
       mtls_test.go      — mTLS middleware unit tests
-      users.go          — UserHandler: POST/GET /api/v1/users
+      users.go          — UserHandler: POST/GET /api/v1/users, DELETE /api/v1/users/{username}
       users_test.go     — handler tests using MemoryStore
+      onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
+      onboard_test.go   — onboard handler tests
 ```
+
+## Dual Listener
+
+When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
+- **Internal** (`PROXY_INTERNAL_LISTEN`, e.g. `127.0.0.1:2375`): plain TCP, no mTLS, for admin access inside the container.
+- **External** (`PROXY_LISTEN`, e.g. `:2376`): TLS with `VerifyClientCertIfGiven`. Proxy routes require client cert; onboard endpoint does not.
 
 ## API Endpoints
 
-- `POST /api/v1/users` — Create user (`{"username":"alice"}` → 201 with user object; includes `certificate` bundle when `PROXY_TLS_CLIENT_CA_KEY` is set)
+- `POST /api/v1/users` — Create user (`{"username":"alice","role":"admin"}` → 201 with user object; includes `certificate` bundle when `PROXY_TLS_CLIENT_CA_KEY` is set)
 - `GET /api/v1/users` — List all users (200, always returns array)
+- `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found)
+- `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
 - `/v1/*` — Forwarded to agent proxy (when `PROXY_AGENT_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
+
+## Admin CLI (`swcproxy`)
+
+Runs inside the proxy container via `docker exec`. Accesses the store directly (no HTTP).
+
+```bash
+swcproxy user ls                          # List users
+swcproxy user add <username> [--admin]    # Create user + onboarding token
+swcproxy user delete <username>           # Delete user
+swcproxy user regenerate-token <username> # New onboarding token
+swcproxy --help                           # Usage info
+```
 
 ## CI
 

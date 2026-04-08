@@ -37,6 +37,26 @@ func (h *UserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Delete handles DELETE /api/v1/users/{username}.
+func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	username := r.PathValue("username")
+	if username == "" {
+		writeError(w, http.StatusBadRequest, "username is required")
+		return
+	}
+	if err := h.store.DeleteUser(r.Context(), username); err != nil {
+		if errors.Is(err, store.ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		l().Errorw("store delete failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	l().Infow("user deleted", "username", username)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 	ct := r.Header.Get("Content-Type")
 	if ct != "application/json" {
@@ -47,6 +67,7 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Username string `json:"username"`
+		Role     string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		l().Warnw("invalid JSON body", "error", err)
@@ -54,7 +75,7 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := &store.User{Username: req.Username}
+	u := &store.User{Username: req.Username, Role: req.Role}
 	if err := h.store.CreateUser(r.Context(), u); err != nil {
 		switch {
 		case errors.Is(err, store.ErrUsernameRequired):

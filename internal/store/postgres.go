@@ -15,12 +15,21 @@ import (
 func lPostgres() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.postgres") }
 
 const schema = `CREATE TABLE IF NOT EXISTS users (
-    id         UUID PRIMARY KEY,
-    username   TEXT NOT NULL UNIQUE,
-    enabled    BOOLEAN NOT NULL DEFAULT true,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                UUID PRIMARY KEY,
+    username          TEXT NOT NULL UNIQUE,
+    role              TEXT NOT NULL DEFAULT 'user',
+    enabled           BOOLEAN NOT NULL DEFAULT true,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    onboard_token     TEXT,
+    token_consumed_at TIMESTAMPTZ
 );`
+
+var pgMigrations = []string{
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboard_token TEXT`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_consumed_at TIMESTAMPTZ`,
+}
 
 // PostgresStore implements UserStore backed by PostgreSQL.
 type PostgresStore struct {
@@ -38,6 +47,13 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 		pool.Close()
 		lPostgres().Errorw("schema migration failed", "error", err)
 		return nil, err
+	}
+	for _, m := range pgMigrations {
+		if _, err := pool.Exec(ctx, m); err != nil {
+			pool.Close()
+			lPostgres().Errorw("migration failed", "error", err, "sql", m)
+			return nil, err
+		}
 	}
 	lPostgres().Infow("store initialized")
 	return &PostgresStore{pool: pool}, nil
@@ -58,11 +74,14 @@ func (s *PostgresStore) CreateUser(ctx context.Context, u *User) error {
 		return err
 	}
 
+	if u.Role == "" {
+		u.Role = "user"
+	}
 	now := time.Now().UTC()
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO users (id, username, enabled, created_at, updated_at)
-		 VALUES ($1, $2, true, $3, $4)`,
-		id, u.Username, now, now,
+		`INSERT INTO users (id, username, role, enabled, created_at, updated_at)
+		 VALUES ($1, $2, $3, true, $4, $5)`,
+		id, u.Username, u.Role, now, now,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -81,11 +100,11 @@ func (s *PostgresStore) CreateUser(ctx context.Context, u *User) error {
 
 func (s *PostgresStore) GetUserByUsername(ctx context.Context, username string) (*User, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, username, enabled, created_at, updated_at FROM users WHERE username = $1`,
+		`SELECT id, username, role, enabled, created_at, updated_at FROM users WHERE username = $1`,
 		username,
 	)
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
@@ -96,7 +115,7 @@ func (s *PostgresStore) GetUserByUsername(ctx context.Context, username string) 
 
 func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, username, enabled, created_at, updated_at FROM users ORDER BY created_at`)
+		`SELECT id, username, role, enabled, created_at, updated_at FROM users ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +124,7 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 	users := make([]User, 0)
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -114,6 +133,72 @@ func (s *PostgresStore) ListUsers(ctx context.Context) ([]User, error) {
 		return nil, err
 	}
 	return users, nil
+}
+
+func (s *PostgresStore) DeleteUser(ctx context.Context, username string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM users WHERE username = $1`, username)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetOnboardToken(ctx context.Context, username string, token string) error {
+	now := time.Now().UTC()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET onboard_token = $1, token_consumed_at = NULL, updated_at = $2 WHERE username = $3`,
+		token, now, username,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) ConsumeOnboardToken(ctx context.Context, token string) (*User, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row := tx.QueryRow(ctx,
+		`SELECT id, username, role, enabled, created_at, updated_at, token_consumed_at
+		 FROM users WHERE onboard_token = $1`, token,
+	)
+	var u User
+	var consumedAt *time.Time
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt, &consumedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrTokenNotFound
+		}
+		return nil, err
+	}
+	if consumedAt != nil {
+		return nil, ErrTokenConsumed
+	}
+
+	now := time.Now().UTC()
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET token_consumed_at = $1, updated_at = $1 WHERE id = $2`,
+		now, u.ID,
+	); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	u.UpdatedAt = now
+	u.TokenConsumedAt = &now
+	return &u, nil
 }
 
 // Ensure interface compliance.
