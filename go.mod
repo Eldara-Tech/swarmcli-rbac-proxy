@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/jackc/pgx/v5 v5.9.1
 	go.uber.org/zap v1.27.1
-	modernc.org/sqlite v1.48.0
+	modernc.org/sqlite v1.48.2
 )
 
 require (
