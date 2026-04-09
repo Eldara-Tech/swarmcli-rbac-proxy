@@ -27,6 +27,9 @@ type Config struct {
 	LogLevel       string `json:"log_level"`
 	AgentProxyURL  string `json:"agent_proxy_url"`
 	SeedUsername   string `json:"seed_username"`
+	SeedRole       string `json:"seed_role"`
+	ExternalURL    string `json:"external_url"`
+	InternalListen string `json:"internal_listen"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -52,6 +55,9 @@ var envOverrides = []struct {
 	{"PROXY_LOG_LEVEL", func(c *Config) *string { return &c.LogLevel }},
 	{"PROXY_AGENT_URL", func(c *Config) *string { return &c.AgentProxyURL }},
 	{"PROXY_SEED_USERNAME", func(c *Config) *string { return &c.SeedUsername }},
+	{"PROXY_SEED_ROLE", func(c *Config) *string { return &c.SeedRole }},
+	{"PROXY_EXTERNAL_URL", func(c *Config) *string { return &c.ExternalURL }},
+	{"PROXY_INTERNAL_LISTEN", func(c *Config) *string { return &c.InternalListen }},
 }
 
 // Load reads configuration from an optional JSON file, then applies

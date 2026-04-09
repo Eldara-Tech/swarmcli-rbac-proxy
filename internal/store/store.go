@@ -10,11 +10,14 @@ import (
 
 // User represents a managed user of the proxy.
 type User struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID              string     `json:"id"`
+	Username        string     `json:"username"`
+	Role            string     `json:"role"`
+	Enabled         bool       `json:"enabled"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	OnboardToken    string     `json:"-"`
+	TokenConsumedAt *time.Time `json:"-"`
 }
 
 // UserStore defines the persistence interface for user management.
@@ -22,12 +25,17 @@ type UserStore interface {
 	CreateUser(ctx context.Context, u *User) error
 	ListUsers(ctx context.Context) ([]User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
+	DeleteUser(ctx context.Context, username string) error
+	SetOnboardToken(ctx context.Context, username string, token string) error
+	ConsumeOnboardToken(ctx context.Context, token string) (*User, error)
 }
 
 var (
 	ErrUsernameExists   = errors.New("username already exists")
 	ErrUsernameRequired = errors.New("username is required")
 	ErrUserNotFound     = errors.New("user not found")
+	ErrTokenNotFound    = errors.New("onboard token not found")
+	ErrTokenConsumed    = errors.New("onboard token already consumed")
 )
 
 // newUUID generates a UUID v4 using crypto/rand.

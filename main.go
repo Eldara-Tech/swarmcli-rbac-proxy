@@ -261,7 +261,11 @@ func main() {
 	}
 
 	if cfg.SeedUsername != "" {
-		u := &store.User{Username: cfg.SeedUsername}
+		seedRole := cfg.SeedRole
+		if seedRole == "" {
+			seedRole = "user"
+		}
+		u := &store.User{Username: cfg.SeedUsername, Role: seedRole}
 		if err := userStore.CreateUser(context.Background(), u); err != nil {
 			if errors.Is(err, store.ErrUsernameExists) {
 				l().Infow("seed user already exists", "username", cfg.SeedUsername)
@@ -269,7 +273,7 @@ func main() {
 				l().Fatalw("seed user creation failed", "error", err)
 			}
 		} else {
-			l().Infow("seed user created", "username", cfg.SeedUsername, "id", u.ID)
+			l().Infow("seed user created", "username", cfg.SeedUsername, "role", seedRole, "id", u.ID)
 		}
 	}
 
@@ -289,8 +293,8 @@ func main() {
 		l().Warnw("admin_token not set, management API is unauthenticated")
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, api.NewUserHandler(userStore, ca)))
+	userHandler := api.NewUserHandler(userStore, ca)
+	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL)
 
 	var proxyAuth func(http.Handler) http.Handler
 	if cfg.TLSClientCA != "" {
@@ -301,21 +305,51 @@ func main() {
 		proxyAuth = func(next http.Handler) http.Handler { return next }
 	}
 
+	var agentProxy http.Handler
 	if cfg.AgentProxyURL != "" {
 		agentBE, err := parseBackend(cfg.AgentProxyURL)
 		if err != nil {
 			l().Fatalw("parse agent proxy URL", "error", err)
 		}
-		mux.Handle("/v1/", proxyAuth(newProxy(agentBE)))
+		agentProxy = newProxy(agentBE)
 		l().Infow("agent proxy forwarding enabled", "url", cfg.AgentProxyURL)
 	}
 
-	mux.Handle("/", proxyAuth(newProxy(b)))
+	dockerProxy := newProxy(b)
+
+	// registerRoutes sets up the mux with the given auth wrapper for proxy routes.
+	registerRoutes := func(mux *http.ServeMux, wrapProxy func(http.Handler) http.Handler) {
+		mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, userHandler))
+		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(cfg.AdminToken, http.HandlerFunc(userHandler.Delete)))
+		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
+		if agentProxy != nil {
+			mux.Handle("/v1/", wrapProxy(agentProxy))
+		}
+		mux.Handle("/", wrapProxy(dockerProxy))
+	}
 
 	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)
 	if b.tlsConfig != nil {
 		l().Infow("backend TLS enabled")
 	}
+
+	// Internal listener (plain TCP, no mTLS) — for admin access from localhost.
+	if cfg.InternalListen != "" {
+		internalMux := http.NewServeMux()
+		noAuth := func(next http.Handler) http.Handler { return next }
+		registerRoutes(internalMux, noAuth)
+		go func() {
+			l().Infow("internal listener starting", "addr", cfg.InternalListen)
+			if err := http.ListenAndServe(cfg.InternalListen, internalMux); err != nil {
+				l().Fatalw("internal listener exited", "error", err)
+			}
+		}()
+	}
+
+	// External listener.
+	externalMux := http.NewServeMux()
+	registerRoutes(externalMux, proxyAuth)
+
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)
 
@@ -330,13 +364,13 @@ func main() {
 				l().Fatalw("no valid certs in client CA file", "path", cfg.TLSClientCA)
 			}
 			tlsCfg.ClientCAs = pool
-			tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-			l().Infow("frontend mTLS enabled", "client_ca", cfg.TLSClientCA)
+			tlsCfg.ClientAuth = tls.VerifyClientCertIfGiven
+			l().Infow("frontend mTLS enabled (optional client cert)", "client_ca", cfg.TLSClientCA)
 		}
 
 		srv := &http.Server{
 			Addr:      listenAddr,
-			Handler:   mux,
+			Handler:   externalMux,
 			TLSConfig: tlsCfg,
 		}
 		if err := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil {
@@ -346,7 +380,7 @@ func main() {
 		if cfg.TLSClientCA != "" {
 			l().Warnw("tls_client_ca is set but tls_cert/tls_key are not; mTLS will not be enabled")
 		}
-		if err := http.ListenAndServe(listenAddr, mux); err != nil {
+		if err := http.ListenAndServe(listenAddr, externalMux); err != nil {
 			l().Fatalw("server exited", "error", err)
 		}
 	}

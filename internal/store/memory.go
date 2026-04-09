@@ -43,12 +43,64 @@ func (s *MemoryStore) CreateUser(_ context.Context, u *User) error {
 
 	now := time.Now().UTC()
 	u.ID = id
+	if u.Role == "" {
+		u.Role = "user"
+	}
 	u.Enabled = true
 	u.CreatedAt = now
 	u.UpdatedAt = now
 
 	s.users[id] = *u
 	return nil
+}
+
+func (s *MemoryStore) DeleteUser(_ context.Context, username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, u := range s.users {
+		if u.Username == username {
+			delete(s.users, id)
+			return nil
+		}
+	}
+	return ErrUserNotFound
+}
+
+func (s *MemoryStore) SetOnboardToken(_ context.Context, username string, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, u := range s.users {
+		if u.Username == username {
+			u.OnboardToken = token
+			u.TokenConsumedAt = nil
+			u.UpdatedAt = time.Now().UTC()
+			s.users[id] = u
+			return nil
+		}
+	}
+	return ErrUserNotFound
+}
+
+func (s *MemoryStore) ConsumeOnboardToken(_ context.Context, token string) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, u := range s.users {
+		if u.OnboardToken == token {
+			if u.TokenConsumedAt != nil {
+				return nil, ErrTokenConsumed
+			}
+			now := time.Now().UTC()
+			u.TokenConsumedAt = &now
+			u.UpdatedAt = now
+			s.users[id] = u
+			cp := u
+			return &cp, nil
+		}
+	}
+	return nil, ErrTokenNotFound
 }
 
 func (s *MemoryStore) GetUserByUsername(_ context.Context, username string) (*User, error) {
