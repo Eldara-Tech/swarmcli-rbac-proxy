@@ -40,7 +40,8 @@ swarm-rbac-proxy/
   main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS)
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
-  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23), builds proxy + swcproxy, CMD so /bin/sh stays usable
+  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23), builds proxy + swcproxy (/usr/local/bin), welcome banner via profile.d, CMD so /bin/sh stays usable
+  welcome.sh            — container login banner (COPY'd to /etc/profile.d/welcome.sh)
   stack.yml             — Docker Swarm stack definition
   cmd/
     swcproxy/
