@@ -7,5 +7,8 @@ RUN go build -o /proxy . && go build -o /swcproxy ./cmd/swcproxy
 
 FROM alpine:3.23
 COPY --from=build /proxy /proxy
-COPY --from=build /swcproxy /swcproxy
+COPY --from=build /swcproxy /usr/local/bin/swcproxy
+COPY welcome.sh /etc/profile.d/welcome.sh
+RUN chmod +x /etc/profile.d/welcome.sh
+ENV ENV=/etc/profile.d/welcome.sh
 CMD ["/proxy"]
