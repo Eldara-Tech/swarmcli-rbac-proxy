@@ -43,7 +43,8 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		"env":             "dev",
 		"log_level":       "debug",
 		"agent_proxy_url": "tcp://agent:9090",
-		"seed_username":   "admin"
+		"seed_username":   "admin",
+		"protected_stack": "swarmcli-infra"
 	}`)
 
 	cfg, err := Load(f)
@@ -71,6 +72,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		{"LogLevel", cfg.LogLevel, "debug"},
 		{"AgentProxyURL", cfg.AgentProxyURL, "tcp://agent:9090"},
 		{"SeedUsername", cfg.SeedUsername, "admin"},
+		{"ProtectedStack", cfg.ProtectedStack, "swarmcli-infra"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -170,6 +172,7 @@ func TestLoad_AllEnvVars(t *testing.T) {
 		"PROXY_LOG_LEVEL":         "debug",
 		"PROXY_AGENT_URL":         "tcp://agent:9090",
 		"PROXY_SEED_USERNAME":     "admin",
+		"PROXY_PROTECTED_STACK":   "mystack",
 	}
 	for k, v := range envs {
 		t.Setenv(k, v)
@@ -232,6 +235,9 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	}
 	if cfg.SeedUsername != "admin" {
 		t.Errorf("SeedUsername = %q", cfg.SeedUsername)
+	}
+	if cfg.ProtectedStack != "mystack" {
+		t.Errorf("ProtectedStack = %q", cfg.ProtectedStack)
 	}
 }
 

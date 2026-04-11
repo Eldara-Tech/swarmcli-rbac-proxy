@@ -27,11 +27,22 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375").
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset).
 
 ## Agent Proxy Forwarding
 
 When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-host:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
+
+## Stack Resource Protection
+
+When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
+
+Non-admin users cannot:
+- Delete or update services, secrets, networks, volumes, or configs belonging to the protected stack
+- Create resources with the protected stack's namespace label
+- Execute `POST /swarm/leave`
+
+Admin users bypass all guards. The internal listener (plain TCP) is always treated as admin. If auto-detection fails (e.g. running outside Docker) and no override is set, the guard is disabled.
 
 ## Architecture
 
@@ -74,6 +85,10 @@ swarm-rbac-proxy/
       users_test.go     — handler tests using MemoryStore
       onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
       onboard_test.go   — onboard handler tests
+      guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation
+      guard_test.go     — guard middleware tests (path parsing, admin check, back-query, body inspection)
+      stackdetect.go    — DetectStackName: auto-discovers stack name from container labels via Docker API
+      stackdetect_test.go — stack detection tests
 ```
 
 ## Dual Listener

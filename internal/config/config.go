@@ -30,6 +30,7 @@ type Config struct {
 	SeedRole       string `json:"seed_role"`
 	ExternalURL    string `json:"external_url"`
 	InternalListen string `json:"internal_listen"`
+	ProtectedStack string `json:"protected_stack"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -58,6 +59,7 @@ var envOverrides = []struct {
 	{"PROXY_SEED_ROLE", func(c *Config) *string { return &c.SeedRole }},
 	{"PROXY_EXTERNAL_URL", func(c *Config) *string { return &c.ExternalURL }},
 	{"PROXY_INTERNAL_LISTEN", func(c *Config) *string { return &c.InternalListen }},
+	{"PROXY_PROTECTED_STACK", func(c *Config) *string { return &c.ProtectedStack }},
 }
 
 // Load reads configuration from an optional JSON file, then applies
