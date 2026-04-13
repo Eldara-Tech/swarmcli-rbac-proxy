@@ -93,12 +93,17 @@ func isAdmin(r *http.Request) bool {
 	return user.Role == "admin"
 }
 
-// RequireAdminForExec returns middleware that blocks non-admin external
-// users from all exec/attach endpoints (Docker API and agent API).
-// Internal listener requests (no user context) are allowed through.
+// RequireAdminForExec returns middleware that blocks non-admin users from
+// all exec/attach endpoints (Docker API and agent API). Only users with
+// the admin role in context may proceed. Requests without a user context
+// (e.g. unauthenticated external requests) are also blocked.
+//
+// This middleware must NOT be applied to the internal listener — the
+// internal listener should register routes without it so that localhost
+// exec is always allowed.
 func RequireAdminForExec(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isExecPath(r.Method, r.URL.Path) && !isInternalListener(r) && !isAdmin(r) {
+		if isExecPath(r.Method, r.URL.Path) && !isAdmin(r) {
 			writeError(w, http.StatusForbidden, "exec requires admin role")
 			return
 		}

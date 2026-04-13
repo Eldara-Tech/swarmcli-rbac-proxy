@@ -1206,3 +1206,221 @@ func TestIntegration_FrontendMTLS_UserUpdateProtectedService(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
 	}
 }
+
+// --- Exec guard integration tests ---
+
+// TestIntegration_ExecGuard_NoMTLS_Blocked tests the bootstrap deployment
+// scenario: no mTLS configured, external listener. Agent exec requests
+// must be blocked because there is no authenticated user context.
+func TestIntegration_ExecGuard_NoMTLS_Blocked(t *testing.T) {
+	agentBackend := startTCPServer(t, dockerMock())
+	agentBE := backend{network: "tcp", address: agentBackend}
+	agentProxy := newProxy(agentBE)
+
+	// External listener without mTLS — mirrors bootstrap deployment.
+	noAuth := func(next http.Handler) http.Handler { return next }
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", noAuth(api.RequireAdminForExec(agentProxy)))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/exec", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
+	}
+}
+
+// TestIntegration_ExecGuard_NoMTLS_DockerExecBlocked tests that Docker API
+// exec is also blocked on the external listener without mTLS.
+func TestIntegration_ExecGuard_NoMTLS_DockerExecBlocked(t *testing.T) {
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	noAuth := func(next http.Handler) http.Handler { return next }
+	mux := http.NewServeMux()
+	mux.Handle("/", noAuth(api.RequireAdminForExec(newProxy(b))))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/v1.44/containers/abc/exec", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
+	}
+}
+
+// TestIntegration_ExecGuard_NoMTLS_NonExecAllowed tests that non-exec
+// requests still pass through on the external listener without mTLS.
+func TestIntegration_ExecGuard_NoMTLS_NonExecAllowed(t *testing.T) {
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	noAuth := func(next http.Handler) http.Handler { return next }
+	mux := http.NewServeMux()
+	mux.Handle("/", noAuth(api.RequireAdminForExec(newProxy(b))))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/v1.44/containers/json", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusOK, body)
+	}
+}
+
+// TestIntegration_ExecGuard_MTLS_AdminAllowed tests that an admin user
+// authenticated via mTLS can use the exec endpoint.
+func TestIntegration_ExecGuard_MTLS_AdminAllowed(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("admin"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "admin", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", api.RequireClientCert(s, api.RequireAdminForExec(newProxy(b))))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest("POST", "https://"+ln.Addr().String()+"/v1.44/containers/abc/exec", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusOK, body)
+	}
+}
+
+// TestIntegration_ExecGuard_MTLS_UserBlocked tests that a non-admin user
+// authenticated via mTLS is blocked from exec.
+func TestIntegration_ExecGuard_MTLS_UserBlocked(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("alice"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "alice", Role: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", api.RequireClientCert(s, api.RequireAdminForExec(newProxy(b))))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest("POST", "https://"+ln.Addr().String()+"/v1.44/containers/abc/exec", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
+	}
+}
+
+// TestIntegration_InternalListener_ExecAllowed tests that the internal
+// listener allows exec without RequireAdminForExec — matching the
+// internal listener wiring in main.go (no exec guard applied).
+func TestIntegration_InternalListener_ExecAllowed(t *testing.T) {
+	agentBackend := startTCPServer(t, dockerMock())
+	agentBE := backend{network: "tcp", address: agentBackend}
+
+	// Internal listener: no auth, no exec guard — mirrors main.go.
+	mux := http.NewServeMux()
+	mux.Handle("/v1/", newProxy(agentBE))
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/exec", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusOK, body)
+	}
+}

@@ -616,20 +616,21 @@ func TestRequireAdminForExec_AdminAllowed(t *testing.T) {
 	}
 }
 
-func TestRequireAdminForExec_InternalListenerAllowed(t *testing.T) {
+func TestRequireAdminForExec_NoUserContextBlocked(t *testing.T) {
 	inner, called := passHandler()
 	handler := RequireAdminForExec(inner)
 
+	// No user in context — e.g. external listener without mTLS.
 	r := httptest.NewRequest("GET", "/v1/exec", nil)
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, r)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
 	}
-	if !*called {
-		t.Error("inner handler should have been called")
+	if *called {
+		t.Error("inner handler should not have been called")
 	}
 }
 

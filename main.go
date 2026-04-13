@@ -338,17 +338,20 @@ func main() {
 		l().Infow("agent proxy forwarding enabled", "url", cfg.AgentProxyURL)
 	}
 
-	dockerProxy := api.RequireAdminForExec(guard.Wrap(newProxy(b)))
+	dockerProxy := guard.Wrap(newProxy(b))
 
-	// registerRoutes sets up the mux with the given auth wrapper for proxy routes.
-	registerRoutes := func(mux *http.ServeMux, wrapProxy func(http.Handler) http.Handler) {
+	// registerRoutes sets up the mux with the given auth wrapper for proxy
+	// routes. wrapExec applies exec access control — RequireAdminForExec on
+	// the external listener, no-op on the internal listener (where localhost
+	// exec is always allowed).
+	registerRoutes := func(mux *http.ServeMux, wrapProxy, wrapExec func(http.Handler) http.Handler) {
 		mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, userHandler))
 		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(cfg.AdminToken, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
 		if agentProxy != nil {
-			mux.Handle("/v1/", wrapProxy(api.RequireAdminForExec(agentProxy)))
+			mux.Handle("/v1/", wrapProxy(wrapExec(agentProxy)))
 		}
-		mux.Handle("/", wrapProxy(dockerProxy))
+		mux.Handle("/", wrapProxy(wrapExec(dockerProxy)))
 	}
 
 	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)
@@ -360,7 +363,8 @@ func main() {
 	if cfg.InternalListen != "" {
 		internalMux := http.NewServeMux()
 		noAuth := func(next http.Handler) http.Handler { return next }
-		registerRoutes(internalMux, noAuth)
+		noExecGuard := func(next http.Handler) http.Handler { return next }
+		registerRoutes(internalMux, noAuth, noExecGuard)
 		go func() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
 			if err := http.ListenAndServe(cfg.InternalListen, internalMux); err != nil {
@@ -371,7 +375,7 @@ func main() {
 
 	// External listener.
 	externalMux := http.NewServeMux()
-	registerRoutes(externalMux, proxyAuth)
+	registerRoutes(externalMux, proxyAuth, api.RequireAdminForExec)
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)
