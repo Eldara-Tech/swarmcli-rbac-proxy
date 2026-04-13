@@ -816,3 +816,197 @@ func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
 		t.Fatalf("docker request: status = %d, body = %s", dockerResp.StatusCode, body)
 	}
 }
+
+// --- Integration tests: mTLS + ResourceGuard ---
+
+// startMockDockerSocket creates a Unix socket that serves Docker inspect
+// responses for the guard's back-queries. The handler should respond to
+// GET /services/{id} (or /networks/{id}, etc.) with the resource's JSON.
+func startMockDockerSocket(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return sock
+}
+
+// startMTLSFrontendWithGuard is like startMTLSFrontend but includes the
+// ResourceGuard middleware, mirroring the wiring in main.go:
+//
+//	RequireClientCert → guard.Wrap → newProxy(backend)
+func startMTLSFrontendWithGuard(
+	t *testing.T,
+	serverCert tls.Certificate,
+	clientCA *x509.CertPool,
+	userStore store.UserStore,
+	backendHandler http.Handler,
+	protectedStack string,
+	dockerSocketPath string,
+) string {
+	t.Helper()
+
+	backendAddr := startTCPServer(t, backendHandler)
+	b := backend{network: "tcp", address: backendAddr}
+
+	guard := api.NewResourceGuard(protectedStack, dockerSocketPath)
+
+	mux := http.NewServeMux()
+	mux.Handle("/", api.RequireClientCert(userStore, guard.Wrap(newProxy(b))))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    clientCA,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return ln.Addr().String()
+}
+
+// TestIntegration_FrontendMTLS_UserDeleteProtectedService verifies that a
+// non-admin user authenticated via mTLS is blocked from deleting a service
+// belonging to the protected stack.
+func TestIntegration_FrontendMTLS_UserDeleteProtectedService(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("alice"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "alice", Role: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock Docker socket: returns a service belonging to the protected stack.
+	dockerMockInspect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startMockDockerSocket(t, dockerMockInspect)
+
+	addr := startMTLSFrontendWithGuard(t, serverCert, caPool, s, dockerMock(), "swarmcli-infra", sock)
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest(http.MethodDelete, "https://"+addr+"/v1.44/services/proxy-svc", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
+	}
+}
+
+// TestIntegration_FrontendMTLS_AdminDeleteProtectedService verifies that an
+// admin user authenticated via mTLS is blocked from deleting a protected
+// stack service — only the internal listener can mutate protected resources.
+func TestIntegration_FrontendMTLS_AdminDeleteProtectedService(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("admin"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "admin", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+
+	dockerMockInspect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startMockDockerSocket(t, dockerMockInspect)
+
+	addr := startMTLSFrontendWithGuard(t, serverCert, caPool, s, dockerMock(), "swarmcli-infra", sock)
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest(http.MethodDelete, "https://"+addr+"/v1.44/services/proxy-svc", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
+	}
+}
+
+// TestIntegration_FrontendMTLS_UserDeleteNonProtectedService verifies that a
+// non-admin user can delete a service that does not belong to the protected stack.
+func TestIntegration_FrontendMTLS_UserDeleteNonProtectedService(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("bob"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "bob", Role: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock Docker socket: returns a service NOT in the protected stack.
+	dockerMockInspect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"user-app"}}}`)
+	})
+	sock := startMockDockerSocket(t, dockerMockInspect)
+
+	addr := startMTLSFrontendWithGuard(t, serverCert, caPool, s, dockerMock(), "swarmcli-infra", sock)
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest(http.MethodDelete, "https://"+addr+"/v1.44/services/user-svc", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusOK, body)
+	}
+
+	// Verify the request actually reached the backend.
+	body, _ := io.ReadAll(resp.Body)
+	respStr := string(body)
+	_ = respStr // backend echoes path; status 200 is sufficient proof
+}

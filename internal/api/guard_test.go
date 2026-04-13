@@ -79,16 +79,16 @@ func TestParseDockerPath(t *testing.T) {
 	}
 }
 
-// --- isAdmin tests ---
+// --- isInternalListener tests ---
 
-func TestIsAdmin(t *testing.T) {
+func TestIsInternalListener(t *testing.T) {
 	tests := []struct {
 		name string
 		user *store.User
 		want bool
 	}{
 		{"no user in context (internal)", nil, true},
-		{"admin role", &store.User{Role: "admin"}, true},
+		{"admin role", &store.User{Role: "admin"}, false},
 		{"user role", &store.User{Role: "user"}, false},
 		{"empty role", &store.User{Role: ""}, false},
 	}
@@ -100,8 +100,8 @@ func TestIsAdmin(t *testing.T) {
 				ctx := context.WithValue(r.Context(), ContextKeyUser, tt.user)
 				r = r.WithContext(ctx)
 			}
-			if got := isAdmin(r); got != tt.want {
-				t.Errorf("isAdmin() = %v, want %v", got, tt.want)
+			if got := isInternalListener(r); got != tt.want {
+				t.Errorf("isInternalListener() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -164,11 +164,11 @@ func TestGuard_AdminDeleteProtectedService(t *testing.T) {
 
 	handler.ServeHTTP(w, r)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
 	}
-	if !*called {
-		t.Error("inner handler should have been called")
+	if *called {
+		t.Error("inner handler should not have been called")
 	}
 }
 
@@ -290,11 +290,11 @@ func TestGuard_AdminSwarmLeave(t *testing.T) {
 
 	handler.ServeHTTP(w, r)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
 	}
-	if !*called {
-		t.Error("inner handler should have been called")
+	if *called {
+		t.Error("inner handler should not have been called")
 	}
 }
 

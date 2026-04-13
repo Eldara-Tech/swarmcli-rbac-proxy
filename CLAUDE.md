@@ -37,12 +37,12 @@ When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1
 
 When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
 
-Non-admin users cannot:
+All users connecting through the external (mTLS) listener cannot:
 - Delete or update services, secrets, networks, volumes, or configs belonging to the protected stack
 - Create resources with the protected stack's namespace label
 - Execute `POST /swarm/leave`
 
-Admin users bypass all guards. The internal listener (plain TCP) is always treated as admin. If auto-detection fails (e.g. running outside Docker) and no override is set, the guard is disabled.
+Only the internal listener (plain TCP, direct container access) can mutate protected resources. If auto-detection fails (e.g. running outside Docker) and no override is set, the guard is disabled.
 
 ## Architecture
 

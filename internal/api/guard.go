@@ -76,18 +76,15 @@ func parseDockerPath(method, path string) *dockerRoute {
 	return nil
 }
 
-// isAdmin returns true if the request comes from an admin user or has no
-// user context (internal listener).
-func isAdmin(r *http.Request) bool {
+// isInternalListener returns true when the request has no user context,
+// meaning it arrived on the internal (plain TCP) listener.
+func isInternalListener(r *http.Request) bool {
 	user, ok := r.Context().Value(ContextKeyUser).(*store.User)
-	if !ok || user == nil {
-		return true // internal listener — trusted
-	}
-	return user.Role == "admin"
+	return !ok || user == nil
 }
 
 // ResourceGuard is middleware that protects Docker Swarm stack resources
-// from mutation by non-admin users.
+// from mutation via the external listener.
 type ResourceGuard struct {
 	stackName  string
 	httpClient *http.Client
@@ -122,15 +119,15 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		if isAdmin(r) {
+		if isInternalListener(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Unconditional block for non-admins.
+		// Unconditional block for all external users.
 		if route.resource == "swarm" && route.action == "leave" {
 			l().Warnw("guard: blocked swarm leave", "path", r.URL.Path)
-			writeError(w, http.StatusForbidden, "swarm leave requires admin role")
+			writeError(w, http.StatusForbidden, "swarm leave requires direct access")
 			return
 		}
 
