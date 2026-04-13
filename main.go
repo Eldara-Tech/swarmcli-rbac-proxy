@@ -293,6 +293,29 @@ func main() {
 		l().Warnw("admin_token not set, management API is unauthenticated")
 	}
 
+	// Determine protected stack name (auto-detect or explicit override).
+	protectedStack := cfg.ProtectedStack
+	socketPath := ""
+	if b.network == "unix" {
+		socketPath = b.address
+	}
+	if protectedStack == "" && socketPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		detected, detectErr := api.DetectStackName(ctx, socketPath)
+		cancel()
+		if detectErr != nil {
+			l().Warnw("stack self-detection failed, resource guard disabled", "error", detectErr)
+		} else {
+			protectedStack = detected
+			l().Infow("detected protected stack", "stack", protectedStack)
+		}
+	}
+
+	guard := api.NewResourceGuard(protectedStack, socketPath)
+	if protectedStack != "" {
+		l().Infow("resource guard enabled", "protected_stack", protectedStack)
+	}
+
 	userHandler := api.NewUserHandler(userStore, ca)
 	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL)
 
@@ -315,7 +338,7 @@ func main() {
 		l().Infow("agent proxy forwarding enabled", "url", cfg.AgentProxyURL)
 	}
 
-	dockerProxy := newProxy(b)
+	dockerProxy := guard.Wrap(newProxy(b))
 
 	// registerRoutes sets up the mux with the given auth wrapper for proxy routes.
 	registerRoutes := func(mux *http.ServeMux, wrapProxy func(http.Handler) http.Handler) {

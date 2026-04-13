@@ -1,6 +1,6 @@
 services:
   proxy:
-    image: eldaratech/swarm-rbac-proxy:latest
+    image: eldaratech/swarmcli-rbac-proxy:latest
     deploy:
       placement:
         constraints: [node.role == manager]

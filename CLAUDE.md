@@ -27,11 +27,36 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375").
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset).
 
 ## Agent Proxy Forwarding
 
 When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-host:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
+
+## Stack Resource Protection
+
+When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
+
+### Permission matrix
+
+| Operation on protected resource | Internal listener | External admin | External user |
+|---------------------------------|-------------------|----------------|---------------|
+| Read (GET)                      | allowed           | allowed        | allowed       |
+| Create (POST .../create)        | allowed           | blocked (403)  | blocked (403) |
+| Update (POST .../update)        | allowed           | allowed        | blocked (403) |
+| Delete (DELETE .../{id})        | allowed           | blocked (403)  | blocked (403) |
+| Swarm leave (POST /swarm/leave) | allowed           | blocked (403)  | blocked (403) |
+
+All operations on **non-protected** resources are allowed for all roles.
+
+If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
+
+### Rationale
+
+- **Create blocked for all external users**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
+- **Update allowed for admins**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
+- **Delete blocked for all external users**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
+- **Swarm leave blocked for all external users**: destructive — tears down the entire cluster. Only via internal listener.
 
 ## Architecture
 
@@ -74,6 +99,10 @@ swarm-rbac-proxy/
       users_test.go     — handler tests using MemoryStore
       onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
       onboard_test.go   — onboard handler tests
+      guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation
+      guard_test.go     — guard middleware tests (path parsing, admin check, back-query, body inspection)
+      stackdetect.go    — DetectStackName: auto-discovers stack name from container labels via Docker API
+      stackdetect_test.go — stack detection tests
 ```
 
 ## Dual Listener
