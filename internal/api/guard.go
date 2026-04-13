@@ -15,7 +15,7 @@ import (
 // dockerRoute describes a parsed Docker API request targeting a protected
 // resource type.
 type dockerRoute struct {
-	resource string // "services", "secrets", "networks", "volumes", "configs", "swarm"
+	resource string // "services", "secrets", "networks", "volumes", "configs", "swarm", "containers"
 	id       string // resource ID or name (empty for create/leave)
 	action   string // "delete", "update", "create", "leave"
 }
@@ -52,6 +52,13 @@ func parseDockerPath(method, path string) *dockerRoute {
 	// POST /swarm/leave
 	if len(parts) >= 2 && parts[0] == "swarm" && parts[1] == "leave" && method == http.MethodPost {
 		return &dockerRoute{resource: "swarm", action: "leave"}
+	}
+
+	// POST /containers/{id}/exec or POST /containers/{id}/attach
+	if len(parts) == 3 && parts[0] == "containers" && method == http.MethodPost {
+		if parts[2] == "exec" || parts[2] == "attach" {
+			return &dockerRoute{resource: "containers", id: parts[1], action: "exec"}
+		}
 	}
 
 	resource := parts[0]
@@ -141,6 +148,26 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
+		// Exec/attach on protected stack containers — admin only.
+		if route.resource == "containers" && route.action == "exec" {
+			if !isAdmin(r) {
+				protected, err := g.isProtectedContainer(r.Context(), route.id)
+				if err != nil {
+					l().Warnw("guard: container back-query failed, allowing request",
+						"error", err, "container", route.id)
+				}
+				if protected {
+					l().Warnw("guard: blocked exec/attach on protected container",
+						"path", r.URL.Path, "container", route.id)
+					writeError(w, http.StatusForbidden,
+						"exec/attach on protected stack container requires admin role")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		switch route.action {
 		case "create":
 			protected, err := g.hasProtectedLabel(r)
@@ -225,6 +252,42 @@ func (g *ResourceGuard) isProtectedResource(ctx context.Context, resource, id st
 		return true, nil
 	}
 	return false, nil
+}
+
+// isProtectedContainer checks whether a container belongs to the protected
+// stack by querying the Docker API for the container inspect and checking
+// Config.Labels for the stack namespace label.
+func (g *ResourceGuard) isProtectedContainer(ctx context.Context, id string) (bool, error) {
+	if g.httpClient == nil {
+		return false, nil
+	}
+
+	url := "http://docker/containers/" + id + "/json"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false, err
+	}
+
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, nil // container not found or error — fail open
+	}
+
+	var result struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+
+	return result.Config.Labels[stackNamespaceLabel] == g.stackName, nil
 }
 
 // hasProtectedLabel reads the request body for create operations and checks
