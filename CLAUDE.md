@@ -1,6 +1,6 @@
 # swarmcli-rbac-proxy
 
-Transparent reverse proxy that relays Docker API requests from TCP to a Unix socket. Includes a management API for user CRUD, the foundation for future RBAC.
+Transparent reverse proxy that relays Docker API requests from TCP to a Unix socket, with multi-user mTLS authentication and role-based access control.
 
 ## Maintaining this file
 

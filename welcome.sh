@@ -9,7 +9,7 @@ if [ -z "$_WELCOME_SHOWN" ]; then
   SwarmCLI RBAC Proxy
 
   Report issues : https://github.com/Eldara-Tech/swarmcli-rbac-proxy/issues
-  License       : See LICENSE file for details
+  License       : See repository for details
   CLI help      : swcproxy --help
 
 BANNER
