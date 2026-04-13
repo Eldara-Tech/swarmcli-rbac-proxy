@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"swarm-rbac-proxy/internal/config"
@@ -136,6 +137,14 @@ func getExternalURL() string {
 	return "<PROXY_HOST>:<PORT>"
 }
 
+// curlURL converts a Docker-style tcp:// URL to https:// for use in curl commands.
+func curlURL(rawURL string) string {
+	if after, ok := strings.CutPrefix(rawURL, "tcp://"); ok {
+		return "https://" + after
+	}
+	return rawURL
+}
+
 func generateToken() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -182,7 +191,7 @@ func cmdUserAdd(username string, admin bool) {
 	fmt.Printf("User created: %s (role: %s)\n", username, role)
 	fmt.Printf("Onboard token: %s\n\n", token)
 	fmt.Printf("Share this command with the user:\n")
-	fmt.Printf("  curl -k %s/api/v1/onboard/%s -o %s.tar\n\n", extURL, token, username)
+	fmt.Printf("  curl -k %s/api/v1/onboard/%s -o %s.tar\n\n", curlURL(extURL), token, username)
 	fmt.Printf("Then import the context:\n")
 	fmt.Printf("  docker context import %s-managed %s.tar\n", username, username)
 }
@@ -212,7 +221,7 @@ func cmdUserRegenerateToken(username string) {
 	extURL := getExternalURL()
 	fmt.Printf("New onboard token for %s: %s\n\n", username, token)
 	fmt.Printf("Share this command with the user:\n")
-	fmt.Printf("  curl -k %s/api/v1/onboard/%s -o %s.tar\n\n", extURL, token, username)
+	fmt.Printf("  curl -k %s/api/v1/onboard/%s -o %s.tar\n\n", curlURL(extURL), token, username)
 	fmt.Printf("Then import the context:\n")
 	fmt.Printf("  docker context import %s-managed %s.tar\n", username, username)
 }
