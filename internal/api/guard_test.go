@@ -107,6 +107,34 @@ func TestIsInternalListener(t *testing.T) {
 	}
 }
 
+// --- isAdmin tests ---
+
+func TestIsAdmin(t *testing.T) {
+	tests := []struct {
+		name string
+		user *store.User
+		want bool
+	}{
+		{"no user in context (internal)", nil, false},
+		{"admin role", &store.User{Role: "admin"}, true},
+		{"user role", &store.User{Role: "user"}, false},
+		{"empty role", &store.User{Role: ""}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/", nil)
+			if tt.user != nil {
+				ctx := context.WithValue(r.Context(), ContextKeyUser, tt.user)
+				r = r.WithContext(ctx)
+			}
+			if got := isAdmin(r); got != tt.want {
+				t.Errorf("isAdmin() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- ResourceGuard.Wrap integration tests ---
 
 // passHandler records that it was called and echoes back 200.
@@ -169,6 +197,30 @@ func TestGuard_AdminDeleteProtectedService(t *testing.T) {
 	}
 	if *called {
 		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestGuard_AdminUpdateProtectedService(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startTestSocket(t, mock)
+
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/services/proxy-svc/update", nil)
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
 	}
 }
 

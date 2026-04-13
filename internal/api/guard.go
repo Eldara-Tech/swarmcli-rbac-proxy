@@ -83,6 +83,16 @@ func isInternalListener(r *http.Request) bool {
 	return !ok || user == nil
 }
 
+// isAdmin returns true if the request comes from a user with the admin role.
+// Returns false for the internal listener (no user context).
+func isAdmin(r *http.Request) bool {
+	user, ok := r.Context().Value(ContextKeyUser).(*store.User)
+	if !ok || user == nil {
+		return false
+	}
+	return user.Role == "admin"
+}
+
 // ResourceGuard is middleware that protects Docker Swarm stack resources
 // from mutation via the external listener.
 type ResourceGuard struct {
@@ -143,14 +153,28 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 				return
 			}
 
-		case "delete", "update":
+		case "update":
+			if isAdmin(r) {
+				break // admins may update protected resources
+			}
 			protected, err := g.isProtectedResource(r.Context(), route.resource, route.id)
 			if err != nil {
 				l().Warnw("guard: back-query failed, allowing request", "error", err, "resource", route.resource, "id", route.id)
 			}
 			if protected {
-				l().Warnw("guard: blocked mutation of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
+				l().Warnw("guard: blocked update of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
 				writeError(w, http.StatusForbidden, "cannot modify protected stack resource")
+				return
+			}
+
+		case "delete":
+			protected, err := g.isProtectedResource(r.Context(), route.resource, route.id)
+			if err != nil {
+				l().Warnw("guard: back-query failed, allowing request", "error", err, "resource", route.resource, "id", route.id)
+			}
+			if protected {
+				l().Warnw("guard: blocked delete of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
+				writeError(w, http.StatusForbidden, "cannot delete protected stack resource")
 				return
 			}
 		}

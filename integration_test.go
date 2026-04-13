@@ -1120,3 +1120,89 @@ func TestIntegration_FrontendMTLS_AdminSwarmLeave(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
 	}
 }
+
+// TestIntegration_FrontendMTLS_AdminUpdateProtectedService verifies that an
+// admin user can update a protected stack service through the mTLS proxy.
+func TestIntegration_FrontendMTLS_AdminUpdateProtectedService(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("admin"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "admin", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+
+	dockerMockInspect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startMockDockerSocket(t, dockerMockInspect)
+
+	addr := startMTLSFrontendWithGuard(t, serverCert, caPool, s, dockerMock(), "swarmcli-infra", sock)
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest(http.MethodPost, "https://"+addr+"/v1.44/services/proxy-svc/update", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusOK, body)
+	}
+}
+
+// TestIntegration_FrontendMTLS_UserUpdateProtectedService verifies that a
+// non-admin user is blocked from updating a protected stack service.
+func TestIntegration_FrontendMTLS_UserUpdateProtectedService(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("alice"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "alice", Role: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	dockerMockInspect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startMockDockerSocket(t, dockerMockInspect)
+
+	addr := startMTLSFrontendWithGuard(t, serverCert, caPool, s, dockerMock(), "swarmcli-infra", sock)
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest(http.MethodPost, "https://"+addr+"/v1.44/services/proxy-svc/update", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
+	}
+}

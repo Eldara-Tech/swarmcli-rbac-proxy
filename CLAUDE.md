@@ -37,12 +37,26 @@ When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1
 
 When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
 
-All users connecting through the external (mTLS) listener cannot:
-- Delete or update services, secrets, networks, volumes, or configs belonging to the protected stack
-- Create resources with the protected stack's namespace label
-- Execute `POST /swarm/leave`
+### Permission matrix
 
-Only the internal listener (plain TCP, direct container access) can mutate protected resources. If auto-detection fails (e.g. running outside Docker) and no override is set, the guard is disabled.
+| Operation on protected resource | Internal listener | External admin | External user |
+|---------------------------------|-------------------|----------------|---------------|
+| Read (GET)                      | allowed           | allowed        | allowed       |
+| Create (POST .../create)        | allowed           | blocked (403)  | blocked (403) |
+| Update (POST .../update)        | allowed           | allowed        | blocked (403) |
+| Delete (DELETE .../{id})        | allowed           | blocked (403)  | blocked (403) |
+| Swarm leave (POST /swarm/leave) | allowed           | blocked (403)  | blocked (403) |
+
+All operations on **non-protected** resources are allowed for all roles.
+
+If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
+
+### Rationale
+
+- **Create blocked for all external users**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
+- **Update allowed for admins**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
+- **Delete blocked for all external users**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
+- **Swarm leave blocked for all external users**: destructive — tears down the entire cluster. Only via internal listener.
 
 ## Architecture
 
