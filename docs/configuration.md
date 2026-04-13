@@ -1,5 +1,13 @@
 # Configuration
 
+- [Environment variables](#environment-variables)
+- [Config file reference](#config-file-reference)
+- [Usage examples](#usage-examples)
+- [Dual listener](#dual-listener)
+- [Stack resource protection](#stack-resource-protection)
+- [User onboarding](#user-onboarding)
+- [Docker Compose (local, no Swarm)](#docker-compose-local-no-swarm)
+
 The proxy can be configured via environment variables, an optional JSON config file, or both. When both are used, environment variables always override JSON file values.
 
 To use a config file, set the `PROXY_CONFIG` environment variable to its path:
@@ -28,6 +36,11 @@ PROXY_CONFIG=/etc/swarm-rbac-proxy/config.json ./swarm-rbac-proxy
 | `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`) |
 | `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token for management API auth. When set, `/api/v1/*` requires `Authorization: Bearer <token>` |
 | `PROXY_SEED_USERNAME` | _(none)_ | Username to create at startup if it does not already exist. Used to bootstrap the first user for mTLS access |
+| `PROXY_SEED_ROLE` | `user` | Role assigned to the seed user: `user` or `admin` |
+| `PROXY_EXTERNAL_URL` | _(none)_ | Base URL for onboarding curl instructions (e.g. `https://proxy.example.com:2376`). Used by `swcproxy user add` and the onboard tar context |
+| `PROXY_INTERNAL_LISTEN` | _(none)_ | Address for the internal plain TCP listener (e.g. `127.0.0.1:2375`). No mTLS. For admin access inside the container. See [Dual listener](#dual-listener) |
+| `PROXY_PROTECTED_STACK` | _(auto-detected)_ | Stack name to protect from external mutation. Auto-detected from container label `com.docker.stack.namespace` when running in a Swarm stack. See [Stack resource protection](#stack-resource-protection) |
+| `PROXY_AGENT_URL` | _(none)_ | Backend URL for `/v1/*` agent proxy forwarding (e.g. `tcp://agent-host:9090`). HTTP and WebSocket upgrade supported |
 | `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder) |
 | `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error` |
 
@@ -52,6 +65,11 @@ JSON keys must use snake_case (matching the Go struct tags). Unknown keys are re
   "database_url":    "postgres://user:pass@host:5432/db",
   "admin_token":     "my-secret-token",
   "seed_username":   "admin",
+  "seed_role":       "admin",
+  "external_url":    "https://proxy.example.com:2376",
+  "internal_listen": "127.0.0.1:2375",
+  "protected_stack": "my-stack",
+  "agent_proxy_url": "tcp://agent-host:9090",
   "env":             "prod",
   "log_level":       "info"
 }
@@ -155,6 +173,7 @@ Response:
 {
   "id": "a1b2c3d4-...",
   "username": "alice",
+  "role": "user",
   "enabled": true,
   "created_at": "2026-04-02T12:00:00Z",
   "updated_at": "2026-04-02T12:00:00Z",
@@ -281,3 +300,138 @@ curl -s http://localhost:2375/api/v1/users \
 Without the token, requests return `401 Unauthorized`. Docker proxy routes are unaffected.
 
 If `PROXY_ADMIN_TOKEN` is not set, the management API is open (a warning is logged at startup).
+
+## Dual listener
+
+When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
+
+- **Internal** (`PROXY_INTERNAL_LISTEN`, e.g. `127.0.0.1:2375`): plain TCP, no mTLS, no client certificate requirement. Used for admin access from inside the container or host (`docker exec`, localhost tools).
+- **External** (`PROXY_LISTEN`, e.g. `:2376`): TLS with optional client certificate verification (`VerifyClientCertIfGiven`). Proxy and agent routes require a valid client cert when `PROXY_TLS_CLIENT_CA` is set; the onboard endpoint does not.
+
+This is the recommended production setup: the internal listener handles automation and the admin CLI (`swcproxy`), while the external listener faces users with mTLS.
+
+## Stack resource protection
+
+When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
+
+Protected resource types: `services`, `secrets`, `networks`, `volumes`, `configs`, plus `swarm/leave`.
+
+### Permission matrix
+
+| Operation on protected resource | Internal listener | External admin | External user |
+|---------------------------------|-------------------|----------------|---------------|
+| Read (GET)                      | allowed           | allowed        | allowed       |
+| Create (POST .../create)        | allowed           | blocked (403)  | blocked (403) |
+| Update (POST .../update)        | allowed           | allowed        | blocked (403) |
+| Delete (DELETE .../{id})        | allowed           | blocked (403)  | blocked (403) |
+| Swarm leave (POST /swarm/leave) | allowed           | blocked (403)  | blocked (403) |
+
+All operations on **non-protected** resources are allowed for all roles.
+
+**Why these restrictions:**
+
+- **Create blocked for all external users**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations.
+- **Update allowed for admins**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
+- **Delete blocked for all external users**: removing infrastructure services can make the cluster unmanageable. Only via internal listener.
+- **Swarm leave blocked for all external users**: tears down the entire cluster. Only via internal listener.
+
+If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
+
+## User onboarding
+
+The proxy supports a one-time onboarding flow to provision new users with Docker CLI access:
+
+1. **Admin creates user** via `swcproxy user add <username>` (inside the container) or `POST /api/v1/users`. A one-time onboarding token is generated.
+2. **Admin shares the curl command** with the user (printed by `swcproxy user add` or constructed from the token).
+3. **User fetches the tar archive**:
+   ```bash
+   curl -k https://proxy.example.com:2376/api/v1/onboard/<token> -o myname.tar
+   ```
+4. **User imports the Docker context**:
+   ```bash
+   docker context import myname-managed myname.tar
+   docker context use myname-managed
+   docker ps  # routed through the proxy
+   ```
+5. **Token is consumed** — it cannot be reused. If lost, the admin runs `swcproxy user regenerate-token <username>` to issue a new one.
+
+The tar archive contains `meta.json` (Docker context metadata), and `tls/docker/{ca,cert,key}.pem` (client certificate bundle). The private key is generated in memory and **never stored** on the server.
+
+See [docs/api.md](api.md#onboard-a-user) for the endpoint reference.
+
+## Docker Compose (local, no Swarm)
+
+These examples deploy the proxy on a single host using Docker Compose, without Docker Swarm.
+
+### SQLite with named volume
+
+```yaml
+services:
+  proxy:
+    image: eldaratech/swarmcli-rbac-proxy:latest
+    ports:
+      - "2376:2376"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./certs:/certs:ro
+      - proxy-data:/data
+    environment:
+      PROXY_LISTEN: ":2376"
+      PROXY_TLS_CERT: /certs/server-cert.pem
+      PROXY_TLS_KEY: /certs/server-key.pem
+      PROXY_TLS_CLIENT_CA: /certs/client-ca.pem
+      PROXY_TLS_CLIENT_CA_KEY: /certs/client-ca-key.pem
+      PROXY_ADMIN_TOKEN: change-me
+      PROXY_SEED_USERNAME: admin
+      PROXY_SEED_ROLE: admin
+      PROXY_DATABASE_PATH: /data/proxy.db
+      PROXY_EXTERNAL_URL: "https://localhost:2376"
+      PROXY_INTERNAL_LISTEN: "127.0.0.1:2375"
+
+volumes:
+  proxy-data:
+```
+
+`PROXY_DATABASE_PATH` points to `/data/proxy.db` inside the named volume `proxy-data`, so user data persists across container restarts. Place your TLS certificates in a `./certs/` directory on the host.
+
+### PostgreSQL
+
+```yaml
+services:
+  proxy:
+    image: eldaratech/swarmcli-rbac-proxy:latest
+    ports:
+      - "2376:2376"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./certs:/certs:ro
+    environment:
+      PROXY_LISTEN: ":2376"
+      PROXY_TLS_CERT: /certs/server-cert.pem
+      PROXY_TLS_KEY: /certs/server-key.pem
+      PROXY_TLS_CLIENT_CA: /certs/client-ca.pem
+      PROXY_TLS_CLIENT_CA_KEY: /certs/client-ca-key.pem
+      PROXY_ADMIN_TOKEN: change-me
+      PROXY_SEED_USERNAME: admin
+      PROXY_SEED_ROLE: admin
+      PROXY_STORE: postgres
+      PROXY_DATABASE_URL: "postgres://proxy:secret@db:5432/rbac?sslmode=disable"
+      PROXY_EXTERNAL_URL: "https://localhost:2376"
+      PROXY_INTERNAL_LISTEN: "127.0.0.1:2375"
+    depends_on:
+      - db
+
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: proxy
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: rbac
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+
+The proxy creates the `users` table automatically on first startup.
