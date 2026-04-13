@@ -145,7 +145,7 @@ func (h *UserHandler) list(w http.ResponseWriter, r *http.Request) {
 func writeError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	if err := json.NewEncoder(w).Encode(map[string]string{"error": msg}); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": msg}); err != nil {
 		l().Errorw("encode error response failed", "error", err)
 	}
 }
