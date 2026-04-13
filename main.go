@@ -338,7 +338,7 @@ func main() {
 		l().Infow("agent proxy forwarding enabled", "url", cfg.AgentProxyURL)
 	}
 
-	dockerProxy := guard.Wrap(newProxy(b))
+	dockerProxy := api.RequireAdminForExec(guard.Wrap(newProxy(b)))
 
 	// registerRoutes sets up the mux with the given auth wrapper for proxy routes.
 	registerRoutes := func(mux *http.ServeMux, wrapProxy func(http.Handler) http.Handler) {

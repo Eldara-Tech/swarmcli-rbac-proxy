@@ -46,17 +46,10 @@ func TestParseDockerPath(t *testing.T) {
 		{"POST", "/swarm/leave", &dockerRoute{"swarm", "", "leave"}},
 		{"POST", "/v1.44/swarm/leave", &dockerRoute{"swarm", "", "leave"}},
 
-		// Container exec/attach
-		{"POST", "/v1.44/containers/abc123/exec", &dockerRoute{"containers", "abc123", "exec"}},
-		{"POST", "/containers/abc123/exec", &dockerRoute{"containers", "abc123", "exec"}},
-		{"POST", "/v1.44/containers/abc123/attach", &dockerRoute{"containers", "abc123", "exec"}},
-
 		// Non-protected operations — should return nil
 		{"GET", "/v1.44/services", nil},
 		{"GET", "/v1.44/services/abc", nil},
 		{"GET", "/v1.44/containers/json", nil},
-		{"GET", "/v1.44/containers/abc123/exec", nil},   // wrong method
-		{"POST", "/v1.44/containers/abc123/start", nil}, // not exec/attach
 		{"POST", "/v1.44/containers/create", nil},
 		{"DELETE", "/v1.44/containers/abc", nil},
 		{"DELETE", "/v1.44/images/abc", nil},
@@ -533,26 +526,35 @@ func TestGuard_CreateSpecLabels(t *testing.T) {
 	}
 }
 
-// --- isAgentExecPath tests ---
+// --- isExecPath tests ---
 
-func TestIsAgentExecPath(t *testing.T) {
+func TestIsExecPath(t *testing.T) {
 	tests := []struct {
-		path string
-		want bool
+		method string
+		path   string
+		want   bool
 	}{
-		{"/v1/exec", true},
-		{"/v1/exec/", true},
-		{"/v1/exec/something", true},
-		{"/v1/logs", false},
-		{"/v1/execute", false},
-		{"/v1/", false},
-		{"/v2/exec", false},
-		{"/", false},
+		// Agent exec
+		{"GET", "/v1/exec", true},
+		{"POST", "/v1/exec", true},
+		{"GET", "/v1/exec/", true},
+		{"GET", "/v1/exec/something", true},
+		// Docker exec/attach
+		{"POST", "/v1.44/containers/abc/exec", true},
+		{"POST", "/containers/abc/exec", true},
+		{"POST", "/v1.44/containers/abc/attach", true},
+		// Non-exec
+		{"GET", "/v1.44/containers/abc/exec", false},   // wrong method for Docker
+		{"POST", "/v1.44/containers/abc/start", false}, // not exec/attach
+		{"GET", "/v1/logs", false},
+		{"POST", "/v1/execute", false},
+		{"GET", "/v1/", false},
+		{"GET", "/", false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			if got := isAgentExecPath(tt.path); got != tt.want {
-				t.Errorf("isAgentExecPath(%q) = %v, want %v", tt.path, got, tt.want)
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			if got := isExecPath(tt.method, tt.path); got != tt.want {
+				t.Errorf("isExecPath(%q, %q) = %v, want %v", tt.method, tt.path, got, tt.want)
 			}
 		})
 	}
@@ -560,11 +562,29 @@ func TestIsAgentExecPath(t *testing.T) {
 
 // --- RequireAdminForExec tests ---
 
-func TestRequireAdminForExec_NonAdminBlocked(t *testing.T) {
+func TestRequireAdminForExec_NonAdminAgentExecBlocked(t *testing.T) {
 	inner, called := passHandler()
 	handler := RequireAdminForExec(inner)
 
 	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestRequireAdminForExec_NonAdminDockerExecBlocked(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/containers/abc/exec", nil)
 	r = withUser(r, &store.User{Role: "user"})
 	w := httptest.NewRecorder()
 
@@ -600,7 +620,6 @@ func TestRequireAdminForExec_InternalListenerAllowed(t *testing.T) {
 	inner, called := passHandler()
 	handler := RequireAdminForExec(inner)
 
-	// No user in context — simulates internal listener.
 	r := httptest.NewRequest("GET", "/v1/exec", nil)
 	w := httptest.NewRecorder()
 
@@ -629,151 +648,5 @@ func TestRequireAdminForExec_NonExecPathAllowed(t *testing.T) {
 	}
 	if !*called {
 		t.Error("inner handler should have been called")
-	}
-}
-
-// --- Container exec/attach guard tests ---
-
-func TestGuard_NonAdminExecProtectedContainer(t *testing.T) {
-	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"Config":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
-	})
-	sock := startTestSocket(t, mock)
-
-	guard := NewResourceGuard("swarmcli-infra", sock)
-	inner, called := passHandler()
-	handler := guard.Wrap(inner)
-
-	r := httptest.NewRequest("POST", "/v1.44/containers/proxy-container/exec", nil)
-	r = withUser(r, &store.User{Role: "user"})
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
-	}
-	if *called {
-		t.Error("inner handler should not have been called")
-	}
-}
-
-func TestGuard_AdminExecProtectedContainer(t *testing.T) {
-	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"Config":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
-	})
-	sock := startTestSocket(t, mock)
-
-	guard := NewResourceGuard("swarmcli-infra", sock)
-	inner, called := passHandler()
-	handler := guard.Wrap(inner)
-
-	r := httptest.NewRequest("POST", "/v1.44/containers/proxy-container/exec", nil)
-	r = withUser(r, &store.User{Role: "admin"})
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if !*called {
-		t.Error("inner handler should have been called")
-	}
-}
-
-func TestGuard_NonAdminExecNonProtectedContainer(t *testing.T) {
-	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"Config":{"Labels":{"com.docker.stack.namespace":"user-app"}}}`)
-	})
-	sock := startTestSocket(t, mock)
-
-	guard := NewResourceGuard("swarmcli-infra", sock)
-	inner, called := passHandler()
-	handler := guard.Wrap(inner)
-
-	r := httptest.NewRequest("POST", "/v1.44/containers/user-container/exec", nil)
-	r = withUser(r, &store.User{Role: "user"})
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if !*called {
-		t.Error("inner handler should have been called")
-	}
-}
-
-func TestGuard_NonAdminAttachProtectedContainer(t *testing.T) {
-	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"Config":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
-	})
-	sock := startTestSocket(t, mock)
-
-	guard := NewResourceGuard("swarmcli-infra", sock)
-	inner, called := passHandler()
-	handler := guard.Wrap(inner)
-
-	r := httptest.NewRequest("POST", "/v1.44/containers/proxy-container/attach", nil)
-	r = withUser(r, &store.User{Role: "user"})
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
-	}
-	if *called {
-		t.Error("inner handler should not have been called")
-	}
-}
-
-func TestGuard_InternalListenerExecProtectedContainer(t *testing.T) {
-	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"Config":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
-	})
-	sock := startTestSocket(t, mock)
-
-	guard := NewResourceGuard("swarmcli-infra", sock)
-	inner, called := passHandler()
-	handler := guard.Wrap(inner)
-
-	// No user in context — simulates internal listener.
-	r := httptest.NewRequest("POST", "/v1.44/containers/proxy-container/exec", nil)
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if !*called {
-		t.Error("inner handler should have been called")
-	}
-}
-
-func TestGuard_ExecBackQueryFailure_FailOpen(t *testing.T) {
-	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	})
-	sock := startTestSocket(t, mock)
-
-	guard := NewResourceGuard("swarmcli-infra", sock)
-	inner, called := passHandler()
-	handler := guard.Wrap(inner)
-
-	r := httptest.NewRequest("POST", "/v1.44/containers/some-container/exec", nil)
-	r = withUser(r, &store.User{Role: "user"})
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d (fail open)", w.Code, http.StatusOK)
-	}
-	if !*called {
-		t.Error("inner handler should have been called (fail open)")
 	}
 }

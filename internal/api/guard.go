@@ -15,7 +15,7 @@ import (
 // dockerRoute describes a parsed Docker API request targeting a protected
 // resource type.
 type dockerRoute struct {
-	resource string // "services", "secrets", "networks", "volumes", "configs", "swarm", "containers"
+	resource string // "services", "secrets", "networks", "volumes", "configs", "swarm"
 	id       string // resource ID or name (empty for create/leave)
 	action   string // "delete", "update", "create", "leave"
 }
@@ -52,13 +52,6 @@ func parseDockerPath(method, path string) *dockerRoute {
 	// POST /swarm/leave
 	if len(parts) >= 2 && parts[0] == "swarm" && parts[1] == "leave" && method == http.MethodPost {
 		return &dockerRoute{resource: "swarm", action: "leave"}
-	}
-
-	// POST /containers/{id}/exec or POST /containers/{id}/attach
-	if len(parts) == 3 && parts[0] == "containers" && method == http.MethodPost {
-		if parts[2] == "exec" || parts[2] == "attach" {
-			return &dockerRoute{resource: "containers", id: parts[1], action: "exec"}
-		}
 	}
 
 	resource := parts[0]
@@ -101,11 +94,11 @@ func isAdmin(r *http.Request) bool {
 }
 
 // RequireAdminForExec returns middleware that blocks non-admin external
-// users from the agent exec endpoint (/v1/exec). Internal listener
-// requests (no user context) are allowed through.
+// users from all exec/attach endpoints (Docker API and agent API).
+// Internal listener requests (no user context) are allowed through.
 func RequireAdminForExec(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isAgentExecPath(r.URL.Path) && !isInternalListener(r) && !isAdmin(r) {
+		if isExecPath(r.Method, r.URL.Path) && !isInternalListener(r) && !isAdmin(r) {
 			writeError(w, http.StatusForbidden, "exec requires admin role")
 			return
 		}
@@ -113,9 +106,23 @@ func RequireAdminForExec(next http.Handler) http.Handler {
 	})
 }
 
-// isAgentExecPath returns true if the path targets the agent exec endpoint.
-func isAgentExecPath(path string) bool {
-	return path == "/v1/exec" || strings.HasPrefix(path, "/v1/exec/")
+// isExecPath returns true if the request targets an exec/attach endpoint,
+// covering both the Docker API and the agent API.
+func isExecPath(method, path string) bool {
+	// Agent exec: /v1/exec
+	if path == "/v1/exec" || strings.HasPrefix(path, "/v1/exec/") {
+		return true
+	}
+
+	// Docker exec/attach: POST /[vN.NN/]containers/{id}/exec or .../attach
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) > 0 && len(parts[0]) > 1 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
+		parts = parts[1:]
+	}
+	if len(parts) == 3 && parts[0] == "containers" && method == http.MethodPost {
+		return parts[2] == "exec" || parts[2] == "attach"
+	}
+	return false
 }
 
 // ResourceGuard is middleware that protects Docker Swarm stack resources
@@ -163,26 +170,6 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 		if route.resource == "swarm" && route.action == "leave" {
 			l().Warnw("guard: blocked swarm leave", "path", r.URL.Path)
 			writeError(w, http.StatusForbidden, "swarm leave requires direct access")
-			return
-		}
-
-		// Exec/attach on protected stack containers — admin only.
-		if route.resource == "containers" && route.action == "exec" {
-			if !isAdmin(r) {
-				protected, err := g.isProtectedContainer(r.Context(), route.id)
-				if err != nil {
-					l().Warnw("guard: container back-query failed, allowing request",
-						"error", err, "container", route.id)
-				}
-				if protected {
-					l().Warnw("guard: blocked exec/attach on protected container",
-						"path", r.URL.Path, "container", route.id)
-					writeError(w, http.StatusForbidden,
-						"exec/attach on protected stack container requires admin role")
-					return
-				}
-			}
-			next.ServeHTTP(w, r)
 			return
 		}
 
@@ -270,42 +257,6 @@ func (g *ResourceGuard) isProtectedResource(ctx context.Context, resource, id st
 		return true, nil
 	}
 	return false, nil
-}
-
-// isProtectedContainer checks whether a container belongs to the protected
-// stack by querying the Docker API for the container inspect and checking
-// Config.Labels for the stack namespace label.
-func (g *ResourceGuard) isProtectedContainer(ctx context.Context, id string) (bool, error) {
-	if g.httpClient == nil {
-		return false, nil
-	}
-
-	url := "http://docker/containers/" + id + "/json"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return false, err
-	}
-
-	resp, err := g.httpClient.Do(req)
-	if err != nil {
-		return false, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return false, nil // container not found or error — fail open
-	}
-
-	var result struct {
-		Config struct {
-			Labels map[string]string `json:"Labels"`
-		} `json:"Config"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, err
-	}
-
-	return result.Config.Labels[stackNamespaceLabel] == g.stackName, nil
 }
 
 // hasProtectedLabel reads the request body for create operations and checks

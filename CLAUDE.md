@@ -47,7 +47,7 @@ When running inside a Docker Swarm stack, the proxy auto-detects its own stack n
 | Create (POST .../create)        | allowed           | blocked (403)  | blocked (403) |
 | Update (POST .../update)        | allowed           | allowed        | blocked (403) |
 | Delete (DELETE .../{id})        | allowed           | blocked (403)  | blocked (403) |
-| Exec/attach on container        | allowed           | allowed        | blocked (403) |
+| Exec/attach (all containers)    | allowed           | allowed        | blocked (403) |
 | Swarm leave (POST /swarm/leave) | allowed           | blocked (403)  | blocked (403) |
 
 All operations on **non-protected** resources are allowed for all roles.
@@ -59,7 +59,7 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 - **Create blocked for all external users**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
 - **Update allowed for admins**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
 - **Delete blocked for all external users**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
-- **Exec/attach admin-only**: shell access to protected stack containers enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Non-admin users are blocked.
+- **Exec/attach admin-only**: shell access enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Non-admin users are blocked from all exec/attach — both Docker API and agent API (`/v1/exec`).
 - **Swarm leave blocked for all external users**: destructive — tears down the entire cluster. Only via internal listener.
 
 ## Architecture
@@ -103,7 +103,7 @@ swarm-rbac-proxy/
       users_test.go     — handler tests using MemoryStore
       onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
       onboard_test.go   — onboard handler tests
-      guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation and exec/attach
+      guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation; RequireAdminForExec: admin-only exec/attach
       guard_test.go     — guard middleware tests (path parsing, admin check, back-query, body inspection)
       stackdetect.go    — DetectStackName: auto-discovers stack name from container labels via Docker API
       stackdetect_test.go — stack detection tests
