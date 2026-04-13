@@ -346,7 +346,7 @@ func main() {
 		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(cfg.AdminToken, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
 		if agentProxy != nil {
-			mux.Handle("/v1/", wrapProxy(agentProxy))
+			mux.Handle("/v1/", wrapProxy(api.RequireAdminForExec(agentProxy)))
 		}
 		mux.Handle("/", wrapProxy(dockerProxy))
 	}

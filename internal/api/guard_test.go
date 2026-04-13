@@ -533,6 +533,105 @@ func TestGuard_CreateSpecLabels(t *testing.T) {
 	}
 }
 
+// --- isAgentExecPath tests ---
+
+func TestIsAgentExecPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/v1/exec", true},
+		{"/v1/exec/", true},
+		{"/v1/exec/something", true},
+		{"/v1/logs", false},
+		{"/v1/execute", false},
+		{"/v1/", false},
+		{"/v2/exec", false},
+		{"/", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isAgentExecPath(tt.path); got != tt.want {
+				t.Errorf("isAgentExecPath(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- RequireAdminForExec tests ---
+
+func TestRequireAdminForExec_NonAdminBlocked(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestRequireAdminForExec_AdminAllowed(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestRequireAdminForExec_InternalListenerAllowed(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	// No user in context — simulates internal listener.
+	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestRequireAdminForExec_NonExecPathAllowed(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("GET", "/v1/logs", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
 // --- Container exec/attach guard tests ---
 
 func TestGuard_NonAdminExecProtectedContainer(t *testing.T) {

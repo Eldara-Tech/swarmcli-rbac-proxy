@@ -100,6 +100,24 @@ func isAdmin(r *http.Request) bool {
 	return user.Role == "admin"
 }
 
+// RequireAdminForExec returns middleware that blocks non-admin external
+// users from the agent exec endpoint (/v1/exec). Internal listener
+// requests (no user context) are allowed through.
+func RequireAdminForExec(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAgentExecPath(r.URL.Path) && !isInternalListener(r) && !isAdmin(r) {
+			writeError(w, http.StatusForbidden, "exec requires admin role")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isAgentExecPath returns true if the path targets the agent exec endpoint.
+func isAgentExecPath(path string) bool {
+	return path == "/v1/exec" || strings.HasPrefix(path, "/v1/exec/")
+}
+
 // ResourceGuard is middleware that protects Docker Swarm stack resources
 // from mutation via the external listener.
 type ResourceGuard struct {

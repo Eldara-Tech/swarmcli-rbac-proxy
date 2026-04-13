@@ -8,7 +8,7 @@ The proxy protects against:
 
 - **Unauthorized Docker API access**: only users with valid client certificates can reach the Docker daemon through the external listener.
 - **Accidental infrastructure mutation**: non-admin users and even admins are blocked from creating or deleting resources in the protected Swarm stack. See [configuration.md](configuration.md#stack-resource-protection) for the full permission matrix.
-- **Privilege escalation via exec/attach**: non-admin users cannot exec or attach into protected stack containers, preventing access to admin tools (e.g. `swcproxy` CLI with direct database access).
+- **Privilege escalation via exec/attach**: non-admin users cannot exec or attach into protected stack containers via the Docker API, and cannot use the agent exec endpoint (`/v1/exec`), preventing access to admin tools (e.g. `swcproxy` CLI with direct database access).
 
 The proxy does **not** protect against:
 
