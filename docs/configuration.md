@@ -316,7 +316,7 @@ When running inside a Docker Swarm stack, the proxy auto-detects its own stack n
 
 Protected resource types: `services`, `secrets`, `networks`, `volumes`, `configs`, plus `swarm/leave`. Container `exec` and `attach` on all containers are also restricted (admin only).
 
-**Note**: The exec/attach guard requires `PROXY_TLS_CLIENT_CA` to be set. Without mTLS there is no user identity, so the guard is disabled. Bootstrap always configures mTLS; the dev `stack.yml` does not. See [security.md](security.md#exec-guard-limitations) for details.
+**Note**: The exec/attach guard is always active on the external listener. Without `PROXY_TLS_CLIENT_CA` (no mTLS), all exec/attach requests are blocked — no user can prove admin status. Use `PROXY_INTERNAL_LISTEN` for local exec access without mTLS. See [security.md](security.md#exec-guard-limitations) for details.
 
 ### Permission matrix
 

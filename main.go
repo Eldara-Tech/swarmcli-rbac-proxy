@@ -375,16 +375,13 @@ func main() {
 
 	// External listener.
 	externalMux := http.NewServeMux()
-	// Exec guard requires user identity (mTLS) to enforce roles. Without
-	// mTLS there is no authentication, so the guard cannot distinguish
-	// admin from non-admin and must be disabled.
-	var execGuard func(http.Handler) http.Handler
-	if cfg.TLSClientCA != "" {
-		execGuard = api.RequireAdminForExec
-	} else {
-		execGuard = func(next http.Handler) http.Handler { return next }
+	// Exec guard: always active on the external listener. Without mTLS
+	// no caller can prove admin, so all exec/attach is blocked (fail-closed).
+	// The internal listener bypasses this guard.
+	if cfg.AgentProxyURL != "" && cfg.TLSClientCA == "" {
+		l().Warnw("exec guard active without mTLS: all /v1/exec requests on external listener will be blocked; use PROXY_INTERNAL_LISTEN for local exec access")
 	}
-	registerRoutes(externalMux, proxyAuth, execGuard)
+	registerRoutes(externalMux, proxyAuth, api.RequireAdminForExec)
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)
