@@ -60,7 +60,7 @@ See [configuration.md](configuration.md#permission-matrix) for the full matrix.
 
 The `RequireAdminForExec` middleware blocks non-admin users from exec/attach endpoints. Key constraints:
 
-- **Requires mTLS**: the guard is disabled (no-op) when `PROXY_TLS_CLIENT_CA` is not set. Without mTLS there is no user identity to check. Bootstrap always configures mTLS; the dev `stack.yml` does not.
+- **Fail-closed without mTLS**: when `PROXY_TLS_CLIENT_CA` is not set, the guard blocks all exec/attach on the external listener because no user can prove admin status. Use the internal listener (`PROXY_INTERNAL_LISTEN`) for exec access without mTLS. Bootstrap always configures mTLS.
 - **Identity is cert-based**: user identity comes from the client certificate CN, not from any in-app user selection. To test exec restrictions with a non-admin user, that user must have their own client certificate and Docker context (obtained via the onboarding flow).
 
 ## Overlay network trust

@@ -119,7 +119,7 @@ When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
 
 ## Exec Guard Prerequisites
 
-The `RequireAdminForExec` middleware requires `PROXY_TLS_CLIENT_CA` to be set — without mTLS there is no user identity, so the guard is disabled (no-op). When deploying via bootstrap (`stack.yaml.tmpl`), this is always configured. The dev `stack.yml` in this repo does **not** set TLS and therefore has no exec protection.
+The `RequireAdminForExec` middleware is always applied on the external listener. Without mTLS (`PROXY_TLS_CLIENT_CA` not set), no user can prove admin status, so all exec/attach requests are blocked — fail-closed by design. Use `PROXY_INTERNAL_LISTEN` for exec without mTLS. Bootstrap always configures mTLS.
 
 ## API Endpoints
 
@@ -170,6 +170,7 @@ Tracked issues from architecture audit:
 - **#55**: `isExecPath` missed `GET /containers/{id}/attach/ws` (WebSocket attach) — fixed
 - **#56**: `isInternalListener` uses absence of user context as signal — planned positive-signal improvement
 - **#57**: ~~Integration tests use `RequireAndVerifyClientCert` but production uses `VerifyClientCertIfGiven`~~ — fixed: all frontend tests now use `VerifyClientCertIfGiven`, added no-cert client tests
+- **#59**: ~~Exec guard silently disabled without mTLS~~ — fixed: always applied on external listener (fail-closed)
 - **#60**: ~~`ResourceGuard` fails open on back-query errors (including delete operations)~~ — fixed: deletes now fail closed (503) on back-query errors
 - **#62**: No certificate rotation mechanism (client certs expire after 1 year)
 - **#63**: No authentication between rbac-proxy, agent-proxy, and agent (relies on overlay network isolation)
