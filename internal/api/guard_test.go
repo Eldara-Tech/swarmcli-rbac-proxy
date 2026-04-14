@@ -369,8 +369,33 @@ func TestGuard_ReadOnlyPassesThrough(t *testing.T) {
 	}
 }
 
-func TestGuard_BackQueryFailure_FailOpen(t *testing.T) {
-	// Mock returns 500 — guard should fail open.
+func TestGuard_BackQueryFailure_UpdateFailClosed(t *testing.T) {
+	// Mock returns 500 — guard should fail closed for updates.
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	})
+	sock := startTestSocket(t, mock)
+
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/services/some-svc/update", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (fail closed)", w.Code, http.StatusServiceUnavailable)
+	}
+	if *called {
+		t.Error("inner handler should not have been called (fail closed)")
+	}
+}
+
+func TestGuard_BackQueryFailure_DeleteFailClosed(t *testing.T) {
+	// Mock returns 500 — guard should fail closed for deletes.
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	})
@@ -386,11 +411,11 @@ func TestGuard_BackQueryFailure_FailOpen(t *testing.T) {
 
 	handler.ServeHTTP(w, r)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want %d (fail open)", w.Code, http.StatusOK)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (fail closed)", w.Code, http.StatusServiceUnavailable)
 	}
-	if !*called {
-		t.Error("inner handler should have been called (fail open)")
+	if *called {
+		t.Error("inner handler should not have been called (fail closed)")
 	}
 }
 

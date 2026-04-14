@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -202,7 +203,9 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			}
 			protected, err := g.isProtectedResource(r.Context(), route.resource, route.id)
 			if err != nil {
-				l().Warnw("guard: back-query failed, allowing request", "error", err, "resource", route.resource, "id", route.id)
+				l().Warnw("guard: back-query failed, blocking update", "error", err, "resource", route.resource, "id", route.id)
+				writeError(w, http.StatusServiceUnavailable, "cannot verify resource ownership")
+				return
 			}
 			if protected {
 				l().Warnw("guard: blocked update of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
@@ -213,7 +216,9 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 		case "delete":
 			protected, err := g.isProtectedResource(r.Context(), route.resource, route.id)
 			if err != nil {
-				l().Warnw("guard: back-query failed, allowing request", "error", err, "resource", route.resource, "id", route.id)
+				l().Warnw("guard: back-query failed, blocking delete", "error", err, "resource", route.resource, "id", route.id)
+				writeError(w, http.StatusServiceUnavailable, "cannot verify resource ownership")
+				return
 			}
 			if protected {
 				l().Warnw("guard: blocked delete of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
@@ -246,7 +251,10 @@ func (g *ResourceGuard) isProtectedResource(ctx context.Context, resource, id st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false, nil // resource not found or error — fail open
+		if resp.StatusCode >= 500 {
+			return false, fmt.Errorf("docker API returned %d", resp.StatusCode)
+		}
+		return false, nil // resource not found — not protected
 	}
 
 	// Networks and volumes have Labels at top level; services, secrets,
