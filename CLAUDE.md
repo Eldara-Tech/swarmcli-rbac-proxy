@@ -112,8 +112,14 @@ swarm-rbac-proxy/
 ## Dual Listener
 
 When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
-- **Internal** (`PROXY_INTERNAL_LISTEN`, e.g. `127.0.0.1:2375`): plain TCP, no mTLS, for admin access inside the container.
+- **Internal** (`PROXY_INTERNAL_LISTEN`, e.g. `127.0.0.1:2375`): plain TCP, no mTLS, for admin access inside the container. Bypasses all auth and resource guards.
 - **External** (`PROXY_LISTEN`, e.g. `:2376`): TLS with `VerifyClientCertIfGiven`. Proxy routes require client cert; onboard endpoint does not.
+
+**Design note**: `isInternalListener()` identifies internal requests by the *absence* of a user in the request context. This works because the internal listener does not apply `RequireClientCert`, so no user is ever set. See #56 for planned improvement to use a positive context signal instead.
+
+## Exec Guard Prerequisites
+
+The `RequireAdminForExec` middleware requires `PROXY_TLS_CLIENT_CA` to be set — without mTLS there is no user identity, so the guard is disabled (no-op). When deploying via bootstrap (`stack.yaml.tmpl`), this is always configured. The dev `stack.yml` in this repo does **not** set TLS and therefore has no exec protection.
 
 ## API Endpoints
 
@@ -156,6 +162,18 @@ Always run before pushing:
 ```bash
 go build . && go test -race ./... && gofmt -l . && go vet ./... && golangci-lint run
 ```
+
+## Known Gaps
+
+Tracked issues from architecture audit:
+
+- **#55**: `isExecPath` missed `GET /containers/{id}/attach/ws` (WebSocket attach) — fixed
+- **#56**: `isInternalListener` uses absence of user context as signal — planned positive-signal improvement
+- **#57**: Integration tests use `RequireAndVerifyClientCert` but production uses `VerifyClientCertIfGiven`
+- **#60**: `ResourceGuard` fails open on back-query errors (including delete operations)
+- **#62**: No certificate rotation mechanism (client certs expire after 1 year)
+- **#63**: No authentication between rbac-proxy, agent-proxy, and agent (relies on overlay network isolation)
+- **#64**: Admin token not persisted across redeployments
 
 ## Dependencies
 

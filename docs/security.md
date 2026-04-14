@@ -15,6 +15,7 @@ The proxy does **not** protect against:
 - Compromised client certificates (no revocation mechanism — delete the user instead).
 - Attacks on the Docker daemon itself (the proxy is a policy layer, not a sandbox).
 - Network-level attacks between proxy and daemon (use backend TLS if the daemon is remote).
+- Compromised containers on the internal overlay network (see [overlay network trust](#overlay-network-trust) below).
 
 ## Authentication layers
 
@@ -54,6 +55,24 @@ See [configuration.md](configuration.md#permission-matrix) for the full matrix.
 - One-time use: consumed atomically in the store.
 - No expiration: valid until consumed or the user is deleted.
 - The token is the sole credential for the onboard endpoint — no mTLS required, allowing bootstrapping.
+
+## Exec guard limitations
+
+The `RequireAdminForExec` middleware blocks non-admin users from exec/attach endpoints. Key constraints:
+
+- **Requires mTLS**: the guard is disabled (no-op) when `PROXY_TLS_CLIENT_CA` is not set. Without mTLS there is no user identity to check. Bootstrap always configures mTLS; the dev `stack.yml` does not.
+- **Identity is cert-based**: user identity comes from the client certificate CN, not from any in-app user selection. To test exec restrictions with a non-admin user, that user must have their own client certificate and Docker context (obtained via the onboarding flow).
+
+## Overlay network trust
+
+When deployed as a Docker Swarm stack, the rbac-proxy forwards `/v1/*` requests to the agent-proxy, which in turn connects to per-node agents. **None of these internal hops are authenticated** — there is no shared secret or mTLS between rbac-proxy, agent-proxy, and agent.
+
+Security relies on Docker overlay network isolation:
+- The `swarmcli-agent-net` overlay is configured with `internal: true` (no external access) and `encrypted: "true"` (IPSec encryption of overlay traffic).
+- Only services attached to this overlay can communicate with each other.
+- A compromised container on the overlay network can directly access the agent-proxy or agent, gaining arbitrary exec access to all containers on the cluster.
+
+Mitigation: inter-service authentication is tracked in #63.
 
 ## Operational recommendations
 
