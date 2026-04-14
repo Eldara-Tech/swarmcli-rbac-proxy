@@ -427,7 +427,7 @@ func startMTLSFrontend(t *testing.T, serverCert tls.Certificate, clientCA *x509.
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
 		ClientCAs:    clientCA,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
@@ -505,7 +505,8 @@ func TestIntegration_FrontendMTLS_UnknownUser(t *testing.T) {
 }
 
 // TestIntegration_FrontendMTLS_NoClientCert verifies that a client connecting
-// without a certificate is rejected at the TLS handshake level.
+// without a certificate passes the TLS handshake (VerifyClientCertIfGiven)
+// but is rejected by the RequireClientCert middleware with 401.
 func TestIntegration_FrontendMTLS_NoClientCert(t *testing.T) {
 	ca := newTestCA(t)
 	serverCert := ca.issueCert(t, serverTemplate())
@@ -524,9 +525,13 @@ func TestIntegration_FrontendMTLS_NoClientCert(t *testing.T) {
 		},
 	}}
 
-	_, err := client.Get("https://" + addr + "/v1.45/info")
-	if err == nil {
-		t.Fatal("expected TLS handshake error, got nil")
+	resp, err := client.Get("https://" + addr + "/v1.45/info")
+	if err != nil {
+		t.Fatalf("expected successful TLS handshake, got: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 }
 
@@ -556,7 +561,7 @@ func TestIntegration_FrontendMTLS_ManagementAPINotWrapped(t *testing.T) {
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
 		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
@@ -745,7 +750,7 @@ func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
 		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
@@ -861,7 +866,7 @@ func startMTLSFrontendWithGuard(
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
 		ClientCAs:    clientCA,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
@@ -1314,7 +1319,7 @@ func TestIntegration_ExecGuard_MTLS_AdminAllowed(t *testing.T) {
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
 		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
@@ -1368,7 +1373,7 @@ func TestIntegration_ExecGuard_MTLS_UserBlocked(t *testing.T) {
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
 		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
@@ -1422,7 +1427,7 @@ func TestIntegration_ExecGuard_MTLS_UserAttachWSBlocked(t *testing.T) {
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
 		ClientCAs:    caPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
@@ -1476,5 +1481,239 @@ func TestIntegration_InternalListener_ExecAllowed(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusOK, body)
+	}
+}
+
+// --- No-cert client tests (VerifyClientCertIfGiven) ---
+
+// TestIntegration_FrontendMTLS_NoCertExecBlocked verifies that a client
+// connecting without a certificate to an exec endpoint gets 401 from
+// RequireClientCert (not 403 from the exec guard).
+func TestIntegration_FrontendMTLS_NoCertExecBlocked(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", api.RequireClientCert(s, api.RequireAdminForExec(newProxy(b))))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs: caPool,
+		},
+	}}
+
+	req, _ := http.NewRequest("POST", "https://"+ln.Addr().String()+"/v1.44/containers/abc/exec", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusUnauthorized, body)
+	}
+}
+
+// TestIntegration_FrontendMTLS_NoCertManagementAPIAllowed verifies that a
+// client without a certificate can access the management API using a bearer
+// token, since management routes are not wrapped in RequireClientCert.
+func TestIntegration_FrontendMTLS_NoCertManagementAPIAllowed(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil)))
+	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs: caPool,
+			// No client certificate.
+		},
+	}}
+
+	req, _ := http.NewRequest(http.MethodGet, "https://"+ln.Addr().String()+"/api/v1/users", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusOK, body)
+	}
+}
+
+// --- E2E exec guard test with onboarded user ---
+
+// TestIntegration_ExecGuard_MTLS_OnboardedUserBlocked exercises the full
+// onboard flow: admin creates non-admin user → cert is issued → user
+// authenticates via mTLS → exec request is blocked (403).
+func TestIntegration_ExecGuard_MTLS_OnboardedUserBlocked(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	adminCert := ca.issueCert(t, clientTemplateWithCN("admin"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	// Write CA cert+key so certauth.LoadCA can read them.
+	caCertPath := writePEM(t, ca.certPEM, "ca.pem")
+	caKeyDER, err := x509.MarshalECPrivateKey(ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: caKeyDER})
+	caKeyPath := writePEM(t, caKeyPEM, "ca-key.pem")
+
+	issuer, err := certauth.LoadCA(caCertPath, caKeyPath)
+	if err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "admin", Role: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer)))
+	mux.Handle("/", api.RequireClientCert(s, api.RequireAdminForExec(newProxy(b))))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	addr := ln.Addr().String()
+
+	// Step 1: Admin creates non-admin user "bob" via management API.
+	adminClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{adminCert},
+		},
+	}}
+
+	createReq, _ := http.NewRequest(http.MethodPost,
+		"https://"+addr+"/api/v1/users",
+		strings.NewReader(`{"username":"bob","role":"user"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Bearer secret")
+	createResp, err := adminClient.Do(createReq)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(createResp.Body)
+		t.Fatalf("create user: status = %d, body = %s", createResp.StatusCode, body)
+	}
+
+	// Step 2: Parse the cert bundle from the response.
+	var certResp struct {
+		Username    string `json:"username"`
+		Certificate *struct {
+			CertPEM string `json:"cert_pem"`
+			KeyPEM  string `json:"key_pem"`
+			CAPEM   string `json:"ca_pem"`
+		} `json:"certificate"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&certResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if certResp.Certificate == nil {
+		t.Fatal("expected certificate bundle in response")
+	}
+
+	// Step 3: Build bob's HTTP client with the returned cert.
+	bobCert, err := tls.X509KeyPair([]byte(certResp.Certificate.CertPEM), []byte(certResp.Certificate.KeyPEM))
+	if err != nil {
+		t.Fatalf("parse returned cert+key: %v", err)
+	}
+	bobClient := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{bobCert},
+		},
+	}}
+
+	// Step 4: Bob tries exec → blocked (403).
+	execReq, _ := http.NewRequest("POST", "https://"+addr+"/v1.44/containers/abc/exec", nil)
+	execResp, err := bobClient.Do(execReq)
+	if err != nil {
+		t.Fatalf("exec request: %v", err)
+	}
+	defer execResp.Body.Close()
+	if execResp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(execResp.Body)
+		t.Fatalf("exec: status = %d, want %d; body = %s", execResp.StatusCode, http.StatusForbidden, body)
+	}
+
+	// Step 5: Bob accesses non-exec endpoint → allowed (200).
+	dockerResp, err := bobClient.Get("https://" + addr + "/v1.45/containers/json")
+	if err != nil {
+		t.Fatalf("docker request: %v", err)
+	}
+	defer dockerResp.Body.Close()
+	if dockerResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(dockerResp.Body)
+		t.Fatalf("docker: status = %d, want %d; body = %s", dockerResp.StatusCode, http.StatusOK, body)
 	}
 }

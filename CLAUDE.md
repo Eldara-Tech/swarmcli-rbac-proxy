@@ -169,7 +169,7 @@ Tracked issues from architecture audit:
 
 - **#55**: `isExecPath` missed `GET /containers/{id}/attach/ws` (WebSocket attach) — fixed
 - **#56**: `isInternalListener` uses absence of user context as signal — planned positive-signal improvement
-- **#57**: Integration tests use `RequireAndVerifyClientCert` but production uses `VerifyClientCertIfGiven`
+- **#57**: ~~Integration tests use `RequireAndVerifyClientCert` but production uses `VerifyClientCertIfGiven`~~ — fixed: all frontend tests now use `VerifyClientCertIfGiven`, added no-cert client tests
 - **#60**: ~~`ResourceGuard` fails open on back-query errors (including delete operations)~~ — fixed: deletes now fail closed (503) on back-query errors
 - **#62**: No certificate rotation mechanism (client certs expire after 1 year)
 - **#63**: No authentication between rbac-proxy, agent-proxy, and agent (relies on overlay network isolation)
