@@ -314,7 +314,9 @@ This is the recommended production setup: the internal listener handles automati
 
 When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
 
-Protected resource types: `services`, `secrets`, `networks`, `volumes`, `configs`, plus `swarm/leave`.
+Protected resource types: `services`, `secrets`, `networks`, `volumes`, `configs`, plus `swarm/leave`. Container `exec` and `attach` on all containers are also restricted (admin only).
+
+**Note**: The exec/attach guard requires `PROXY_TLS_CLIENT_CA` to be set. Without mTLS there is no user identity, so the guard is disabled. Bootstrap always configures mTLS; the dev `stack.yml` does not. See [security.md](security.md#exec-guard-limitations) for details.
 
 ### Permission matrix
 
@@ -324,6 +326,7 @@ Protected resource types: `services`, `secrets`, `networks`, `volumes`, `configs
 | Create (POST .../create)        | allowed           | blocked (403)  | blocked (403) |
 | Update (POST .../update)        | allowed           | allowed        | blocked (403) |
 | Delete (DELETE .../{id})        | allowed           | blocked (403)  | blocked (403) |
+| Exec/attach (all containers)    | allowed           | allowed        | blocked (403) |
 | Swarm leave (POST /swarm/leave) | allowed           | blocked (403)  | blocked (403) |
 
 All operations on **non-protected** resources are allowed for all roles.
@@ -333,6 +336,7 @@ All operations on **non-protected** resources are allowed for all roles.
 - **Create blocked for all external users**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations.
 - **Update allowed for admins**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
 - **Delete blocked for all external users**: removing infrastructure services can make the cluster unmanageable. Only via internal listener.
+- **Exec/attach admin-only**: shell access enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Non-admin users are blocked from all exec/attach — both Docker API and agent API (`/v1/exec`).
 - **Swarm leave blocked for all external users**: tears down the entire cluster. Only via internal listener.
 
 If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.

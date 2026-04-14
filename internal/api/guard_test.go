@@ -525,3 +525,134 @@ func TestGuard_CreateSpecLabels(t *testing.T) {
 		t.Error("inner handler should not have been called")
 	}
 }
+
+// --- isExecPath tests ---
+
+func TestIsExecPath(t *testing.T) {
+	tests := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		// Agent exec
+		{"GET", "/v1/exec", true},
+		{"POST", "/v1/exec", true},
+		{"GET", "/v1/exec/", true},
+		{"GET", "/v1/exec/something", true},
+		// Docker exec
+		{"POST", "/v1.44/containers/abc/exec", true},
+		{"POST", "/containers/abc/exec", true},
+		// Docker attach (POST and WebSocket)
+		{"POST", "/v1.44/containers/abc/attach", true},
+		{"POST", "/containers/abc/attach", true},
+		{"GET", "/containers/abc/attach/ws", true},       // WebSocket attach
+		{"GET", "/v1.44/containers/abc/attach/ws", true}, // versioned WebSocket attach
+		{"GET", "/containers/abc/attach", true},          // GET attach (non-WebSocket)
+		// Non-exec
+		{"GET", "/v1.44/containers/abc/exec", false},   // wrong method for Docker exec
+		{"POST", "/v1.44/containers/abc/start", false}, // not exec/attach
+		{"GET", "/v1/logs", false},
+		{"POST", "/v1/execute", false},
+		{"GET", "/v1/", false},
+		{"GET", "/", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			if got := isExecPath(tt.method, tt.path); got != tt.want {
+				t.Errorf("isExecPath(%q, %q) = %v, want %v", tt.method, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- RequireAdminForExec tests ---
+
+func TestRequireAdminForExec_NonAdminAgentExecBlocked(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestRequireAdminForExec_NonAdminDockerExecBlocked(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/containers/abc/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestRequireAdminForExec_AdminAllowed(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestRequireAdminForExec_NoUserContextBlocked(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	// No user in context — e.g. external listener without mTLS.
+	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestRequireAdminForExec_NonExecPathAllowed(t *testing.T) {
+	inner, called := passHandler()
+	handler := RequireAdminForExec(inner)
+
+	r := httptest.NewRequest("GET", "/v1/logs", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}

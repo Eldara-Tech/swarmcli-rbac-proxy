@@ -93,6 +93,49 @@ func isAdmin(r *http.Request) bool {
 	return user.Role == "admin"
 }
 
+// RequireAdminForExec returns middleware that blocks non-admin users from
+// all exec/attach endpoints (Docker API and agent API). Only users with
+// the admin role in context may proceed. Requests without a user context
+// (e.g. unauthenticated external requests) are also blocked.
+//
+// This middleware must NOT be applied to the internal listener — the
+// internal listener should register routes without it so that localhost
+// exec is always allowed.
+func RequireAdminForExec(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isExecPath(r.Method, r.URL.Path) && !isAdmin(r) {
+			writeError(w, http.StatusForbidden, "exec requires admin role")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isExecPath returns true if the request targets an exec/attach endpoint,
+// covering both the Docker API and the agent API.
+func isExecPath(method, path string) bool {
+	// Agent exec: /v1/exec
+	if path == "/v1/exec" || strings.HasPrefix(path, "/v1/exec/") {
+		return true
+	}
+
+	// Docker exec/attach: /[vN.NN/]containers/{id}/exec or .../attach[/ws]
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) > 0 && len(parts[0]) > 1 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
+		parts = parts[1:]
+	}
+	if len(parts) >= 3 && parts[0] == "containers" {
+		// POST .../exec, POST .../attach, GET .../attach/ws
+		if parts[2] == "exec" && method == http.MethodPost {
+			return true
+		}
+		if parts[2] == "attach" {
+			return true
+		}
+	}
+	return false
+}
+
 // ResourceGuard is middleware that protects Docker Swarm stack resources
 // from mutation via the external listener.
 type ResourceGuard struct {
