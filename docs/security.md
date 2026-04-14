@@ -72,7 +72,21 @@ Security relies on Docker overlay network isolation:
 - Only services attached to this overlay can communicate with each other.
 - A compromised container on the overlay network can directly access the agent-proxy or agent, gaining arbitrary exec access to all containers on the cluster.
 
-Mitigation: inter-service authentication is tracked in #63.
+### Why inter-service auth is not implemented (accepted risk)
+
+Adding a shared secret or internal mTLS between the three services was evaluated (#63) and rejected because the overlay network already provides sufficient isolation for the threat model:
+
+1. **Joining the overlay requires cluster manager access.** Attaching a container to an `internal: true` overlay requires Docker Swarm manager privileges. An attacker with manager access can already read all Docker secrets, exec into any container directly, and modify or destroy the stack — inter-service auth would not limit the blast radius.
+
+2. **Each service already has Docker socket access.** All three services mount `/var/run/docker.sock:ro`. A compromised agent can already exec into any local container via the socket. A compromised rbac-proxy can inspect all resources. Inter-service auth does not reduce the impact of a compromised service.
+
+3. **Shared secrets are circular.** A shared token would be distributed as a Docker secret — readable by any service in the same stack, which is the same trust boundary it would try to protect.
+
+4. **Internal mTLS cost is disproportionate.** It requires a separate internal CA, cert generation during bootstrap, distribution via Docker secrets, validation code in both agent and agent-proxy (currently plain HTTP), and cert rotation automation — substantial complexity across three repos for marginal defence-in-depth.
+
+**Residual risk**: a vulnerability in one of the three services (or any future service attached to the overlay) gives the attacker lateral access to the others. This is mitigated by: read-only Docker socket mounts, distroless base images (agent, agent-proxy), image vulnerability scanning, and restricting who can deploy to the swarm.
+
+**Revisit if**: the overlay starts hosting third-party or multi-tenant workloads, or if Docker adds per-service network policies that make fine-grained isolation practical.
 
 ## Operational recommendations
 

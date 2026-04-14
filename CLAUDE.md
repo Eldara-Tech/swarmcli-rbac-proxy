@@ -173,7 +173,7 @@ Tracked issues from architecture audit:
 - **#59**: ~~Exec guard silently disabled without mTLS~~ — fixed: always applied on external listener (fail-closed)
 - **#60**: ~~`ResourceGuard` fails open on back-query errors (including delete operations)~~ — fixed: deletes now fail closed (503) on back-query errors
 - **#62**: No certificate rotation mechanism (client certs expire after 1 year)
-- **#63**: No authentication between rbac-proxy, agent-proxy, and agent (relies on overlay network isolation)
+- **#63**: No inter-service authentication — accepted risk: overlay network isolation (`internal: true`, `encrypted: "true"`) is sufficient; see `docs/security.md` § "Overlay network trust"
 - **#64**: Admin token not persisted across redeployments
 
 ## Dependencies
