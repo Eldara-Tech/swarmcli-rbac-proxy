@@ -1398,6 +1398,60 @@ func TestIntegration_ExecGuard_MTLS_UserBlocked(t *testing.T) {
 	}
 }
 
+// TestIntegration_ExecGuard_MTLS_UserAttachWSBlocked tests that a non-admin
+// user is blocked from the WebSocket attach endpoint (/containers/{id}/attach/ws).
+func TestIntegration_ExecGuard_MTLS_UserAttachWSBlocked(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert := ca.issueCert(t, serverTemplate())
+	clientCert := ca.issueCert(t, clientTemplateWithCN("alice"))
+
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+
+	s := store.NewMemoryStore()
+	if err := s.CreateUser(context.Background(), &store.User{Username: "alice", Role: "user"}); err != nil {
+		t.Fatal(err)
+	}
+
+	backendAddr := startTCPServer(t, dockerMock())
+	b := backend{network: "tcp", address: backendAddr}
+
+	mux := http.NewServeMux()
+	mux.Handle("/", api.RequireClientCert(s, api.RequireAdminForExec(newProxy(b))))
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    caPool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs:      caPool,
+			Certificates: []tls.Certificate{clientCert},
+		},
+	}}
+
+	req, _ := http.NewRequest("GET", "https://"+ln.Addr().String()+"/v1.44/containers/abc/attach/ws", nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, http.StatusForbidden, body)
+	}
+}
+
 // TestIntegration_InternalListener_ExecAllowed tests that the internal
 // listener allows exec without RequireAdminForExec — matching the
 // internal listener wiring in main.go (no exec guard applied).

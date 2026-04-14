@@ -539,12 +539,17 @@ func TestIsExecPath(t *testing.T) {
 		{"POST", "/v1/exec", true},
 		{"GET", "/v1/exec/", true},
 		{"GET", "/v1/exec/something", true},
-		// Docker exec/attach
+		// Docker exec
 		{"POST", "/v1.44/containers/abc/exec", true},
 		{"POST", "/containers/abc/exec", true},
+		// Docker attach (POST and WebSocket)
 		{"POST", "/v1.44/containers/abc/attach", true},
+		{"POST", "/containers/abc/attach", true},
+		{"GET", "/containers/abc/attach/ws", true},       // WebSocket attach
+		{"GET", "/v1.44/containers/abc/attach/ws", true}, // versioned WebSocket attach
+		{"GET", "/containers/abc/attach", true},          // GET attach (non-WebSocket)
 		// Non-exec
-		{"GET", "/v1.44/containers/abc/exec", false},   // wrong method for Docker
+		{"GET", "/v1.44/containers/abc/exec", false},   // wrong method for Docker exec
 		{"POST", "/v1.44/containers/abc/start", false}, // not exec/attach
 		{"GET", "/v1/logs", false},
 		{"POST", "/v1/execute", false},

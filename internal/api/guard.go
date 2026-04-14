@@ -119,13 +119,19 @@ func isExecPath(method, path string) bool {
 		return true
 	}
 
-	// Docker exec/attach: POST /[vN.NN/]containers/{id}/exec or .../attach
+	// Docker exec/attach: /[vN.NN/]containers/{id}/exec or .../attach[/ws]
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
 	if len(parts) > 0 && len(parts[0]) > 1 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
 		parts = parts[1:]
 	}
-	if len(parts) == 3 && parts[0] == "containers" && method == http.MethodPost {
-		return parts[2] == "exec" || parts[2] == "attach"
+	if len(parts) >= 3 && parts[0] == "containers" {
+		// POST .../exec, POST .../attach, GET .../attach/ws
+		if parts[2] == "exec" && method == http.MethodPost {
+			return true
+		}
+		if parts[2] == "attach" {
+			return true
+		}
 	}
 	return false
 }
