@@ -83,21 +83,20 @@ func TestParseDockerPath(t *testing.T) {
 
 func TestIsInternalListener(t *testing.T) {
 	tests := []struct {
-		name string
-		user *store.User
-		want bool
+		name     string
+		internal bool // whether to set ContextKeyInternal
+		want     bool
 	}{
-		{"no user in context (internal)", nil, true},
-		{"admin role", &store.User{Role: "admin"}, false},
-		{"user role", &store.User{Role: "user"}, false},
-		{"empty role", &store.User{Role: ""}, false},
+		{"internal flag set", true, true},
+		{"no internal flag (external with user)", false, false},
+		{"no internal flag (external no user)", false, false}, // regression: auth bypass ≠ internal
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := httptest.NewRequest("GET", "/", nil)
-			if tt.user != nil {
-				ctx := context.WithValue(r.Context(), ContextKeyUser, tt.user)
+			if tt.internal {
+				ctx := context.WithValue(r.Context(), ContextKeyInternal, true)
 				r = r.WithContext(ctx)
 			}
 			if got := isInternalListener(r); got != tt.want {
@@ -234,8 +233,10 @@ func TestGuard_InternalListenerDeleteProtected(t *testing.T) {
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
-	// No user in context — simulates internal listener.
+	// Positive internal flag — simulates internal listener.
 	r := httptest.NewRequest("DELETE", "/v1.44/services/proxy-svc", nil)
+	ctx := context.WithValue(r.Context(), ContextKeyInternal, true)
+	r = r.WithContext(ctx)
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, r)
@@ -245,6 +246,30 @@ func TestGuard_InternalListenerDeleteProtected(t *testing.T) {
 	}
 	if !*called {
 		t.Error("inner handler should have been called")
+	}
+}
+
+func TestGuard_NoInternalFlagNoUserIsBlocked(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startTestSocket(t, mock)
+
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	// No user, no internal flag — simulates auth bypass on external listener.
+	r := httptest.NewRequest("DELETE", "/v1.44/services/proxy-svc", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d (auth bypass must not grant internal access)", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler must not be called for unauthenticated external request")
 	}
 }
 

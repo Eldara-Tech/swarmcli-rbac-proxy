@@ -1032,9 +1032,9 @@ func TestIntegration_InternalListener_DeleteProtectedService(t *testing.T) {
 
 	guard := api.NewResourceGuard("swarmcli-infra", sock)
 
-	// Internal listener: guard.Wrap(proxy) with no auth middleware — matches main.go.
+	// Internal listener: MarkInternalRequest wraps the guarded proxy — matches main.go.
 	mux := http.NewServeMux()
-	mux.Handle("/", guard.Wrap(newProxy(b)))
+	mux.Handle("/", api.MarkInternalRequest(guard.Wrap(newProxy(b))))
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
