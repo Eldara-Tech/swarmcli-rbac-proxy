@@ -590,13 +590,94 @@ func TestIsExecPath(t *testing.T) {
 	}
 }
 
-// --- RequireAdminForExec tests ---
+// --- ExecGuard tests ---
 
-func TestRequireAdminForExec_NonAdminAgentExecBlocked(t *testing.T) {
+// containerMock returns a handler that responds to /containers/{id}/json and
+// /tasks/{id} back-queries, plus /services/{id} for the task→service path.
+// stackLabel is the com.docker.stack.namespace to embed.
+func containerMock(stackLabel string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/containers/"):
+			fmt.Fprintf(w, `{"Config":{"Labels":{"com.docker.stack.namespace":%q}}}`, stackLabel)
+		case strings.HasPrefix(r.URL.Path, "/tasks/"):
+			fmt.Fprint(w, `{"ServiceID":"svc-abc"}`)
+		case strings.HasPrefix(r.URL.Path, "/services/"):
+			fmt.Fprintf(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":%q}}}`, stackLabel)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+func TestExecGuard_EmptyStackName_NoOp(t *testing.T) {
+	guard := NewResourceGuard("", "")
 	inner, called := passHandler()
-	handler := RequireAdminForExec(inner)
+	handler := guard.ExecGuard(inner)
 
 	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestExecGuard_NonExecPath_PassesThrough(t *testing.T) {
+	guard := NewResourceGuard("swarmcli-infra", "")
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/logs", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+// TestExecGuard_NoSocket_ExecUnrestricted verifies that when no Docker socket
+// is configured the guard cannot do back-queries and therefore allows all exec
+// (can't distinguish stacks). The internal listener uses noExecGuard in
+// main.go and never reaches ExecGuard — no bypass is needed here.
+func TestExecGuard_NoSocket_ExecUnrestricted(t *testing.T) {
+	guard := NewResourceGuard("swarmcli-infra", "") // stackName set, but no socket
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestExecGuard_AgentExec_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
+	sock := startTestSocket(t, containerMock("swarmcli-infra"))
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/exec?task_id=task-xyz", nil)
 	r = withUser(r, &store.User{Role: "user"})
 	w := httptest.NewRecorder()
 
@@ -610,29 +691,13 @@ func TestRequireAdminForExec_NonAdminAgentExecBlocked(t *testing.T) {
 	}
 }
 
-func TestRequireAdminForExec_NonAdminDockerExecBlocked(t *testing.T) {
+func TestExecGuard_AgentExec_ProtectedStack_Admin_Allowed(t *testing.T) {
+	sock := startTestSocket(t, containerMock("swarmcli-infra"))
+	guard := NewResourceGuard("swarmcli-infra", sock)
 	inner, called := passHandler()
-	handler := RequireAdminForExec(inner)
+	handler := guard.ExecGuard(inner)
 
-	r := httptest.NewRequest("POST", "/v1.44/containers/abc/exec", nil)
-	r = withUser(r, &store.User{Role: "user"})
-	w := httptest.NewRecorder()
-
-	handler.ServeHTTP(w, r)
-
-	if w.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
-	}
-	if *called {
-		t.Error("inner handler should not have been called")
-	}
-}
-
-func TestRequireAdminForExec_AdminAllowed(t *testing.T) {
-	inner, called := passHandler()
-	handler := RequireAdminForExec(inner)
-
-	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r := httptest.NewRequest("GET", "/v1/exec?task_id=task-xyz", nil)
 	r = withUser(r, &store.User{Role: "admin"})
 	w := httptest.NewRecorder()
 
@@ -646,12 +711,53 @@ func TestRequireAdminForExec_AdminAllowed(t *testing.T) {
 	}
 }
 
-func TestRequireAdminForExec_NoUserContextBlocked(t *testing.T) {
+func TestExecGuard_AgentExec_NonProtectedStack_UserAllowed(t *testing.T) {
+	sock := startTestSocket(t, containerMock("user-app"))
+	guard := NewResourceGuard("swarmcli-infra", sock)
 	inner, called := passHandler()
-	handler := RequireAdminForExec(inner)
+	handler := guard.ExecGuard(inner)
 
-	// No user in context — e.g. external listener without mTLS.
+	r := httptest.NewRequest("GET", "/v1/exec?task_id=task-xyz", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestExecGuard_AgentExec_NoTaskID_PassesThrough(t *testing.T) {
+	guard := NewResourceGuard("swarmcli-infra", "")
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
 	r := httptest.NewRequest("GET", "/v1/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestExecGuard_DockerExec_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
+	sock := startTestSocket(t, containerMock("swarmcli-infra"))
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/containers/ctr-abc/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
 	w := httptest.NewRecorder()
 
 	handler.ServeHTTP(w, r)
@@ -664,11 +770,13 @@ func TestRequireAdminForExec_NoUserContextBlocked(t *testing.T) {
 	}
 }
 
-func TestRequireAdminForExec_NonExecPathAllowed(t *testing.T) {
+func TestExecGuard_DockerExec_NonProtectedStack_UserAllowed(t *testing.T) {
+	sock := startTestSocket(t, containerMock("user-app"))
+	guard := NewResourceGuard("swarmcli-infra", sock)
 	inner, called := passHandler()
-	handler := RequireAdminForExec(inner)
+	handler := guard.ExecGuard(inner)
 
-	r := httptest.NewRequest("GET", "/v1/logs", nil)
+	r := httptest.NewRequest("POST", "/v1.44/containers/ctr-abc/exec", nil)
 	r = withUser(r, &store.User{Role: "user"})
 	w := httptest.NewRecorder()
 
@@ -679,5 +787,69 @@ func TestRequireAdminForExec_NonExecPathAllowed(t *testing.T) {
 	}
 	if !*called {
 		t.Error("inner handler should have been called")
+	}
+}
+
+func TestExecGuard_DockerAttach_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
+	sock := startTestSocket(t, containerMock("swarmcli-infra"))
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("POST", "/containers/ctr-abc/attach", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestExecGuard_DockerExec_NoStackLabel_UserAllowed(t *testing.T) {
+	// Container has no stack label — not part of any stack, not protected.
+	sock := startTestSocket(t, containerMock(""))
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("POST", "/containers/ctr-abc/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestExecGuard_BackQueryError_FailClosed(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	})
+	sock := startTestSocket(t, mock)
+	guard := NewResourceGuard("swarmcli-infra", sock)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/containers/ctr-abc/exec", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (fail closed)", w.Code, http.StatusServiceUnavailable)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
 	}
 }

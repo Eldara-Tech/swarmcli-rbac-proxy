@@ -375,13 +375,14 @@ func main() {
 
 	// External listener.
 	externalMux := http.NewServeMux()
-	// Exec guard: always active on the external listener. Without mTLS
-	// no caller can prove admin, so all exec/attach is blocked (fail-closed).
-	// The internal listener bypasses this guard.
+	// Exec guard: active on the external listener; stack-aware — only exec on
+	// protected-stack containers requires admin. Without mTLS no caller can prove
+	// identity, so protected-stack exec is blocked (fail-closed); non-protected
+	// exec may pass without identity verification.
 	if cfg.AgentProxyURL != "" && cfg.TLSClientCA == "" {
-		l().Warnw("exec guard active without mTLS: all /v1/exec requests on external listener will be blocked; use PROXY_INTERNAL_LISTEN for local exec access")
+		l().Warnw("exec guard active without mTLS: exec on protected stack will be blocked; non-protected exec may pass without identity; use PROXY_INTERNAL_LISTEN for local exec access")
 	}
-	registerRoutes(externalMux, proxyAuth, api.RequireAdminForExec)
+	registerRoutes(externalMux, proxyAuth, guard.ExecGuard)
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)

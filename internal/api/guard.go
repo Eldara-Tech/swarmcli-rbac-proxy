@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"swarm-rbac-proxy/internal/store"
@@ -94,18 +95,34 @@ func isAdmin(r *http.Request) bool {
 	return user.Role == "admin"
 }
 
-// RequireAdminForExec returns middleware that blocks non-admin users from
-// all exec/attach endpoints (Docker API and agent API). Only users with
-// the admin role in context may proceed. Requests without a user context
-// (e.g. unauthenticated external requests) are also blocked.
+// ExecGuard returns middleware that requires admin role only for exec/attach
+// requests targeting containers that belong to the protected stack. Exec on
+// containers in any other stack is allowed for all authenticated users.
 //
-// This middleware must NOT be applied to the internal listener — the
-// internal listener should register routes without it so that localhost
-// exec is always allowed.
-func RequireAdminForExec(next http.Handler) http.Handler {
+// If stackName is empty the guard is a no-op (exec unrestricted).
+// The internal listener (no user context) always bypasses this check.
+// A back-query error (Docker daemon unreachable) causes fail-closed (503).
+func (g *ResourceGuard) ExecGuard(next http.Handler) http.Handler {
+	if g == nil || g.stackName == "" {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isExecPath(r.Method, r.URL.Path) && !isAdmin(r) {
-			writeError(w, http.StatusForbidden, "exec requires admin role")
+		if !isExecPath(r.Method, r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// No isInternalListener bypass here: the internal listener is wired
+		// with noExecGuard in main.go and never reaches this handler. "No user
+		// context" inside ExecGuard means external-without-mTLS — keep
+		// fail-closed for protected containers.
+		protected, err := g.isProtectedExecTarget(r.Context(), r.URL.Path, r.URL.Query())
+		if err != nil {
+			l().Warnw("guard: back-query failed, blocking exec", "error", err)
+			writeError(w, http.StatusServiceUnavailable, "cannot verify exec target ownership")
+			return
+		}
+		if protected && !isAdmin(r) {
+			writeError(w, http.StatusForbidden, "exec on protected stack requires admin role")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -314,4 +331,93 @@ func (g *ResourceGuard) hasProtectedLabel(r *http.Request) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// isProtectedExecTarget resolves the exec target from the request path and
+// query to determine whether it belongs to the protected stack.
+// Returns (false, nil) when the target cannot be identified (allow through).
+func (g *ResourceGuard) isProtectedExecTarget(ctx context.Context, path string, query url.Values) (bool, error) {
+	// Agent exec: /v1/exec?task_id=<swarm-task-id>
+	if path == "/v1/exec" || strings.HasPrefix(path, "/v1/exec/") {
+		taskID := query.Get("task_id")
+		if taskID == "" {
+			return false, nil // no target to check; agent will reject the request anyway
+		}
+		return g.isProtectedTask(ctx, taskID)
+	}
+
+	// Docker exec/attach: /[vN.NN/]containers/{id}/exec|attach[/ws]
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if len(parts) > 0 && len(parts[0]) > 1 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
+		parts = parts[1:]
+	}
+	if len(parts) >= 3 && parts[0] == "containers" {
+		return g.isProtectedContainer(ctx, parts[1])
+	}
+	return false, nil
+}
+
+// isProtectedTask resolves a Swarm task ID to its parent service and checks
+// whether that service belongs to the protected stack.
+func (g *ResourceGuard) isProtectedTask(ctx context.Context, taskID string) (bool, error) {
+	if g.httpClient == nil {
+		return false, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/tasks/"+taskID, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode >= 500 {
+			return false, fmt.Errorf("docker API returned %d for task %s", resp.StatusCode, taskID)
+		}
+		return false, nil // task not found — not protected
+	}
+	var task struct {
+		ServiceID string `json:"ServiceID"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&task); err != nil {
+		return false, err
+	}
+	if task.ServiceID == "" {
+		return false, nil
+	}
+	return g.isProtectedResource(ctx, "services", task.ServiceID)
+}
+
+// isProtectedContainer checks whether a container belongs to the protected
+// stack by inspecting its Config.Labels via the Docker API.
+func (g *ResourceGuard) isProtectedContainer(ctx context.Context, containerID string) (bool, error) {
+	if g.httpClient == nil {
+		return false, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/containers/"+containerID+"/json", nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := g.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode >= 500 {
+			return false, fmt.Errorf("docker API returned %d for container %s", resp.StatusCode, containerID)
+		}
+		return false, nil // container not found — not protected
+	}
+	var result struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return false, err
+	}
+	return result.Config.Labels[stackNamespaceLabel] == g.stackName, nil
 }
