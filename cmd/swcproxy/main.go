@@ -66,6 +66,10 @@ func runUserCommand(subcmd string, args []string) {
 			fmt.Fprintln(os.Stderr, "usage: swcproxy user add <username> [--admin]")
 			os.Exit(1)
 		}
+		if isHelpFlag(args[0]) {
+			printUserUsage()
+			return
+		}
 		admin := false
 		for _, a := range args[1:] {
 			if a == "--admin" {
@@ -78,11 +82,19 @@ func runUserCommand(subcmd string, args []string) {
 			fmt.Fprintln(os.Stderr, "usage: swcproxy user delete <username>")
 			os.Exit(1)
 		}
+		if isHelpFlag(args[0]) {
+			printUserUsage()
+			return
+		}
 		cmdUserDelete(args[0])
 	case "regenerate-token":
 		if len(args) < 1 {
 			fmt.Fprintln(os.Stderr, "usage: swcproxy user regenerate-token <username>")
 			os.Exit(1)
+		}
+		if isHelpFlag(args[0]) {
+			printUserUsage()
+			return
 		}
 		cmdUserRegenerateToken(args[0])
 	case "--help", "-h", "help":
@@ -229,4 +241,8 @@ func cmdUserRegenerateToken(username string) {
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+func isHelpFlag(s string) bool {
+	return s == "--help" || s == "-h" || s == "help"
 }
