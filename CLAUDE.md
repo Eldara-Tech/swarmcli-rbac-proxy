@@ -33,7 +33,7 @@ Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIEN
 
 When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-host:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
 
-The `/v1/exec` endpoint is restricted to admin users on the external listener. Non-admin users receive 403. The internal listener bypasses this check.
+The `/v1/exec` endpoint on the external listener is stack-aware: exec/attach targeting a container in the protected stack requires admin role; exec/attach targeting any other stack is allowed for all authenticated users. The internal listener (wired with `noExecGuard`) bypasses this check entirely.
 
 ## Stack Resource Protection
 
@@ -41,25 +41,27 @@ When running inside a Docker Swarm stack, the proxy auto-detects its own stack n
 
 ### Permission matrix
 
-| Operation on protected resource | Internal listener | External admin | External user |
-|---------------------------------|-------------------|----------------|---------------|
-| Read (GET)                      | allowed           | allowed        | allowed       |
-| Create (POST .../create)        | allowed           | blocked (403)  | blocked (403) |
-| Update (POST .../update)        | allowed           | allowed        | blocked (403) |
-| Delete (DELETE .../{id})        | allowed           | blocked (403)  | blocked (403) |
-| Exec/attach (all containers)    | allowed           | allowed        | blocked (403) |
-| Swarm leave (POST /swarm/leave) | allowed           | blocked (403)  | blocked (403) |
-
-All operations on **non-protected** resources are allowed for all roles.
+| Operation | Internal listener | External admin | External user |
+|-----------|-------------------|----------------|---------------|
+| Read (GET) — any resource | allowed | allowed | allowed |
+| Create (POST .../create) — protected stack | allowed | blocked (403) | blocked (403) |
+| Create (POST .../create) — other stack | allowed | allowed | allowed |
+| Update (POST .../update) — protected stack | allowed | allowed | blocked (403) |
+| Update (POST .../update) — other stack | allowed | allowed | allowed |
+| Delete (DELETE .../{id}) — protected stack | allowed | blocked (403) | blocked (403) |
+| Delete (DELETE .../{id}) — other stack | allowed | allowed | allowed |
+| Exec/attach — protected stack container | allowed | allowed | blocked (403) |
+| Exec/attach — non-protected container | allowed | allowed | allowed |
+| Swarm leave (POST /swarm/leave) | allowed | blocked (403) | blocked (403) |
 
 If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
 
 ### Rationale
 
-- **Create blocked for all external users**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
-- **Update allowed for admins**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
-- **Delete blocked for all external users**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
-- **Exec/attach admin-only**: shell access enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Non-admin users are blocked from all exec/attach — both Docker API and agent API (`/v1/exec`).
+- **Create blocked for all external users on protected stack**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
+- **Update allowed for admins on protected stack**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
+- **Delete blocked for all external users on protected stack**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
+- **Exec/attach admin-only for protected stack**: shell access to infrastructure containers enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Regular users may exec into their own service containers freely.
 - **Swarm leave blocked for all external users**: destructive — tears down the entire cluster. Only via internal listener.
 
 ## Architecture
@@ -119,7 +121,11 @@ When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
 
 ## Exec Guard Prerequisites
 
-The `RequireAdminForExec` middleware is always applied on the external listener. Without mTLS (`PROXY_TLS_CLIENT_CA` not set), no user can prove admin status, so all exec/attach requests are blocked — fail-closed by design. Use `PROXY_INTERNAL_LISTEN` for exec without mTLS. Bootstrap always configures mTLS.
+`ResourceGuard.ExecGuard` is applied on the external listener. It performs a Docker API back-query to determine which stack the exec target belongs to. Exec on a protected-stack container requires admin role; exec on any other container is allowed for all authenticated users.
+
+Without mTLS (`PROXY_TLS_CLIENT_CA` not set), no caller can prove identity. Exec on protected-stack containers is still blocked (no user = not admin). Non-protected containers are accessible without identity — use `PROXY_INTERNAL_LISTEN` when unathenticated local exec is needed. Bootstrap always configures mTLS.
+
+A back-query error (Docker daemon unreachable) causes fail-closed (503) rather than allowing exec through.
 
 ## API Endpoints
 
