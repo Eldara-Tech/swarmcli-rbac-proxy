@@ -14,6 +14,20 @@ type contextKey string
 // ContextKeyUser is the context key for the authenticated *store.User.
 const ContextKeyUser contextKey = "authn.user"
 
+// ContextKeyInternal is set to true on requests arriving on the internal
+// (plain TCP) listener. Guards check this key instead of the absence of a
+// user to avoid treating auth-bypass failures as internal requests.
+const ContextKeyInternal contextKey = "internal.request"
+
+// MarkInternalRequest is middleware that stamps requests with the internal
+// listener context flag. Apply it exclusively on the internal listener mux.
+func MarkInternalRequest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), ContextKeyInternal, true)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // RequireClientCert returns middleware that extracts a username from the
 // TLS client certificate, looks it up in the store, and rejects the
 // request if the user is not found or not enabled.

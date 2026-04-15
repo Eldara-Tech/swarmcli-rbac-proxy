@@ -362,9 +362,8 @@ func main() {
 	// Internal listener (plain TCP, no mTLS) — for admin access from localhost.
 	if cfg.InternalListen != "" {
 		internalMux := http.NewServeMux()
-		noAuth := func(next http.Handler) http.Handler { return next }
 		noExecGuard := func(next http.Handler) http.Handler { return next }
-		registerRoutes(internalMux, noAuth, noExecGuard)
+		registerRoutes(internalMux, api.MarkInternalRequest, noExecGuard)
 		go func() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
 			if err := http.ListenAndServe(cfg.InternalListen, internalMux); err != nil {

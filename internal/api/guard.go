@@ -78,11 +78,13 @@ func parseDockerPath(method, path string) *dockerRoute {
 	return nil
 }
 
-// isInternalListener returns true when the request has no user context,
-// meaning it arrived on the internal (plain TCP) listener.
+// isInternalListener returns true when the request was explicitly stamped
+// by MarkInternalRequest, meaning it arrived on the plain TCP listener.
+// Using a positive signal (rather than absence of a user) prevents an auth
+// bypass on the external listener from being misread as an internal request.
 func isInternalListener(r *http.Request) bool {
-	user, ok := r.Context().Value(ContextKeyUser).(*store.User)
-	return !ok || user == nil
+	internal, ok := r.Context().Value(ContextKeyInternal).(bool)
+	return ok && internal
 }
 
 // isAdmin returns true if the request comes from a user with the admin role.
@@ -112,9 +114,9 @@ func (g *ResourceGuard) ExecGuard(next http.Handler) http.Handler {
 			return
 		}
 		// No isInternalListener bypass here: the internal listener is wired
-		// with noExecGuard in main.go and never reaches this handler. "No user
-		// context" inside ExecGuard means external-without-mTLS — keep
-		// fail-closed for protected containers.
+		// with noExecGuard in main.go and never reaches this handler. A missing
+		// ContextKeyInternal (or ContextKeyUser) inside ExecGuard means
+		// external-without-mTLS — keep fail-closed for protected containers.
 		protected, err := g.isProtectedExecTarget(r.Context(), r.URL.Path, r.URL.Query())
 		if err != nil {
 			l().Warnw("guard: back-query failed, blocking exec", "error", err)
