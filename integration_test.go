@@ -1222,11 +1222,11 @@ func execGuardDockerMock(t *testing.T, stackLabel string) (string, func()) {
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/containers/"):
-			fmt.Fprintf(w, `{"Config":{"Labels":{"com.docker.stack.namespace":%q}}}`, stackLabel)
+			fmt.Fprint(w, fmt.Sprintf(`{"Config":{"Labels":{"com.docker.stack.namespace":%q}}}`, stackLabel))
 		case strings.HasPrefix(r.URL.Path, "/tasks/"):
 			fmt.Fprint(w, `{"ServiceID":"svc-abc"}`)
 		case strings.HasPrefix(r.URL.Path, "/services/"):
-			fmt.Fprintf(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":%q}}}`, stackLabel)
+			fmt.Fprint(w, fmt.Sprintf(`{"Spec":{"Labels":{"com.docker.stack.namespace":%q}}}`, stackLabel))
 		default:
 			http.NotFound(w, r)
 		}
