@@ -881,3 +881,42 @@ func TestExecGuard_BackQueryError_FailClosed(t *testing.T) {
 		t.Error("inner handler should not have been called")
 	}
 }
+
+func TestGuard_CreateMalformedBodyBlocked(t *testing.T) {
+	guard := NewResourceGuard("swarmcli-infra", "")
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	// Invalid JSON body should be blocked (fail-closed on parse error).
+	r := httptest.NewRequest("POST", "/services/create", strings.NewReader("{invalid-json"))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("malformed body: status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if *called {
+		t.Error("inner handler should not be called on malformed body")
+	}
+}
+
+func TestGuard_CreateOversizedBodyBlocked(t *testing.T) {
+	guard := NewResourceGuard("swarmcli-infra", "")
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	// Body larger than maxCreateBodySize (2 MB) should be blocked.
+	bigBody := strings.NewReader(strings.Repeat("x", 3<<20)) // 3 MB
+	r := httptest.NewRequest("POST", "/services/create", bigBody)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("oversized body: status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if *called {
+		t.Error("inner handler should not be called on oversized body")
+	}
+}

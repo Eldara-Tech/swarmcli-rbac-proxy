@@ -13,11 +13,13 @@ check_file () {
   fi
 }
 
-find . -type f \( -name '*.go' -o -name '*.sh' \) \
+# Use here-document to avoid pipe subshell (fail=1 must propagate).
+while IFS= read -r f; do
+  check_file "$f"
+done <<EOF
+$(find . -type f \( -name '*.go' -o -name '*.sh' \) \
   -not -path './vendor/*' \
-  -not -path './.git/*' \
-  | while read -r f; do
-      check_file "$f"
-    done
+  -not -path './.git/*')
+EOF
 
 exit "$fail"

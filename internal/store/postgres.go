@@ -173,7 +173,7 @@ func (s *PostgresStore) ConsumeOnboardToken(ctx context.Context, token string) (
 
 	row := tx.QueryRow(ctx,
 		`SELECT id, username, role, enabled, created_at, updated_at, token_consumed_at
-		 FROM users WHERE onboard_token = $1`, token,
+		 FROM users WHERE onboard_token = $1 FOR UPDATE`, token,
 	)
 	var u User
 	var consumedAt *time.Time

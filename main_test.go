@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // startMockSocket creates a Unix socket HTTP server at a temp path.
@@ -344,5 +345,50 @@ func TestParseBackend(t *testing.T) {
 					tt.input, b.network, b.address, tt.wantNetwork, tt.wantAddress)
 			}
 		})
+	}
+}
+
+func TestIdleConn_TimeoutOnIdle(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	ic := &idleConn{Conn: client, timeout: 50 * time.Millisecond}
+
+	// Write should succeed and reset deadline.
+	go func() {
+		buf := make([]byte, 5)
+		server.Read(buf) //nolint:errcheck
+	}()
+	if _, err := ic.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// After idle period, Read should fail with deadline exceeded.
+	time.Sleep(100 * time.Millisecond)
+	buf := make([]byte, 10)
+	_, err := ic.Read(buf)
+	if err == nil {
+		t.Fatal("expected deadline exceeded error after idle, got nil")
+	}
+}
+
+func TestIdleConn_ActiveResetsPreventsTimeout(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	ic := &idleConn{Conn: client, timeout: 100 * time.Millisecond}
+
+	// Continuous writes should keep resetting the deadline.
+	for i := 0; i < 3; i++ {
+		go func() {
+			buf := make([]byte, 4)
+			server.Read(buf) //nolint:errcheck
+		}()
+		if _, err := ic.Write([]byte("ping")); err != nil {
+			t.Fatalf("Write %d: %v", i, err)
+		}
+		time.Sleep(30 * time.Millisecond) // well under 100ms timeout
 	}
 }
