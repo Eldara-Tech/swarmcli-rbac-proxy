@@ -23,6 +23,15 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
   go test -race -tags=integration ./...
 ```
 
+## Go Version & Build
+
+Go 1.26. No Makefile.
+
+When updating the Go version, keep these in sync:
+- `go.mod` — `go` and `toolchain` directives
+- `.devcontainer/Dockerfile` — `mcr.microsoft.com/devcontainers/go` image tag (tracks major.minor; patch versions are handled by `GOTOOLCHAIN=auto`)
+- `govulncheck` CI step — bump suppressed vuln IDs if the new toolchain resolves them, or add new ones if it introduces new unfixed stdlib vulns
+
 ## Configuration
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
