@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright © 2026 Eldara Tech
 # shellcheck shell=sh
 # Display welcome banner once per shell session.
 if [ -z "$_WELCOME_SHOWN" ]; then
@@ -14,7 +16,7 @@ if [ -z "$_WELCOME_SHOWN" ]; then
                                                                         /____/
 
   Report issues : https://github.com/Eldara-Tech/swarmcli-rbac-proxy/issues
-  License       : See repository for details
+  License       : AGPL-3.0-only
   CLI help      : swcproxy --help
 
 BANNER

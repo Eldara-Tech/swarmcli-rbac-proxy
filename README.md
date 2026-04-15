@@ -67,6 +67,12 @@ See [docs/security.md](docs/security.md) for the security model.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
+## License
+
+Copyright © 2026 Eldara Tech. Licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
+
+If you modify this software or use it to provide a network service, you must make the complete source available to your users under the same license.
+
 ## Dev Container
 
 This repository includes a VS Code Dev Container in `.devcontainer/`.

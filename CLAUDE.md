@@ -159,10 +159,9 @@ swcproxy --help                           # Usage info
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`): three jobs.
-- `ci`: gofmt check, `go test -race`, golangci-lint (fast, no DB).
-- `docker-build`: builds Docker image (depends on `ci`).
-- `integration`: PostgreSQL 17 service container, `go test -race -tags=integration`.
+GitHub Actions (`.github/workflows/`):
+- `ci.yml`: three jobs — gofmt check, `go test -race`, golangci-lint (fast, no DB); Docker image build (depends on `ci`); PostgreSQL 17 integration tests.
+- `licence.yml`: SPDX license header check (`.go` and `.sh` files).
 
 ## Release
 
