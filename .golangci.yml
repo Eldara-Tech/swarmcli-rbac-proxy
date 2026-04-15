@@ -2,6 +2,10 @@ version: "2"
 
 linters:
   settings:
+    goheader:
+      template: |-
+        SPDX-License-Identifier: AGPL-3.0-only
+        Copyright © 2026 Eldara Tech
     errcheck:
       exclude-functions:
         - (net.Conn).Close
@@ -16,6 +20,9 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - os.Remove
+
+  enable:
+    - goheader
 
 formatters:
   enable:
