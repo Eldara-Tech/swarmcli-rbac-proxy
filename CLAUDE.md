@@ -25,7 +25,14 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 ## Go Version & Build
 
-Go 1.26. No Makefile.
+Go 1.26. No Makefile. GoReleaser handles binary releases with `-trimpath -s -w` ldflags and version injection (`internal/version`).
+
+Version metadata is injected at build time via ldflags:
+- `-X swarm-rbac-proxy/internal/version.Version=...` — git tag
+- `-X swarm-rbac-proxy/internal/version.Commit=...` — commit hash
+- `-X swarm-rbac-proxy/internal/version.Date=...` — build timestamp
+
+For local development, defaults are `dev`/`none`/`unknown`. See `RELEASING.md` for full release process.
 
 When updating the Go version, keep these in sync:
 - `go.mod` — `go` and `toolchain` directives
@@ -77,16 +84,20 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS)
+  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
-  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23), builds proxy + swcproxy (/usr/local/bin), welcome banner via profile.d, CMD so /bin/sh stays usable
-  welcome.sh            — container login banner (COPY'd to /etc/profile.d/welcome.sh)
+  .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy
+  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23), version injection via build args + ldflags, OCI labels
+  welcome.sh            — container login banner with dynamic version display (COPY'd to /etc/profile.d/welcome.sh)
   stack.yml             — Docker Swarm stack definition
   cmd/
     swcproxy/
-      main.go           — Admin CLI: user ls/add/delete/regenerate-token (direct store access)
+      main.go           — Admin CLI: version, user ls/add/delete/regenerate-token (direct store access)
   internal/
+    version/
+      version.go        — Build-time version vars (Version/Commit/Date), shared by both binaries
+      version_test.go   — version package tests
     certauth/
       certauth.go       — CA loading, generation (GenerateCA), client certificate issuance (ECDSA P-256)
       certauth_test.go  — unit tests (load, issue, serial uniqueness, round-trip)
@@ -150,6 +161,7 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 Runs inside the proxy container via `docker exec`. Accesses the store directly (no HTTP).
 
 ```bash
+swcproxy version                          # Show version
 swcproxy user ls                          # List users
 swcproxy user add <username> [--admin]    # Create user + onboarding token
 swcproxy user delete <username>           # Delete user
@@ -174,10 +186,15 @@ GitHub Actions (`.github/workflows/`):
 
 ## Release
 
-GitHub Actions (`.github/workflows/release.yml`): triggered on `v*` tags.
-- Builds and pushes Docker image to Docker Hub as `eldaratech/swarmcli-rbac-proxy`.
-- Tags: `{version}` and `{major}.{minor}` (via `docker/metadata-action`).
-- Requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets.
+GitHub Actions (`.github/workflows/release.yml`): triggered on `v*` tags. Three parallel jobs:
+1. **release-drafter**: Creates draft release notes from PR labels.
+2. **goreleaser**: Builds Linux binaries (amd64/arm64) for both `proxy` and `swcproxy`, publishes GitHub release with archives.
+3. **docker**: Builds and pushes Docker image to Docker Hub as `eldaratech/swarmcli-rbac-proxy` with version injection via `--build-arg`.
+
+Docker image tags: `{version}` and `{major}.{minor}` (via `docker/metadata-action`).
+Requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets.
+
+See `RELEASING.md` for local testing and manual release process.
 
 ## Pre-push Checklist
 

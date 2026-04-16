@@ -15,9 +15,10 @@ if [ -z "$_WELCOME_SHOWN" ]; then
 /____/ |__/|__/\____/  /_/ |_/_____/_/  |_\____/  /_/   /_/   \____/_/|_|\__, /
                                                                         /____/
 
-  Report issues : https://github.com/Eldara-Tech/swarmcli-rbac-proxy/issues
-  License       : AGPL-3.0-only
-  CLI help      : swcproxy --help
-
 BANNER
+  printf '  %-14s: %s\n' "Version" "$(/proxy --version 2>/dev/null || echo 'unknown')"
+  printf '  %-14s: %s\n' "Report issues" "https://github.com/Eldara-Tech/swarmcli-rbac-proxy/issues"
+  printf '  %-14s: %s\n' "License" "AGPL-3.0-only"
+  printf '  %-14s: %s\n' "CLI help" "swcproxy --help"
+  echo
 fi
