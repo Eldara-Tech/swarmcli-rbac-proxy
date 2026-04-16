@@ -24,7 +24,7 @@ Docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix soc
 - **One-command user onboarding** -- new users run a single `curl` + `docker context import` to get access
 - **Dual listener** -- external (mTLS) for users, internal (plain TCP) for admin automation
 - **Admin CLI (`swcproxy`)** -- manage users from inside the container without HTTP calls
-- **Agent proxy forwarding** -- transparently forwards `/v1/*` requests to a backend agent service
+- **Agent proxy forwarding** -- transparently forwards `/v1/*` requests to a backend agent service (designed for [SwarmCLI](https://swarmcli.io/), coming soon)
 - **Three storage backends** -- SQLite (default), PostgreSQL, or in-memory (dev)
 - **Structured logging** -- JSON (prod) or console (dev) via zap
 

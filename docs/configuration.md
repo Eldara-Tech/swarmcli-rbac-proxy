@@ -313,7 +313,7 @@ This is the recommended production setup: the internal listener handles automati
 
 ## Agent proxy forwarding
 
-When `PROXY_AGENT_URL` is set, all requests to `/v1/*` are forwarded to the specified backend. This is used in the SwarmCLI ecosystem to route agent commands (exec, logs) through the RBAC proxy, applying the same authentication and exec guard rules.
+When `PROXY_AGENT_URL` is set, all requests to `/v1/*` are forwarded to the specified backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon), which routes agent commands (exec, logs) through the RBAC proxy, applying the same authentication and exec guard rules. It is not intended for standalone use.
 
 ```bash
 PROXY_AGENT_URL=tcp://agent-proxy:9090 ./swarm-rbac-proxy
