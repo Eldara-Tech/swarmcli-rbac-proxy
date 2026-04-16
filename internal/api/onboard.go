@@ -21,11 +21,12 @@ type OnboardHandler struct {
 	store       store.UserStore
 	ca          *certauth.CA
 	externalURL string
+	audit       store.AuditStore
 }
 
 // NewOnboardHandler creates an onboard handler.
-func NewOnboardHandler(s store.UserStore, ca *certauth.CA, externalURL string) *OnboardHandler {
-	return &OnboardHandler{store: s, ca: ca, externalURL: externalURL}
+func NewOnboardHandler(s store.UserStore, ca *certauth.CA, externalURL string, audit store.AuditStore) *OnboardHandler {
+	return &OnboardHandler{store: s, ca: ca, externalURL: externalURL, audit: audit}
 }
 
 func (h *OnboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +73,7 @@ func (h *OnboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "certificate generation failed")
 		return
 	}
+	recordAudit(h.audit, r, store.AuditCertIssued, "user:"+u.Username, "success", "onboard")
 
 	tarData, err := buildContextTar(u.Username, h.externalURL, h.ca.CACertPEM(), certPEM, keyPEM)
 	if err != nil {
@@ -81,6 +83,7 @@ func (h *OnboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	l().Infow("onboard completed", "username", u.Username)
+	recordAudit(h.audit, r, store.AuditOnboardCompleted, "user:"+u.Username, "success", "")
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Disposition", "attachment; filename="+u.Username+".tar")
 	_, _ = w.Write(tarData)

@@ -28,6 +28,19 @@ const schema = `CREATE TABLE IF NOT EXISTS users (
     token_consumed_at TIMESTAMPTZ
 );`
 
+const pgAuditSchema = `CREATE TABLE IF NOT EXISTS audit_log (
+    id        UUID PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor     TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    resource  TEXT NOT NULL DEFAULT '',
+    status    TEXT NOT NULL DEFAULT 'success',
+    detail    TEXT NOT NULL DEFAULT '',
+    source_ip TEXT NOT NULL DEFAULT ''
+);`
+
+const pgAuditIndex = `CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);`
+
 var pgMigrations = []string{
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboard_token TEXT`,
@@ -57,6 +70,16 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 			lPostgres().Errorw("migration failed", "error", err, "sql", m)
 			return nil, err
 		}
+	}
+	if _, err := pool.Exec(ctx, pgAuditSchema); err != nil {
+		pool.Close()
+		lPostgres().Errorw("audit schema failed", "error", err)
+		return nil, err
+	}
+	if _, err := pool.Exec(ctx, pgAuditIndex); err != nil {
+		pool.Close()
+		lPostgres().Errorw("audit index failed", "error", err)
+		return nil, err
 	}
 	lPostgres().Infow("store initialized")
 	return &PostgresStore{pool: pool}, nil
@@ -204,5 +227,47 @@ func (s *PostgresStore) ConsumeOnboardToken(ctx context.Context, token string) (
 	return &u, nil
 }
 
+func (s *PostgresStore) RecordAudit(ctx context.Context, e *AuditEntry) error {
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	e.ID = id
+	e.Timestamp = time.Now().UTC()
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO audit_log (id, timestamp, actor, action, resource, status, detail, source_ip)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		e.ID, e.Timestamp, e.Actor, string(e.Action),
+		e.Resource, e.Status, e.Detail, e.SourceIP,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListAuditEntries(ctx context.Context, limit int) ([]AuditEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, timestamp, actor, action, resource, status, detail, source_ip
+		 FROM audit_log ORDER BY timestamp DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]AuditEntry, 0)
+	for rows.Next() {
+		var e AuditEntry
+		var action string
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Actor, &action, &e.Resource, &e.Status, &e.Detail, &e.SourceIP); err != nil {
+			return nil, err
+		}
+		e.Action = AuditAction(action)
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
 // Ensure interface compliance.
 var _ UserStore = (*PostgresStore)(nil)
+var _ AuditStore = (*PostgresStore)(nil)

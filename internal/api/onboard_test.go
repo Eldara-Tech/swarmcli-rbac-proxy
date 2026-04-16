@@ -22,7 +22,7 @@ func newTestOnboardHandler(t *testing.T) (*OnboardHandler, *store.MemoryStore) {
 	t.Helper()
 	s := store.NewMemoryStore()
 	ca := loadTestCA(t)
-	return NewOnboardHandler(s, ca, "tcp://proxy.example.com:2376"), s
+	return NewOnboardHandler(s, ca, "tcp://proxy.example.com:2376", nil), s
 }
 
 func loadTestCA(t *testing.T) *certauth.CA {

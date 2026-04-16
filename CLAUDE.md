@@ -97,11 +97,11 @@ swarm-rbac-proxy/
       logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
-      store.go          — UserStore interface (CRUD + DeleteUser + onboard tokens), User type (with Role), sentinel errors
-      memory.go         — in-memory UserStore (dev/testing)
-      sqlite.go         — SQLite UserStore (modernc.org/sqlite, default, with migrations)
-      postgres.go       — PostgreSQL UserStore (pgx/v5, with migrations)
-      contract_test.go  — shared contract tests for all store implementations
+      store.go          — UserStore + AuditStore interfaces, User/AuditEntry types, AuditAction constants, sentinel errors
+      memory.go         — in-memory UserStore + AuditStore (dev/testing)
+      sqlite.go         — SQLite UserStore + AuditStore (modernc.org/sqlite, default, with migrations)
+      postgres.go       — PostgreSQL UserStore + AuditStore (pgx/v5, with migrations)
+      contract_test.go  — shared contract tests for all store implementations (user + audit)
       memory_test.go    — memory store unit tests
       sqlite_test.go    — SQLite store unit tests (contract + WAL)
       postgres_test.go  — postgres integration tests (//go:build integration)
@@ -154,8 +154,17 @@ swcproxy user ls                          # List users
 swcproxy user add <username> [--admin]    # Create user + onboarding token
 swcproxy user delete <username>           # Delete user
 swcproxy user regenerate-token <username> # New onboarding token
+swcproxy audit ls [--limit N]             # List audit log entries (default: 50)
 swcproxy --help                           # Usage info
 ```
+
+## Audit Log
+
+All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`. Auth events (mTLS success/failure) are logged via zap only, not persisted.
+
+Each entry records: id, timestamp, actor (username/"cli"/"anonymous"), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
+
+The `AuditStore` interface (`internal/store/store.go`) is implemented by all three store backends. Recording is nil-safe — handlers pass `nil` in tests. Audit write failures are logged but never block requests.
 
 ## CI
 

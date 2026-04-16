@@ -24,6 +24,10 @@ func TestSQLiteStore_Contract(t *testing.T) {
 	testUserStoreContract(t, func() UserStore { return newTestSQLiteStore(t) })
 }
 
+func TestSQLiteStore_AuditContract(t *testing.T) {
+	testAuditStoreContract(t, func() AuditStore { return newTestSQLiteStore(t) })
+}
+
 func TestSQLiteStore_WALEnabled(t *testing.T) {
 	s := newTestSQLiteStore(t)
 	var mode string

@@ -264,6 +264,7 @@ func main() {
 	}
 
 	var userStore store.UserStore
+	var auditStore store.AuditStore
 	switch cfg.Store {
 	case "sqlite":
 		sq, err := store.NewSQLiteStore(context.Background(), cfg.DatabasePath)
@@ -272,8 +273,11 @@ func main() {
 		}
 		defer sq.Close()
 		userStore = sq
+		auditStore = sq
 	case "memory":
-		userStore = store.NewMemoryStore()
+		ms := store.NewMemoryStore()
+		userStore = ms
+		auditStore = ms
 	case "postgres":
 		if cfg.DatabaseURL == "" {
 			l().Fatalw("missing required config", "error", "database_url is required when store=postgres")
@@ -284,6 +288,7 @@ func main() {
 		}
 		defer pg.Close()
 		userStore = pg
+		auditStore = pg
 	default:
 		l().Fatalw("unknown store type", "store", cfg.Store)
 	}
@@ -342,13 +347,13 @@ func main() {
 		}
 	}
 
-	guard := api.NewResourceGuard(protectedStack, socketPath)
+	guard := api.NewResourceGuard(protectedStack, socketPath, auditStore)
 	if protectedStack != "" {
 		l().Infow("resource guard enabled", "protected_stack", protectedStack)
 	}
 
-	userHandler := api.NewUserHandler(userStore, ca)
-	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL)
+	userHandler := api.NewUserHandler(userStore, ca, auditStore)
+	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL, auditStore)
 
 	var proxyAuth func(http.Handler) http.Handler
 	if cfg.TLSClientCA != "" {

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -30,6 +31,12 @@ func main() {
 			os.Exit(1)
 		}
 		runUserCommand(os.Args[2], os.Args[3:])
+	case "audit":
+		if len(os.Args) < 3 {
+			printAuditUsage()
+			os.Exit(1)
+		}
+		runAuditCommand(os.Args[2], os.Args[3:])
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -47,6 +54,7 @@ Usage:
   swcproxy user add <username> [--admin]   Create user + onboarding token
   swcproxy user delete <username>          Delete user
   swcproxy user regenerate-token <username> Regenerate onboarding token
+  swcproxy audit ls [--limit N]            List audit log entries (default: 50)
   swcproxy --help                          Show this help
 `)
 }
@@ -109,7 +117,7 @@ func runUserCommand(subcmd string, args []string) {
 	}
 }
 
-func openStore() store.UserStore {
+func openStore() (store.UserStore, store.AuditStore) {
 	cfg, err := config.Load(os.Getenv("PROXY_CONFIG"))
 	if err != nil {
 		fatal("load config: %v", err)
@@ -123,7 +131,7 @@ func openStore() store.UserStore {
 		if err != nil {
 			fatal("open sqlite: %v", err)
 		}
-		return s
+		return s, s
 	case "postgres":
 		if cfg.DatabaseURL == "" {
 			fatal("database_url is required for postgres store")
@@ -132,13 +140,13 @@ func openStore() store.UserStore {
 		if err != nil {
 			fatal("open postgres: %v", err)
 		}
-		return s
+		return s, s
 	case "memory":
 		fatal("swcproxy cannot use in-memory store (data not shared with proxy process)")
 	default:
 		fatal("unknown store type: %s", cfg.Store)
 	}
-	return nil
+	return nil, nil
 }
 
 func getExternalURL() string {
@@ -169,7 +177,7 @@ func generateToken() string {
 }
 
 func cmdUserList() {
-	s := openStore()
+	s, _ := openStore()
 	users, err := s.ListUsers(context.Background())
 	if err != nil {
 		fatal("list users: %v", err)
@@ -184,7 +192,7 @@ func cmdUserList() {
 }
 
 func cmdUserAdd(username string, admin bool) {
-	s := openStore()
+	s, audit := openStore()
 	ctx := context.Background()
 
 	role := "user"
@@ -202,6 +210,11 @@ func cmdUserAdd(username string, admin bool) {
 		fatal("set onboard token: %v", err)
 	}
 
+	_ = audit.RecordAudit(ctx, &store.AuditEntry{
+		Actor: "cli", Action: store.AuditUserCreated,
+		Resource: "user:" + username, Status: "success",
+	})
+
 	extURL := getExternalURL()
 	fmt.Printf("User created: %s (role: %s)\n", username, role)
 	fmt.Printf("Onboard token: %s\n\n", token)
@@ -212,15 +225,20 @@ func cmdUserAdd(username string, admin bool) {
 }
 
 func cmdUserDelete(username string) {
-	s := openStore()
-	if err := s.DeleteUser(context.Background(), username); err != nil {
+	s, audit := openStore()
+	ctx := context.Background()
+	if err := s.DeleteUser(ctx, username); err != nil {
 		fatal("delete user: %v", err)
 	}
+	_ = audit.RecordAudit(ctx, &store.AuditEntry{
+		Actor: "cli", Action: store.AuditUserDeleted,
+		Resource: "user:" + username, Status: "success",
+	})
 	fmt.Printf("User deleted: %s\n", username)
 }
 
 func cmdUserRegenerateToken(username string) {
-	s := openStore()
+	s, audit := openStore()
 	ctx := context.Background()
 
 	// Verify user exists.
@@ -233,12 +251,63 @@ func cmdUserRegenerateToken(username string) {
 		fatal("set onboard token: %v", err)
 	}
 
+	_ = audit.RecordAudit(ctx, &store.AuditEntry{
+		Actor: "cli", Action: store.AuditTokenRegenerated,
+		Resource: "user:" + username, Status: "success",
+	})
+
 	extURL := getExternalURL()
 	fmt.Printf("New onboard token for %s: %s\n\n", username, token)
 	fmt.Printf("Share this command with the user:\n")
 	fmt.Printf("  curl -k %s/api/v1/onboard/%s -o %s.tar\n\n", curlURL(extURL), token, username)
 	fmt.Printf("Then import the context:\n")
 	fmt.Printf("  docker context import %s-managed %s.tar\n", username, username)
+}
+
+func printAuditUsage() {
+	fmt.Fprintf(os.Stderr, `Usage:
+  swcproxy audit ls [--limit N]   List audit log entries (default: 50)
+`)
+}
+
+func runAuditCommand(subcmd string, args []string) {
+	switch subcmd {
+	case "ls", "list":
+		limit := 50
+		for i, a := range args {
+			if a == "--limit" && i+1 < len(args) {
+				n, err := strconv.Atoi(args[i+1])
+				if err != nil {
+					fatal("invalid --limit value: %s", args[i+1])
+				}
+				limit = n
+			}
+		}
+		cmdAuditList(limit)
+	case "--help", "-h", "help":
+		printAuditUsage()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown audit command: %s\n\n", subcmd)
+		printAuditUsage()
+		os.Exit(1)
+	}
+}
+
+func cmdAuditList(limit int) {
+	_, audit := openStore()
+	entries, err := audit.ListAuditEntries(context.Background(), limit)
+	if err != nil {
+		fatal("list audit entries: %v", err)
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "TIMESTAMP\tACTOR\tACTION\tRESOURCE\tSTATUS\tDETAIL")
+	for _, e := range entries {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			e.Timestamp.Format("2006-01-02 15:04:05"),
+			e.Actor, e.Action, e.Resource, e.Status, e.Detail)
+	}
+	_ = w.Flush()
 }
 
 func fatal(format string, args ...any) {

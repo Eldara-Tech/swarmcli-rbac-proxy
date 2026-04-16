@@ -128,6 +128,7 @@ func (g *ResourceGuard) ExecGuard(next http.Handler) http.Handler {
 			return
 		}
 		if protected && !isAdmin(r) {
+			recordAudit(g.audit, r, store.AuditGuardBlocked, "exec:"+r.URL.Path, "denied", "protected stack exec")
 			writeError(w, http.StatusForbidden, "exec on protected stack requires admin role")
 			return
 		}
@@ -165,13 +166,14 @@ func isExecPath(method, path string) bool {
 type ResourceGuard struct {
 	stackName  string
 	httpClient *http.Client
+	audit      store.AuditStore
 }
 
 // NewResourceGuard creates a ResourceGuard that protects the given stack.
 // socketPath is the Docker daemon Unix socket used for back-queries.
 // If stackName is empty the guard is a no-op.
-func NewResourceGuard(stackName, socketPath string) *ResourceGuard {
-	g := &ResourceGuard{stackName: stackName}
+func NewResourceGuard(stackName, socketPath string, audit store.AuditStore) *ResourceGuard {
+	g := &ResourceGuard{stackName: stackName, audit: audit}
 	if socketPath != "" {
 		g.httpClient = &http.Client{
 			Timeout: 5 * time.Second,
@@ -205,6 +207,7 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 		// Unconditional block for all external users.
 		if route.resource == "swarm" && route.action == "leave" {
 			l().Warnw("guard: blocked swarm leave", "path", r.URL.Path)
+			recordAudit(g.audit, r, store.AuditGuardBlocked, "swarm:leave", "denied", "swarm leave requires direct access")
 			writeError(w, http.StatusForbidden, "swarm leave requires direct access")
 			return
 		}
@@ -219,6 +222,7 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			}
 			if protected {
 				l().Warnw("guard: blocked create in protected stack", "path", r.URL.Path)
+				recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":create", "denied", "protected stack")
 				writeError(w, http.StatusForbidden, "cannot create resources in protected stack")
 				return
 			}
@@ -235,6 +239,7 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			}
 			if protected {
 				l().Warnw("guard: blocked update of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
+				recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":"+route.id, "denied", "protected stack update")
 				writeError(w, http.StatusForbidden, "cannot modify protected stack resource")
 				return
 			}
@@ -248,6 +253,7 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			}
 			if protected {
 				l().Warnw("guard: blocked delete of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
+				recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":"+route.id, "denied", "protected stack delete")
 				writeError(w, http.StatusForbidden, "cannot delete protected stack resource")
 				return
 			}

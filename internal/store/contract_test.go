@@ -268,3 +268,144 @@ func testUserStoreContract(t *testing.T, newStore func() UserStore) {
 		}
 	})
 }
+
+// testAuditStoreContract exercises the full AuditStore contract.
+func testAuditStoreContract(t *testing.T, newStore func() AuditStore) {
+	t.Helper()
+
+	t.Run("ListEmpty", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		entries, err := s.ListAuditEntries(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if entries == nil {
+			t.Fatal("expected non-nil empty slice")
+		}
+		if len(entries) != 0 {
+			t.Fatalf("got %d entries, want 0", len(entries))
+		}
+	})
+
+	t.Run("RecordSetsIDAndTimestamp", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		e := &AuditEntry{Actor: "alice", Action: AuditUserCreated, Resource: "user:alice", Status: "success"}
+		if err := s.RecordAudit(ctx, e); err != nil {
+			t.Fatalf("RecordAudit: %v", err)
+		}
+		if e.ID == "" {
+			t.Fatal("expected ID to be set")
+		}
+		if e.Timestamp.IsZero() {
+			t.Fatal("expected Timestamp to be set")
+		}
+	})
+
+	t.Run("RecordAndList", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		actions := []AuditAction{AuditUserCreated, AuditCertIssued, AuditUserDeleted}
+		for _, a := range actions {
+			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "alice", Action: a, Resource: "user:alice", Status: "success"}); err != nil {
+				t.Fatalf("RecordAudit(%s): %v", a, err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 3 {
+			t.Fatalf("got %d entries, want 3", len(entries))
+		}
+		// Newest first.
+		if entries[0].Action != AuditUserDeleted {
+			t.Errorf("entries[0].Action = %q, want %q", entries[0].Action, AuditUserDeleted)
+		}
+		if entries[2].Action != AuditUserCreated {
+			t.Errorf("entries[2].Action = %q, want %q", entries[2].Action, AuditUserCreated)
+		}
+	})
+
+	t.Run("ListLimit", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		for i := range 5 {
+			e := &AuditEntry{Actor: "bob", Action: AuditGuardBlocked, Resource: "services:svc" + string(rune('0'+i)), Status: "denied"}
+			if err := s.RecordAudit(ctx, e); err != nil {
+				t.Fatalf("RecordAudit: %v", err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 2)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("got %d entries, want 2", len(entries))
+		}
+		// Most recent entries.
+		if entries[0].Resource != "services:svc4" {
+			t.Errorf("entries[0].Resource = %q, want %q", entries[0].Resource, "services:svc4")
+		}
+		if entries[1].Resource != "services:svc3" {
+			t.Errorf("entries[1].Resource = %q, want %q", entries[1].Resource, "services:svc3")
+		}
+	})
+
+	t.Run("RecordAllFields", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		e := &AuditEntry{
+			Actor:    "admin",
+			Action:   AuditGuardBlocked,
+			Resource: "services:my-svc",
+			Status:   "denied",
+			Detail:   "protected stack delete",
+			SourceIP: "10.0.0.1",
+		}
+		if err := s.RecordAudit(ctx, e); err != nil {
+			t.Fatalf("RecordAudit: %v", err)
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 1)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("got %d entries, want 1", len(entries))
+		}
+		got := entries[0]
+		if got.ID == "" {
+			t.Error("expected ID")
+		}
+		if got.Timestamp.IsZero() {
+			t.Error("expected Timestamp")
+		}
+		if got.Actor != "admin" {
+			t.Errorf("Actor = %q, want %q", got.Actor, "admin")
+		}
+		if got.Action != AuditGuardBlocked {
+			t.Errorf("Action = %q, want %q", got.Action, AuditGuardBlocked)
+		}
+		if got.Resource != "services:my-svc" {
+			t.Errorf("Resource = %q, want %q", got.Resource, "services:my-svc")
+		}
+		if got.Status != "denied" {
+			t.Errorf("Status = %q, want %q", got.Status, "denied")
+		}
+		if got.Detail != "protected stack delete" {
+			t.Errorf("Detail = %q, want %q", got.Detail, "protected stack delete")
+		}
+		if got.SourceIP != "10.0.0.1" {
+			t.Errorf("SourceIP = %q, want %q", got.SourceIP, "10.0.0.1")
+		}
+	})
+}

@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 }
 
 func newTestHandler() *UserHandler {
-	return NewUserHandler(store.NewMemoryStore(), nil)
+	return NewUserHandler(store.NewMemoryStore(), nil, nil)
 }
 
 func TestCreateUser(t *testing.T) {
@@ -216,7 +216,7 @@ func testCAForHandler(t *testing.T) *certauth.CA {
 
 func TestCreateUser_WithCertificate(t *testing.T) {
 	ca := testCAForHandler(t)
-	h := NewUserHandler(store.NewMemoryStore(), ca)
+	h := NewUserHandler(store.NewMemoryStore(), ca, nil)
 
 	body := `{"username":"alice"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
@@ -278,7 +278,7 @@ func TestCreateUser_WithCertificate(t *testing.T) {
 }
 
 func TestCreateUser_WithoutCA(t *testing.T) {
-	h := NewUserHandler(store.NewMemoryStore(), nil)
+	h := NewUserHandler(store.NewMemoryStore(), nil, nil)
 
 	body := `{"username":"bob"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))

@@ -22,6 +22,10 @@ func TestMemoryStore_Contract(t *testing.T) {
 	testUserStoreContract(t, func() UserStore { return NewMemoryStore() })
 }
 
+func TestMemoryStore_AuditContract(t *testing.T) {
+	testAuditStoreContract(t, func() AuditStore { return NewMemoryStore() })
+}
+
 func TestMemoryStore_ConcurrentCreates(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := context.Background()

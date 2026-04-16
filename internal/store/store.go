@@ -33,6 +33,36 @@ type UserStore interface {
 	ConsumeOnboardToken(ctx context.Context, token string) (*User, error)
 }
 
+// AuditAction enumerates the auditable actions.
+type AuditAction string
+
+const (
+	AuditUserCreated      AuditAction = "user.created"
+	AuditUserDeleted      AuditAction = "user.deleted"
+	AuditCertIssued       AuditAction = "cert.issued"
+	AuditOnboardCompleted AuditAction = "onboard.completed"
+	AuditGuardBlocked     AuditAction = "guard.blocked"
+	AuditTokenRegenerated AuditAction = "token.regenerated"
+)
+
+// AuditEntry represents a single audit log entry.
+type AuditEntry struct {
+	ID        string      `json:"id"`
+	Timestamp time.Time   `json:"timestamp"`
+	Actor     string      `json:"actor"` // username, "system", or "cli"
+	Action    AuditAction `json:"action"`
+	Resource  string      `json:"resource"`  // e.g. "user:alice", "swarm:leave"
+	Status    string      `json:"status"`    // "success" or "denied"
+	Detail    string      `json:"detail"`    // optional free-text context
+	SourceIP  string      `json:"source_ip"` // client IP or empty for CLI
+}
+
+// AuditStore defines the persistence interface for audit logging.
+type AuditStore interface {
+	RecordAudit(ctx context.Context, e *AuditEntry) error
+	ListAuditEntries(ctx context.Context, limit int) ([]AuditEntry, error)
+}
+
 var (
 	ErrUsernameExists   = errors.New("username already exists")
 	ErrUsernameRequired = errors.New("username is required")
