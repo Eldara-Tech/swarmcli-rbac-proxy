@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -295,6 +296,169 @@ func TestCreateUser_WithoutCA(t *testing.T) {
 	raw := w.Body.String()
 	if strings.Contains(raw, "certificate") {
 		t.Errorf("response should not contain certificate field: %s", raw)
+	}
+}
+
+// --- Audit entry tests ---
+
+func TestCreateUser_AuditEntry(t *testing.T) {
+	s := store.NewMemoryStore()
+	h := NewUserHandler(s, nil, s)
+
+	body := `{"username":"alice"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	entries, err := s.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d audit entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Action != store.AuditUserCreated {
+		t.Errorf("Action = %q, want %q", e.Action, store.AuditUserCreated)
+	}
+	if e.Resource != "user:alice" {
+		t.Errorf("Resource = %q, want %q", e.Resource, "user:alice")
+	}
+	if e.Status != "success" {
+		t.Errorf("Status = %q, want %q", e.Status, "success")
+	}
+	if e.Detail != "role:user" {
+		t.Errorf("Detail = %q, want %q", e.Detail, "role:user")
+	}
+}
+
+func TestCreateUser_WithCert_AuditEntries(t *testing.T) {
+	s := store.NewMemoryStore()
+	ca := testCAForHandler(t)
+	h := NewUserHandler(s, ca, s)
+
+	body := `{"username":"bob","role":"admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
+	}
+
+	entries, err := s.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d audit entries, want 2", len(entries))
+	}
+	// Newest first: cert.issued, then user.created.
+	if entries[0].Action != store.AuditCertIssued {
+		t.Errorf("entries[0].Action = %q, want %q", entries[0].Action, store.AuditCertIssued)
+	}
+	if entries[1].Action != store.AuditUserCreated {
+		t.Errorf("entries[1].Action = %q, want %q", entries[1].Action, store.AuditUserCreated)
+	}
+	if entries[1].Detail != "role:admin" {
+		t.Errorf("entries[1].Detail = %q, want %q", entries[1].Detail, "role:admin")
+	}
+}
+
+func TestDeleteUser_AuditEntry(t *testing.T) {
+	s := store.NewMemoryStore()
+	h := NewUserHandler(s, nil, s)
+
+	// Create user directly in store.
+	if err := s.CreateUser(context.Background(), &store.User{Username: "todelete"}); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("DELETE /api/v1/users/{username}", http.HandlerFunc(h.Delete))
+	req := httptest.NewRequest("DELETE", "/api/v1/users/todelete", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+
+	entries, err := s.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d audit entries, want 1", len(entries))
+	}
+	if entries[0].Action != store.AuditUserDeleted {
+		t.Errorf("Action = %q, want %q", entries[0].Action, store.AuditUserDeleted)
+	}
+	if entries[0].Resource != "user:todelete" {
+		t.Errorf("Resource = %q, want %q", entries[0].Resource, "user:todelete")
+	}
+}
+
+func TestCreateUser_Failure_NoAudit(t *testing.T) {
+	s := store.NewMemoryStore()
+	h := NewUserHandler(s, nil, s)
+	ctx := context.Background()
+
+	// Duplicate: create first, then try again.
+	if err := s.CreateUser(ctx, &store.User{Username: "dup"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, body := range []string{
+		`{"username":"dup"}`, // duplicate
+		`{"username":""}`,    // empty username
+		`{invalid`,           // bad JSON
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if w.Code < 400 {
+			t.Errorf("body %q: expected error status, got %d", body, w.Code)
+		}
+	}
+
+	entries, err := s.ListAuditEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 audit entries on failures, got %d", len(entries))
+	}
+}
+
+func TestDeleteUser_NotFound_NoAudit(t *testing.T) {
+	s := store.NewMemoryStore()
+	h := NewUserHandler(s, nil, s)
+
+	mux := http.NewServeMux()
+	mux.Handle("DELETE /api/v1/users/{username}", http.HandlerFunc(h.Delete))
+	req := httptest.NewRequest("DELETE", "/api/v1/users/nobody", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+
+	entries, err := s.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 audit entries, got %d", len(entries))
 	}
 }
 
