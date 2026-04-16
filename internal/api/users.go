@@ -68,6 +68,8 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<10) // 10 KB
+
 	var req struct {
 		Username string `json:"username"`
 		Role     string `json:"role"`

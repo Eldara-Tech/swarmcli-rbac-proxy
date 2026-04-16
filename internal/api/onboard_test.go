@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -51,6 +52,7 @@ func TestOnboardHandler_HappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/onboard/{token}", h)
 	req := httptest.NewRequest("GET", "/api/v1/onboard/valid-token", nil)
+	req.TLS = &tls.ConnectionState{} // simulate TLS connection
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -108,6 +110,7 @@ func TestOnboardHandler_TokenNotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/onboard/{token}", h)
 	req := httptest.NewRequest("GET", "/api/v1/onboard/nonexistent", nil)
+	req.TLS = &tls.ConnectionState{}
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -125,6 +128,7 @@ func TestOnboardHandler_TokenConsumed(t *testing.T) {
 
 	// First request succeeds.
 	req := httptest.NewRequest("GET", "/api/v1/onboard/used-token", nil)
+	req.TLS = &tls.ConnectionState{}
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -133,9 +137,35 @@ func TestOnboardHandler_TokenConsumed(t *testing.T) {
 
 	// Second request should fail with 410 Gone.
 	req = httptest.NewRequest("GET", "/api/v1/onboard/used-token", nil)
+	req.TLS = &tls.ConnectionState{}
 	w = httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusGone {
 		t.Fatalf("second request: status = %d, want 410", w.Code)
+	}
+}
+
+func TestOnboardHandler_RequiresTLS(t *testing.T) {
+	h, s := newTestOnboardHandler(t)
+	setupOnboardUser(t, s, "carol", "tls-token")
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/onboard/{token}", h)
+
+	// Plain HTTP (no TLS, no internal flag) should be rejected.
+	req := httptest.NewRequest("GET", "/api/v1/onboard/tls-token", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("plain HTTP: status = %d, want 403; body: %s", w.Code, w.Body.String())
+	}
+
+	// Internal listener (no TLS but ContextKeyInternal set) should be allowed.
+	req = httptest.NewRequest("GET", "/api/v1/onboard/tls-token", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ContextKeyInternal, true))
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("internal listener: status = %d, want 200; body: %s", w.Code, w.Body.String())
 	}
 }

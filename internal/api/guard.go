@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"swarm-rbac-proxy/internal/store"
 )
@@ -173,6 +174,7 @@ func NewResourceGuard(stackName, socketPath string) *ResourceGuard {
 	g := &ResourceGuard{stackName: stackName}
 	if socketPath != "" {
 		g.httpClient = &http.Client{
+			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
@@ -211,7 +213,9 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 		case "create":
 			protected, err := g.hasProtectedLabel(r)
 			if err != nil {
-				l().Warnw("guard: body parse error, allowing request", "error", err)
+				l().Warnw("guard: body parse error, blocking create", "error", err)
+				writeError(w, http.StatusBadRequest, "invalid request body")
+				return
 			}
 			if protected {
 				l().Warnw("guard: blocked create in protected stack", "path", r.URL.Path)
@@ -308,11 +312,15 @@ func (g *ResourceGuard) hasProtectedLabel(r *http.Request) (bool, error) {
 		return false, nil
 	}
 
-	data, err := io.ReadAll(r.Body)
+	const maxCreateBodySize = 2 << 20 // 2 MB
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxCreateBodySize+1))
 	if err != nil {
 		return false, err
 	}
 	r.Body = io.NopCloser(bytes.NewReader(data))
+	if int64(len(data)) > maxCreateBodySize {
+		return false, fmt.Errorf("request body exceeds %d bytes", maxCreateBodySize)
+	}
 
 	if len(data) == 0 {
 		return false, nil

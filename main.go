@@ -141,6 +141,27 @@ func newProxy(b backend) http.Handler {
 	})
 }
 
+// idleConn wraps a net.Conn and resets the deadline on each read/write,
+// providing an idle timeout that closes connections after inactivity.
+type idleConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *idleConn) Read(b []byte) (int, error) {
+	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *idleConn) Write(b []byte) (int, error) {
+	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(b)
+}
+
 // handleUpgrade proxies HTTP upgrade (hijack) requests used by
 // docker exec, docker attach, and raw streaming endpoints.
 func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
@@ -188,12 +209,16 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 		}
 	}
 
+	idleTimeout := 1 * time.Hour
+	client := &idleConn{clientConn, idleTimeout}
+	back := &idleConn{backConn, idleTimeout}
+
 	done := make(chan struct{})
 	go func() {
-		io.Copy(clientConn, backConn)
+		io.Copy(client, back)
 		close(done)
 	}()
-	io.Copy(backConn, clientConn)
+	io.Copy(back, client)
 	<-done
 }
 
@@ -293,6 +318,9 @@ func main() {
 	}
 
 	if cfg.AdminToken == "" {
+		if cfg.TLSCert != "" {
+			l().Fatalw("admin_token must be set when TLS is enabled")
+		}
 		l().Warnw("admin_token not set, management API is unauthenticated")
 	}
 
@@ -369,7 +397,13 @@ func main() {
 		registerRoutes(internalMux, api.MarkInternalRequest, noExecGuard)
 		go func() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
-			if err := http.ListenAndServe(cfg.InternalListen, internalMux); err != nil {
+			srv := &http.Server{
+				Addr:              cfg.InternalListen,
+				Handler:           internalMux,
+				ReadHeaderTimeout: 10 * time.Second,
+				IdleTimeout:       120 * time.Second,
+			}
+			if err := srv.ListenAndServe(); err != nil {
 				l().Fatalw("internal listener exited", "error", err)
 			}
 		}()
@@ -405,9 +439,11 @@ func main() {
 		}
 
 		srv := &http.Server{
-			Addr:      listenAddr,
-			Handler:   externalMux,
-			TLSConfig: tlsCfg,
+			Addr:              listenAddr,
+			Handler:           externalMux,
+			TLSConfig:         tlsCfg,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
 		if err := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil {
 			l().Fatalw("server exited", "error", err)
@@ -416,7 +452,13 @@ func main() {
 		if cfg.TLSClientCA != "" {
 			l().Warnw("tls_client_ca is set but tls_cert/tls_key are not; mTLS will not be enabled")
 		}
-		if err := http.ListenAndServe(listenAddr, externalMux); err != nil {
+		srv := &http.Server{
+			Addr:              listenAddr,
+			Handler:           externalMux,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		if err := srv.ListenAndServe(); err != nil {
 			l().Fatalw("server exited", "error", err)
 		}
 	}

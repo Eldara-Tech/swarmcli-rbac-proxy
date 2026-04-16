@@ -35,6 +35,11 @@ func (h *OnboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.TLS == nil && !isInternalListener(r) {
+		writeError(w, http.StatusForbidden, "TLS required for onboarding")
+		return
+	}
+
 	token := r.PathValue("token")
 	if token == "" {
 		writeError(w, http.StatusBadRequest, "token is required")

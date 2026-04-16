@@ -20,3 +20,10 @@ debug.log
 swarm-rbac-proxy
 
 .idea
+
+# Environment files and local databases
+*.env
+*.db
+
+# Security audit reports (contain vulnerability findings — never commit)
+.security-reports/

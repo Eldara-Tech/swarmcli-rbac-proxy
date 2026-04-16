@@ -189,6 +189,7 @@ Tracked issues from architecture audit:
 - **#62**: No certificate rotation mechanism (client certs expire after 1 year)
 - **#63**: No inter-service authentication — accepted risk: overlay network isolation (`internal: true`, `encrypted: "true"`) is sufficient; see `docs/security.md` § "Overlay network trust"
 - **#64**: Admin token not persisted across redeployments
+- **#75**: Dockerfile runs as root — accepted risk: proxy requires Docker socket access, which is root-equivalent. Non-root would need root-start entrypoint for negligible benefit. Same reasoning as #63.
 
 ## Dependencies
 
