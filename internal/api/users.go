@@ -101,7 +101,7 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	l().Infow("user created", "id", u.ID, "username", u.Username)
-	recordAudit(h.audit, r, store.AuditUserCreated, "user:"+u.Username, "success", "")
+	recordAudit(h.audit, r, store.AuditUserCreated, "user:"+u.Username, "success", "role:"+u.Role)
 
 	resp := createUserResponse{User: *u}
 

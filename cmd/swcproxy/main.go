@@ -213,6 +213,7 @@ func cmdUserAdd(username string, admin bool) {
 	_ = audit.RecordAudit(ctx, &store.AuditEntry{
 		Actor: "cli", Action: store.AuditUserCreated,
 		Resource: "user:" + username, Status: "success",
+		Detail: "role:" + role,
 	})
 
 	extURL := getExternalURL()
