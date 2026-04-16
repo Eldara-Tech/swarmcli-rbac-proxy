@@ -6,6 +6,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 
 	"swarm-rbac-proxy/internal/certauth"
@@ -19,12 +20,14 @@ func l() *proxylog.ProxyLogger { return proxylog.L().With("component", "api") }
 type UserHandler struct {
 	store store.UserStore
 	ca    *certauth.CA
+	audit store.AuditStore
 }
 
 // NewUserHandler creates a handler backed by the given store.
 // When ca is non-nil, user creation auto-generates a client certificate.
-func NewUserHandler(s store.UserStore, ca *certauth.CA) *UserHandler {
-	return &UserHandler{store: s, ca: ca}
+// When audit is non-nil, actions are recorded to the audit log.
+func NewUserHandler(s store.UserStore, ca *certauth.CA, audit store.AuditStore) *UserHandler {
+	return &UserHandler{store: s, ca: ca, audit: audit}
 }
 
 func (h *UserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +60,7 @@ func (h *UserHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	l().Infow("user deleted", "username", username)
+	recordAudit(h.audit, r, store.AuditUserDeleted, "user:"+username, "success", "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -97,6 +101,7 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	l().Infow("user created", "id", u.ID, "username", u.Username)
+	recordAudit(h.audit, r, store.AuditUserCreated, "user:"+u.Username, "success", "role:"+u.Role)
 
 	resp := createUserResponse{User: *u}
 
@@ -113,6 +118,7 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 			CAPEM:   string(h.ca.CACertPEM()),
 		}
 		l().Infow("client certificate issued", "username", u.Username)
+		recordAudit(h.audit, r, store.AuditCertIssued, "user:"+u.Username, "success", "")
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -144,6 +150,41 @@ func (h *UserHandler) list(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(users); err != nil {
 		l().Errorw("encode response failed", "error", err)
+	}
+}
+
+// actorFromRequest extracts the actor name from the request context.
+func actorFromRequest(r *http.Request) string {
+	if u, ok := r.Context().Value(ContextKeyUser).(*store.User); ok && u != nil {
+		return u.Username
+	}
+	return "anonymous"
+}
+
+// sourceIP extracts the client IP from the request.
+func sourceIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// recordAudit writes an audit entry if the store is non-nil. Errors are
+// logged but never propagated — audit failures must not block requests.
+func recordAudit(audit store.AuditStore, r *http.Request, action store.AuditAction, resource, status, detail string) {
+	if audit == nil {
+		return
+	}
+	if err := audit.RecordAudit(r.Context(), &store.AuditEntry{
+		Actor:    actorFromRequest(r),
+		Action:   action,
+		Resource: resource,
+		Status:   status,
+		Detail:   detail,
+		SourceIP: sourceIP(r),
+	}); err != nil {
+		l().Errorw("audit record failed", "error", err, "action", action)
 	}
 }
 

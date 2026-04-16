@@ -22,9 +22,12 @@ func newTestPostgresStore(t *testing.T) *PostgresStore {
 	if err != nil {
 		t.Fatalf("NewPostgresStore: %v", err)
 	}
-	// Clean table before each test for isolation.
+	// Clean tables before each test for isolation.
 	if _, err := s.pool.Exec(ctx, "DELETE FROM users"); err != nil {
 		t.Fatalf("truncate users: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, "DELETE FROM audit_log"); err != nil {
+		t.Fatalf("truncate audit_log: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
@@ -32,6 +35,10 @@ func newTestPostgresStore(t *testing.T) *PostgresStore {
 
 func TestPostgresStore_Contract(t *testing.T) {
 	testUserStoreContract(t, func() UserStore { return newTestPostgresStore(t) })
+}
+
+func TestPostgresStore_AuditContract(t *testing.T) {
+	testAuditStoreContract(t, func() AuditStore { return newTestPostgresStore(t) })
 }
 
 func TestPostgresStore_SchemaCreated(t *testing.T) {

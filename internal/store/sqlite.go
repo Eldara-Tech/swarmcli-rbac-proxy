@@ -28,6 +28,19 @@ const sqliteSchema = `CREATE TABLE IF NOT EXISTS users (
     token_consumed_at TEXT
 );`
 
+const sqliteAuditSchema = `CREATE TABLE IF NOT EXISTS audit_log (
+    id        TEXT PRIMARY KEY,
+    timestamp TEXT NOT NULL,
+    actor     TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    resource  TEXT NOT NULL DEFAULT '',
+    status    TEXT NOT NULL DEFAULT 'success',
+    detail    TEXT NOT NULL DEFAULT '',
+    source_ip TEXT NOT NULL DEFAULT ''
+);`
+
+const sqliteAuditIndex = `CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);`
+
 var sqliteMigrations = []string{
 	`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`,
 	`ALTER TABLE users ADD COLUMN onboard_token TEXT`,
@@ -65,6 +78,16 @@ func NewSQLiteStore(ctx context.Context, dsn string) (*SQLiteStore, error) {
 				return nil, err
 			}
 		}
+	}
+	if _, err := db.ExecContext(ctx, sqliteAuditSchema); err != nil {
+		_ = db.Close()
+		lSqlite().Errorw("audit schema failed", "error", err)
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, sqliteAuditIndex); err != nil {
+		_ = db.Close()
+		lSqlite().Errorw("audit index failed", "error", err)
+		return nil, err
 	}
 	lSqlite().Infow("store initialized", "dsn", dsn)
 	return &SQLiteStore{db: db}, nil
@@ -264,5 +287,51 @@ func isSQLiteUniqueViolation(err error) bool {
 	return false
 }
 
+func (s *SQLiteStore) RecordAudit(ctx context.Context, e *AuditEntry) error {
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	e.ID = id
+	e.Timestamp = time.Now().UTC()
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO audit_log (id, timestamp, actor, action, resource, status, detail, source_ip)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, e.Timestamp.Format(time.RFC3339Nano), e.Actor, string(e.Action),
+		e.Resource, e.Status, e.Detail, e.SourceIP,
+	)
+	return err
+}
+
+func (s *SQLiteStore) ListAuditEntries(ctx context.Context, limit int) ([]AuditEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, timestamp, actor, action, resource, status, detail, source_ip
+		 FROM audit_log ORDER BY timestamp DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	entries := make([]AuditEntry, 0)
+	for rows.Next() {
+		var e AuditEntry
+		var ts, action string
+		if err := rows.Scan(&e.ID, &ts, &e.Actor, &action, &e.Resource, &e.Status, &e.Detail, &e.SourceIP); err != nil {
+			return nil, err
+		}
+		e.Action = AuditAction(action)
+		e.Timestamp, err = time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
 // Ensure interface compliance.
 var _ UserStore = (*SQLiteStore)(nil)
+var _ AuditStore = (*SQLiteStore)(nil)

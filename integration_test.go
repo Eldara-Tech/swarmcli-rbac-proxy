@@ -558,7 +558,7 @@ func TestIntegration_FrontendMTLS_ManagementAPINotWrapped(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil, nil)))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -747,7 +747,7 @@ func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer, nil)))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -861,7 +861,7 @@ func startMTLSFrontendWithGuard(
 	backendAddr := startTCPServer(t, backendHandler)
 	b := backend{network: "tcp", address: backendAddr}
 
-	guard := api.NewResourceGuard(protectedStack, dockerSocketPath)
+	guard := api.NewResourceGuard(protectedStack, dockerSocketPath, nil)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", api.RequireClientCert(userStore, guard.Wrap(newProxy(b))))
@@ -1033,7 +1033,7 @@ func TestIntegration_InternalListener_DeleteProtectedService(t *testing.T) {
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
 
-	guard := api.NewResourceGuard("swarmcli-infra", sock)
+	guard := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	// Internal listener: MarkInternalRequest wraps the guarded proxy — matches main.go.
 	mux := http.NewServeMux()
@@ -1242,7 +1242,7 @@ func execGuardDockerMock(t *testing.T, stackLabel string) (string, func()) {
 func TestIntegration_ExecGuard_NoMTLS_Blocked(t *testing.T) {
 	sock, cleanup := execGuardDockerMock(t, "swarmcli-infra")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	agentBackend := startTCPServer(t, dockerMock())
 	agentBE := backend{network: "tcp", address: agentBackend}
@@ -1274,7 +1274,7 @@ func TestIntegration_ExecGuard_NoMTLS_Blocked(t *testing.T) {
 func TestIntegration_ExecGuard_NoMTLS_DockerExecBlocked(t *testing.T) {
 	sock, cleanup := execGuardDockerMock(t, "swarmcli-infra")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
@@ -1304,7 +1304,7 @@ func TestIntegration_ExecGuard_NoMTLS_DockerExecBlocked(t *testing.T) {
 func TestIntegration_ExecGuard_NoMTLS_NonExecAllowed(t *testing.T) {
 	sock, cleanup := execGuardDockerMock(t, "swarmcli-infra")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
@@ -1346,7 +1346,7 @@ func TestIntegration_ExecGuard_MTLS_AdminAllowed(t *testing.T) {
 
 	sock, cleanup := execGuardDockerMock(t, "swarmcli-infra")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
@@ -1404,7 +1404,7 @@ func TestIntegration_ExecGuard_MTLS_UserBlocked(t *testing.T) {
 
 	sock, cleanup := execGuardDockerMock(t, "swarmcli-infra")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
@@ -1464,7 +1464,7 @@ func TestIntegration_ExecGuard_MTLS_UserAllowedNonProtected(t *testing.T) {
 	// Mock reports container as belonging to a user stack, not the infra stack.
 	sock, cleanup := execGuardDockerMock(t, "user-app")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
@@ -1522,7 +1522,7 @@ func TestIntegration_ExecGuard_MTLS_UserAttachWSBlocked(t *testing.T) {
 
 	sock, cleanup := execGuardDockerMock(t, "swarmcli-infra")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
@@ -1610,7 +1610,7 @@ func TestIntegration_FrontendMTLS_NoCertExecBlocked(t *testing.T) {
 	mux := http.NewServeMux()
 	// RequireClientCert rejects before ExecGuard is reached; guard config
 	// doesn't matter for this test, but we use a real guard for consistency.
-	g := api.NewResourceGuard("swarmcli-infra", "")
+	g := api.NewResourceGuard("swarmcli-infra", "", nil)
 	mux.Handle("/", api.RequireClientCert(s, g.ExecGuard(newProxy(b))))
 
 	tlsCfg := &tls.Config{
@@ -1661,7 +1661,7 @@ func TestIntegration_FrontendMTLS_NoCertManagementAPIAllowed(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil, nil)))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -1732,13 +1732,13 @@ func TestIntegration_ExecGuard_MTLS_OnboardedUserBlocked(t *testing.T) {
 
 	sock, cleanup := execGuardDockerMock(t, "swarmcli-infra")
 	defer cleanup()
-	g := api.NewResourceGuard("swarmcli-infra", sock)
+	g := api.NewResourceGuard("swarmcli-infra", sock, nil)
 
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer, nil)))
 	mux.Handle("/", api.RequireClientCert(s, g.ExecGuard(newProxy(b))))
 
 	tlsCfg := &tls.Config{

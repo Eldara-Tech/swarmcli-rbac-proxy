@@ -268,3 +268,303 @@ func testUserStoreContract(t *testing.T, newStore func() UserStore) {
 		}
 	})
 }
+
+// testAuditStoreContract exercises the full AuditStore contract.
+func testAuditStoreContract(t *testing.T, newStore func() AuditStore) {
+	t.Helper()
+
+	t.Run("ListEmpty", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		entries, err := s.ListAuditEntries(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if entries == nil {
+			t.Fatal("expected non-nil empty slice")
+		}
+		if len(entries) != 0 {
+			t.Fatalf("got %d entries, want 0", len(entries))
+		}
+	})
+
+	t.Run("RecordSetsIDAndTimestamp", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		e := &AuditEntry{Actor: "alice", Action: AuditUserCreated, Resource: "user:alice", Status: "success"}
+		if err := s.RecordAudit(ctx, e); err != nil {
+			t.Fatalf("RecordAudit: %v", err)
+		}
+		if e.ID == "" {
+			t.Fatal("expected ID to be set")
+		}
+		if e.Timestamp.IsZero() {
+			t.Fatal("expected Timestamp to be set")
+		}
+	})
+
+	t.Run("RecordAndList", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		actions := []AuditAction{AuditUserCreated, AuditCertIssued, AuditUserDeleted}
+		for _, a := range actions {
+			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "alice", Action: a, Resource: "user:alice", Status: "success"}); err != nil {
+				t.Fatalf("RecordAudit(%s): %v", a, err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 3 {
+			t.Fatalf("got %d entries, want 3", len(entries))
+		}
+		// Newest first.
+		if entries[0].Action != AuditUserDeleted {
+			t.Errorf("entries[0].Action = %q, want %q", entries[0].Action, AuditUserDeleted)
+		}
+		if entries[2].Action != AuditUserCreated {
+			t.Errorf("entries[2].Action = %q, want %q", entries[2].Action, AuditUserCreated)
+		}
+	})
+
+	t.Run("ListLimit", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		for i := range 5 {
+			e := &AuditEntry{Actor: "bob", Action: AuditGuardBlocked, Resource: "services:svc" + string(rune('0'+i)), Status: "denied"}
+			if err := s.RecordAudit(ctx, e); err != nil {
+				t.Fatalf("RecordAudit: %v", err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 2)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("got %d entries, want 2", len(entries))
+		}
+		// Most recent entries.
+		if entries[0].Resource != "services:svc4" {
+			t.Errorf("entries[0].Resource = %q, want %q", entries[0].Resource, "services:svc4")
+		}
+		if entries[1].Resource != "services:svc3" {
+			t.Errorf("entries[1].Resource = %q, want %q", entries[1].Resource, "services:svc3")
+		}
+	})
+
+	t.Run("RecordAllFields", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		e := &AuditEntry{
+			Actor:    "admin",
+			Action:   AuditGuardBlocked,
+			Resource: "services:my-svc",
+			Status:   "denied",
+			Detail:   "protected stack delete",
+			SourceIP: "10.0.0.1",
+		}
+		if err := s.RecordAudit(ctx, e); err != nil {
+			t.Fatalf("RecordAudit: %v", err)
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 1)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("got %d entries, want 1", len(entries))
+		}
+		got := entries[0]
+		if got.ID == "" {
+			t.Error("expected ID")
+		}
+		if got.Timestamp.IsZero() {
+			t.Error("expected Timestamp")
+		}
+		if got.Actor != "admin" {
+			t.Errorf("Actor = %q, want %q", got.Actor, "admin")
+		}
+		if got.Action != AuditGuardBlocked {
+			t.Errorf("Action = %q, want %q", got.Action, AuditGuardBlocked)
+		}
+		if got.Resource != "services:my-svc" {
+			t.Errorf("Resource = %q, want %q", got.Resource, "services:my-svc")
+		}
+		if got.Status != "denied" {
+			t.Errorf("Status = %q, want %q", got.Status, "denied")
+		}
+		if got.Detail != "protected stack delete" {
+			t.Errorf("Detail = %q, want %q", got.Detail, "protected stack delete")
+		}
+		if got.SourceIP != "10.0.0.1" {
+			t.Errorf("SourceIP = %q, want %q", got.SourceIP, "10.0.0.1")
+		}
+	})
+
+	t.Run("EmptyOptionalFields", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		e := &AuditEntry{Actor: "cli", Action: AuditUserDeleted, Resource: "user:bob", Status: "success"}
+		if err := s.RecordAudit(ctx, e); err != nil {
+			t.Fatalf("RecordAudit: %v", err)
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 1)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("got %d entries, want 1", len(entries))
+		}
+		if entries[0].Detail != "" {
+			t.Errorf("Detail = %q, want empty string", entries[0].Detail)
+		}
+		if entries[0].SourceIP != "" {
+			t.Errorf("SourceIP = %q, want empty string", entries[0].SourceIP)
+		}
+	})
+
+	t.Run("UniqueIDs", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		e1 := &AuditEntry{Actor: "alice", Action: AuditUserCreated, Resource: "user:alice", Status: "success"}
+		e2 := &AuditEntry{Actor: "alice", Action: AuditCertIssued, Resource: "user:alice", Status: "success"}
+		if err := s.RecordAudit(ctx, e1); err != nil {
+			t.Fatalf("RecordAudit e1: %v", err)
+		}
+		if err := s.RecordAudit(ctx, e2); err != nil {
+			t.Fatalf("RecordAudit e2: %v", err)
+		}
+		if e1.ID == e2.ID {
+			t.Errorf("IDs should be unique, both are %q", e1.ID)
+		}
+	})
+
+	t.Run("AllActionTypes", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		all := []AuditAction{
+			AuditUserCreated, AuditUserDeleted, AuditCertIssued,
+			AuditOnboardCompleted, AuditGuardBlocked, AuditTokenRegenerated,
+		}
+		for _, a := range all {
+			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "test", Action: a, Resource: "x", Status: "success"}); err != nil {
+				t.Fatalf("RecordAudit(%s): %v", a, err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != len(all) {
+			t.Fatalf("got %d entries, want %d", len(entries), len(all))
+		}
+		seen := make(map[AuditAction]bool)
+		for _, e := range entries {
+			seen[e.Action] = true
+		}
+		for _, a := range all {
+			if !seen[a] {
+				t.Errorf("action %q not found in entries", a)
+			}
+		}
+	})
+
+	t.Run("LimitExceedsCount", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		for range 3 {
+			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "a", Action: AuditUserCreated, Resource: "x", Status: "success"}); err != nil {
+				t.Fatalf("RecordAudit: %v", err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 100)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 3 {
+			t.Fatalf("got %d entries, want 3", len(entries))
+		}
+	})
+
+	t.Run("LimitEqualsCount", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		for range 4 {
+			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "a", Action: AuditUserCreated, Resource: "x", Status: "success"}); err != nil {
+				t.Fatalf("RecordAudit: %v", err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 4)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 4 {
+			t.Fatalf("got %d entries, want 4", len(entries))
+		}
+	})
+
+	t.Run("TimestampOrdering", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		for range 3 {
+			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "a", Action: AuditUserCreated, Resource: "x", Status: "success"}); err != nil {
+				t.Fatalf("RecordAudit: %v", err)
+			}
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		// Newest first — each timestamp must be >= the next.
+		for i := 0; i < len(entries)-1; i++ {
+			if entries[i].Timestamp.Before(entries[i+1].Timestamp) {
+				t.Errorf("entries[%d].Timestamp (%v) before entries[%d].Timestamp (%v)",
+					i, entries[i].Timestamp, i+1, entries[i+1].Timestamp)
+			}
+		}
+	})
+
+	t.Run("DuplicateActionDistinctIDs", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		ids := make(map[string]bool)
+		for range 5 {
+			e := &AuditEntry{Actor: "cli", Action: AuditUserCreated, Resource: "user:same", Status: "success"}
+			if err := s.RecordAudit(ctx, e); err != nil {
+				t.Fatalf("RecordAudit: %v", err)
+			}
+			if ids[e.ID] {
+				t.Fatalf("duplicate ID %q", e.ID)
+			}
+			ids[e.ID] = true
+		}
+
+		entries, err := s.ListAuditEntries(ctx, 10)
+		if err != nil {
+			t.Fatalf("ListAuditEntries: %v", err)
+		}
+		if len(entries) != 5 {
+			t.Fatalf("got %d entries, want 5", len(entries))
+		}
+	})
+}

@@ -160,7 +160,7 @@ func TestGuard_NonAdminDeleteProtectedService(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -184,7 +184,7 @@ func TestGuard_AdminDeleteProtectedService(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -208,7 +208,7 @@ func TestGuard_AdminUpdateProtectedService(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -232,7 +232,7 @@ func TestGuard_InternalListenerDeleteProtected(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -258,7 +258,7 @@ func TestGuard_NoInternalFlagNoUserIsBlocked(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -282,7 +282,7 @@ func TestGuard_NonAdminDeleteNonProtected(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -301,7 +301,7 @@ func TestGuard_NonAdminDeleteNonProtected(t *testing.T) {
 }
 
 func TestGuard_NonAdminCreateWithProtectedLabel(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -321,7 +321,7 @@ func TestGuard_NonAdminCreateWithProtectedLabel(t *testing.T) {
 }
 
 func TestGuard_NonAdminCreateWithoutProtectedLabel(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -341,7 +341,7 @@ func TestGuard_NonAdminCreateWithoutProtectedLabel(t *testing.T) {
 }
 
 func TestGuard_NonAdminSwarmLeave(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -360,7 +360,7 @@ func TestGuard_NonAdminSwarmLeave(t *testing.T) {
 }
 
 func TestGuard_AdminSwarmLeave(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -379,7 +379,7 @@ func TestGuard_AdminSwarmLeave(t *testing.T) {
 }
 
 func TestGuard_ReadOnlyPassesThrough(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -404,7 +404,7 @@ func TestGuard_BackQueryFailure_UpdateFailClosed(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -429,7 +429,7 @@ func TestGuard_BackQueryFailure_DeleteFailClosed(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -448,7 +448,7 @@ func TestGuard_BackQueryFailure_DeleteFailClosed(t *testing.T) {
 }
 
 func TestGuard_BodyStillReadableAfterCreate(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	body := `{"Labels":{"app":"myapp"},"Image":"nginx"}`
 	var innerBody string
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -473,7 +473,7 @@ func TestGuard_BodyStillReadableAfterCreate(t *testing.T) {
 }
 
 func TestGuard_EmptyStackName_NoOp(t *testing.T) {
-	guard := NewResourceGuard("", "")
+	guard := NewResourceGuard("", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -516,7 +516,7 @@ func TestGuard_NetworkLabelAtTopLevel(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -540,7 +540,7 @@ func TestGuard_NonAdminUpdateProtectedSecret(t *testing.T) {
 	})
 	sock := startTestSocket(t, mock)
 
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -560,7 +560,7 @@ func TestGuard_NonAdminUpdateProtectedSecret(t *testing.T) {
 
 func TestGuard_CreateSpecLabels(t *testing.T) {
 	// Some resources have labels under Spec in the create body.
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -639,7 +639,7 @@ func containerMock(stackLabel string) http.Handler {
 }
 
 func TestExecGuard_EmptyStackName_NoOp(t *testing.T) {
-	guard := NewResourceGuard("", "")
+	guard := NewResourceGuard("", "", nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -658,7 +658,7 @@ func TestExecGuard_EmptyStackName_NoOp(t *testing.T) {
 }
 
 func TestExecGuard_NonExecPath_PassesThrough(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -681,7 +681,7 @@ func TestExecGuard_NonExecPath_PassesThrough(t *testing.T) {
 // (can't distinguish stacks). The internal listener uses noExecGuard in
 // main.go and never reaches ExecGuard — no bypass is needed here.
 func TestExecGuard_NoSocket_ExecUnrestricted(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "") // stackName set, but no socket
+	guard := NewResourceGuard("swarmcli-infra", "", nil) // stackName set, but no socket
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -701,7 +701,7 @@ func TestExecGuard_NoSocket_ExecUnrestricted(t *testing.T) {
 
 func TestExecGuard_AgentExec_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
 	sock := startTestSocket(t, containerMock("swarmcli-infra"))
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -721,7 +721,7 @@ func TestExecGuard_AgentExec_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
 
 func TestExecGuard_AgentExec_ProtectedStack_Admin_Allowed(t *testing.T) {
 	sock := startTestSocket(t, containerMock("swarmcli-infra"))
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -741,7 +741,7 @@ func TestExecGuard_AgentExec_ProtectedStack_Admin_Allowed(t *testing.T) {
 
 func TestExecGuard_AgentExec_NonProtectedStack_UserAllowed(t *testing.T) {
 	sock := startTestSocket(t, containerMock("user-app"))
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -760,7 +760,7 @@ func TestExecGuard_AgentExec_NonProtectedStack_UserAllowed(t *testing.T) {
 }
 
 func TestExecGuard_AgentExec_NoTaskID_PassesThrough(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -780,7 +780,7 @@ func TestExecGuard_AgentExec_NoTaskID_PassesThrough(t *testing.T) {
 
 func TestExecGuard_DockerExec_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
 	sock := startTestSocket(t, containerMock("swarmcli-infra"))
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -800,7 +800,7 @@ func TestExecGuard_DockerExec_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
 
 func TestExecGuard_DockerExec_NonProtectedStack_UserAllowed(t *testing.T) {
 	sock := startTestSocket(t, containerMock("user-app"))
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -820,7 +820,7 @@ func TestExecGuard_DockerExec_NonProtectedStack_UserAllowed(t *testing.T) {
 
 func TestExecGuard_DockerAttach_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
 	sock := startTestSocket(t, containerMock("swarmcli-infra"))
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -841,7 +841,7 @@ func TestExecGuard_DockerAttach_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
 func TestExecGuard_DockerExec_NoStackLabel_UserAllowed(t *testing.T) {
 	// Container has no stack label — not part of any stack, not protected.
 	sock := startTestSocket(t, containerMock(""))
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -864,7 +864,7 @@ func TestExecGuard_BackQueryError_FailClosed(t *testing.T) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	})
 	sock := startTestSocket(t, mock)
-	guard := NewResourceGuard("swarmcli-infra", sock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
 	inner, called := passHandler()
 	handler := guard.ExecGuard(inner)
 
@@ -883,7 +883,7 @@ func TestExecGuard_BackQueryError_FailClosed(t *testing.T) {
 }
 
 func TestGuard_CreateMalformedBodyBlocked(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -902,7 +902,7 @@ func TestGuard_CreateMalformedBodyBlocked(t *testing.T) {
 }
 
 func TestGuard_CreateOversizedBodyBlocked(t *testing.T) {
-	guard := NewResourceGuard("swarmcli-infra", "")
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
 	inner, called := passHandler()
 	handler := guard.Wrap(inner)
 
@@ -918,5 +918,244 @@ func TestGuard_CreateOversizedBodyBlocked(t *testing.T) {
 	}
 	if *called {
 		t.Error("inner handler should not be called on oversized body")
+	}
+}
+
+// --- Audit entry tests ---
+
+func TestGuard_SwarmLeave_AuditEntry(t *testing.T) {
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", "", audit)
+	inner, _ := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/swarm/leave", nil)
+	r = withUser(r, &store.User{Username: "alice", Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d audit entries, want 1", len(entries))
+	}
+	if entries[0].Action != store.AuditGuardBlocked {
+		t.Errorf("Action = %q, want %q", entries[0].Action, store.AuditGuardBlocked)
+	}
+	if entries[0].Resource != "swarm:leave" {
+		t.Errorf("Resource = %q, want %q", entries[0].Resource, "swarm:leave")
+	}
+	if entries[0].Status != "denied" {
+		t.Errorf("Status = %q, want %q", entries[0].Status, "denied")
+	}
+	if entries[0].Actor != "alice" {
+		t.Errorf("Actor = %q, want %q", entries[0].Actor, "alice")
+	}
+}
+
+func TestGuard_CreateProtected_AuditEntry(t *testing.T) {
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", "", audit)
+	inner, _ := passHandler()
+	handler := guard.Wrap(inner)
+
+	body := `{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}`
+	r := httptest.NewRequest("POST", "/services/create", strings.NewReader(body))
+	r = withUser(r, &store.User{Username: "bob", Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d audit entries, want 1", len(entries))
+	}
+	if entries[0].Resource != "services:create" {
+		t.Errorf("Resource = %q, want %q", entries[0].Resource, "services:create")
+	}
+}
+
+func TestGuard_UpdateProtected_NonAdmin_AuditEntry(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startTestSocket(t, mock)
+
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, _ := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/secrets/ca-key/update", nil)
+	r = withUser(r, &store.User{Username: "eve", Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d audit entries, want 1", len(entries))
+	}
+	if entries[0].Resource != "secrets:ca-key" {
+		t.Errorf("Resource = %q, want %q", entries[0].Resource, "secrets:ca-key")
+	}
+	if entries[0].Detail != "protected stack update" {
+		t.Errorf("Detail = %q, want %q", entries[0].Detail, "protected stack update")
+	}
+}
+
+func TestGuard_DeleteProtected_AuditEntry(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startTestSocket(t, mock)
+
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, _ := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("DELETE", "/v1.44/services/proxy-svc", nil)
+	r = withUser(r, &store.User{Username: "eve", Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d audit entries, want 1", len(entries))
+	}
+	if entries[0].Resource != "services:proxy-svc" {
+		t.Errorf("Resource = %q, want %q", entries[0].Resource, "services:proxy-svc")
+	}
+	if entries[0].Detail != "protected stack delete" {
+		t.Errorf("Detail = %q, want %q", entries[0].Detail, "protected stack delete")
+	}
+}
+
+func TestExecGuard_ProtectedExec_NonAdmin_AuditEntry(t *testing.T) {
+	sock := startTestSocket(t, containerMock("swarmcli-infra"))
+
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, _ := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/containers/ctr-abc/exec", nil)
+	r = withUser(r, &store.User{Username: "eve", Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d audit entries, want 1", len(entries))
+	}
+	if entries[0].Action != store.AuditGuardBlocked {
+		t.Errorf("Action = %q, want %q", entries[0].Action, store.AuditGuardBlocked)
+	}
+	if entries[0].Resource != "exec:/v1.44/containers/ctr-abc/exec" {
+		t.Errorf("Resource = %q, want %q", entries[0].Resource, "exec:/v1.44/containers/ctr-abc/exec")
+	}
+	if entries[0].Detail != "protected stack exec" {
+		t.Errorf("Detail = %q, want %q", entries[0].Detail, "protected stack exec")
+	}
+}
+
+func TestGuard_InternalListener_NoAudit(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startTestSocket(t, mock)
+
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, _ := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("DELETE", "/v1.44/services/proxy-svc", nil)
+	ctx := context.WithValue(r.Context(), ContextKeyInternal, true)
+	r = r.WithContext(ctx)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 audit entries for internal listener, got %d", len(entries))
+	}
+}
+
+func TestGuard_AdminUpdate_NoAudit(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"swarmcli-infra"}}}`)
+	})
+	sock := startTestSocket(t, mock)
+
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, _ := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.44/services/proxy-svc/update", nil)
+	r = withUser(r, &store.User{Username: "admin1", Role: "admin"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 audit entries for admin update, got %d", len(entries))
+	}
+}
+
+func TestGuard_NonProtectedDelete_NoAudit(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"user-app"}}}`)
+	})
+	sock := startTestSocket(t, mock)
+
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, _ := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("DELETE", "/v1.44/services/user-svc", nil)
+	r = withUser(r, &store.User{Username: "alice", Role: "user"})
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	entries, err := audit.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 audit entries for non-protected delete, got %d", len(entries))
 	}
 }

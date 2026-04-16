@@ -22,7 +22,7 @@ func newTestOnboardHandler(t *testing.T) (*OnboardHandler, *store.MemoryStore) {
 	t.Helper()
 	s := store.NewMemoryStore()
 	ca := loadTestCA(t)
-	return NewOnboardHandler(s, ca, "tcp://proxy.example.com:2376"), s
+	return NewOnboardHandler(s, ca, "tcp://proxy.example.com:2376", nil), s
 }
 
 func loadTestCA(t *testing.T) *certauth.CA {
@@ -142,6 +142,106 @@ func TestOnboardHandler_TokenConsumed(t *testing.T) {
 	mux.ServeHTTP(w, req)
 	if w.Code != http.StatusGone {
 		t.Fatalf("second request: status = %d, want 410", w.Code)
+	}
+}
+
+// --- Audit entry tests ---
+
+func TestOnboardHandler_AuditEntries(t *testing.T) {
+	s := store.NewMemoryStore()
+	ca := loadTestCA(t)
+	h := NewOnboardHandler(s, ca, "tcp://proxy.example.com:2376", s)
+	setupOnboardUser(t, s, "alice", "audit-token")
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/onboard/{token}", h)
+	req := httptest.NewRequest("GET", "/api/v1/onboard/audit-token", nil)
+	req.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+
+	entries, err := s.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d audit entries, want 2", len(entries))
+	}
+	// Newest first: onboard.completed, then cert.issued.
+	if entries[0].Action != store.AuditOnboardCompleted {
+		t.Errorf("entries[0].Action = %q, want %q", entries[0].Action, store.AuditOnboardCompleted)
+	}
+	if entries[0].Resource != "user:alice" {
+		t.Errorf("entries[0].Resource = %q, want %q", entries[0].Resource, "user:alice")
+	}
+	if entries[1].Action != store.AuditCertIssued {
+		t.Errorf("entries[1].Action = %q, want %q", entries[1].Action, store.AuditCertIssued)
+	}
+	if entries[1].Detail != "onboard" {
+		t.Errorf("entries[1].Detail = %q, want %q", entries[1].Detail, "onboard")
+	}
+}
+
+func TestOnboardHandler_TokenNotFound_NoAudit(t *testing.T) {
+	s := store.NewMemoryStore()
+	ca := loadTestCA(t)
+	h := NewOnboardHandler(s, ca, "tcp://proxy.example.com:2376", s)
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/onboard/{token}", h)
+	req := httptest.NewRequest("GET", "/api/v1/onboard/nonexistent", nil)
+	req.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+
+	entries, err := s.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 audit entries, got %d", len(entries))
+	}
+}
+
+func TestOnboardHandler_TokenConsumed_NoAudit(t *testing.T) {
+	s := store.NewMemoryStore()
+	ca := loadTestCA(t)
+	h := NewOnboardHandler(s, ca, "tcp://proxy.example.com:2376", s)
+	setupOnboardUser(t, s, "bob", "consume-token")
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/onboard/{token}", h)
+
+	// First call consumes the token (produces audit entries).
+	req := httptest.NewRequest("GET", "/api/v1/onboard/consume-token", nil)
+	req.TLS = &tls.ConnectionState{}
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	// Second call — token already consumed, should produce no new audit entries.
+	req = httptest.NewRequest("GET", "/api/v1/onboard/consume-token", nil)
+	req.TLS = &tls.ConnectionState{}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410", w.Code)
+	}
+
+	entries, err := s.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListAuditEntries: %v", err)
+	}
+	// Only the 2 entries from the first (successful) call.
+	if len(entries) != 2 {
+		t.Errorf("expected 2 audit entries (from first call only), got %d", len(entries))
 	}
 }
 

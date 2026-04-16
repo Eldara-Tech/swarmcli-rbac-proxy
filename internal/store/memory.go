@@ -13,10 +13,11 @@ import (
 
 func lMemory() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.memory") }
 
-// MemoryStore is an in-memory UserStore for development and testing.
+// MemoryStore is an in-memory UserStore and AuditStore for development and testing.
 type MemoryStore struct {
 	mu    sync.RWMutex
 	users map[string]User
+	audit []AuditEntry
 }
 
 // NewMemoryStore creates a new in-memory store.
@@ -128,3 +129,35 @@ func (s *MemoryStore) ListUsers(_ context.Context) ([]User, error) {
 	}
 	return result, nil
 }
+
+func (s *MemoryStore) RecordAudit(_ context.Context, e *AuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	e.ID = id
+	e.Timestamp = time.Now().UTC()
+	s.audit = append(s.audit, *e)
+	return nil
+}
+
+func (s *MemoryStore) ListAuditEntries(_ context.Context, limit int) ([]AuditEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n := len(s.audit)
+	if limit > 0 && limit < n {
+		n = limit
+	}
+	result := make([]AuditEntry, n)
+	for i := range n {
+		result[i] = s.audit[len(s.audit)-1-i]
+	}
+	return result, nil
+}
+
+// Ensure interface compliance.
+var _ AuditStore = (*MemoryStore)(nil)
