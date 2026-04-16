@@ -134,7 +134,7 @@ Response (`410 Gone`):
 
 ## Agent proxy forwarding
 
-When `PROXY_AGENT_URL` is set, all `/v1/*` requests are forwarded to the configured backend. Both HTTP and WebSocket upgrade (hijack) connections are supported. See [configuration.md](configuration.md#environment-variables) for the `PROXY_AGENT_URL` variable.
+When `PROXY_AGENT_URL` is set, all `/v1/*` requests are forwarded to the configured backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon) and is not intended for standalone use. Both HTTP and WebSocket upgrade (hijack) connections are supported. See [configuration.md](configuration.md#agent-proxy-forwarding) for details.
 
 ## Docker proxy
 

@@ -93,5 +93,6 @@ Adding a shared secret or internal mTLS between the three services was evaluated
 - **Bind the internal listener to loopback** (`127.0.0.1:2375`) or access it only via `docker exec`. Never expose it to the network.
 - **Set a strong `PROXY_ADMIN_TOKEN`** and rotate it periodically.
 - **Use backend TLS** (`PROXY_DOCKER_TLS_*`) when the Docker daemon is on a remote host.
-- **Monitor logs** for `guard: blocked` entries (attempted policy violations) and `unauthorized` entries (authentication failures).
-- **Back up the user store** (SQLite file or PostgreSQL database) — it contains the user records and onboarding token state.
+- **Review the audit log** regularly with `swcproxy audit ls`. All business actions (user CRUD, certificate issuance, guard blocks, onboarding) are persisted to the `audit_log` table in the same database as user records. Each entry records actor, action, resource, status (success/denied), detail, and source IP.
+- **Monitor logs** for `guard: blocked` entries (attempted policy violations) and `unauthorized` entries (authentication failures). Real-time auth events (mTLS success/failure) are logged via zap to stdout; persisted audit entries cover business actions only.
+- **Back up the user store** (SQLite file or PostgreSQL database) — it contains both user records and the audit log.
