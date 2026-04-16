@@ -22,6 +22,7 @@ import (
 	"swarm-rbac-proxy/internal/config"
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
+	"swarm-rbac-proxy/internal/version"
 )
 
 func l() *proxylog.ProxyLogger { return proxylog.L().With("component", "proxy") }
@@ -223,6 +224,14 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 }
 
 func main() {
+	if len(os.Args) == 2 {
+		switch os.Args[1] {
+		case "--version", "-v", "version":
+			fmt.Println(version.String())
+			return
+		}
+	}
+
 	cfg, err := config.Load(os.Getenv("PROXY_CONFIG"))
 	if err != nil {
 		// Logger not ready yet; fall back to stderr.
@@ -232,6 +241,8 @@ func main() {
 
 	proxylog.Init(cfg.Env, cfg.LogLevel)
 	defer proxylog.Sync()
+
+	l().Infow("starting swarm-rbac-proxy", "version", version.Version, "commit", version.Commit)
 
 	listenAddr := cfg.Listen
 	if listenAddr == "" {

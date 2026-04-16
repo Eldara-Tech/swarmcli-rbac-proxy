@@ -16,6 +16,7 @@ import (
 	"swarm-rbac-proxy/internal/config"
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
+	"swarm-rbac-proxy/internal/version"
 )
 
 func main() {
@@ -25,6 +26,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "version", "--version", "-v":
+		fmt.Println(version.String())
 	case "user":
 		if len(os.Args) < 3 {
 			printUserUsage()
@@ -50,6 +53,7 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `swcproxy — RBAC proxy admin CLI
 
 Usage:
+  swcproxy version                         Show version
   swcproxy user ls                         List users
   swcproxy user add <username> [--admin]   Create user + onboarding token
   swcproxy user delete <username>          Delete user

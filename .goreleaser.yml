@@ -1,0 +1,89 @@
+version: 2
+
+project_name: swarm-rbac-proxy
+
+before:
+  hooks:
+    - go mod download
+    - go mod verify
+
+release:
+  prerelease: auto
+  draft: false
+  use_existing_draft: true
+
+env:
+  - CGO_ENABLED=0
+
+builds:
+  - id: proxy
+    binary: proxy
+    main: .
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X swarm-rbac-proxy/internal/version.Version={{.Version}}
+      - -X swarm-rbac-proxy/internal/version.Commit={{.Commit}}
+      - -X swarm-rbac-proxy/internal/version.Date={{.Date}}
+
+  - id: swcproxy
+    binary: swcproxy
+    main: ./cmd/swcproxy
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X swarm-rbac-proxy/internal/version.Version={{.Version}}
+      - -X swarm-rbac-proxy/internal/version.Commit={{.Commit}}
+      - -X swarm-rbac-proxy/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    builds:
+      - proxy
+      - swcproxy
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE*
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: 'Bug fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
