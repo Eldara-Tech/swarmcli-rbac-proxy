@@ -23,7 +23,8 @@ Docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix soc
 - **Automated certificate issuance** -- generates client certificates on user creation (no manual openssl)
 - **One-command user onboarding** -- new users run a single `curl` + `docker context import` to get access
 - **Dual listener** -- external (mTLS) for users, internal (plain TCP) for admin automation
-- **Admin CLI (`swcproxy`)** -- manage users from inside the container without HTTP calls
+- **Persisted audit log** -- all business actions (user CRUD, certificate issuance, guard blocks, onboarding) are recorded to the database and queryable via CLI
+- **Admin CLI (`swcproxy`)** -- manage users and query audit logs from inside the container without HTTP calls
 - **Agent proxy forwarding** -- transparently forwards `/v1/*` requests to a backend agent service (designed for [SwarmCLI](https://swarmcli.io/), coming soon)
 - **Three storage backends** -- SQLite (default), PostgreSQL, or in-memory (dev)
 - **Structured logging** -- JSON (prod) or console (dev) via zap
@@ -98,9 +99,15 @@ docker exec -it <container> swcproxy user add alice
 docker exec -it <container> swcproxy user add bob --admin
 docker exec -it <container> swcproxy user delete alice
 docker exec -it <container> swcproxy user regenerate-token alice
+docker exec -it <container> swcproxy audit ls
+docker exec -it <container> swcproxy audit ls --limit 10
 ```
 
 When a user is created, `swcproxy` prints a curl command to share with the user for one-command onboarding. See [User onboarding](docs/configuration.md#user-onboarding) for the full flow.
+
+### Audit log
+
+All business actions are recorded to the database and queryable via `swcproxy audit ls`. Tracked actions: user creation/deletion, certificate issuance, onboard completion, guard blocks (denied mutations to protected resources), and token regeneration. Each entry records who did what, when, from where, and whether it succeeded.
 
 ## Connecting with Docker CLI
 
