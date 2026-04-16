@@ -4,6 +4,7 @@
 - [Config file reference](#config-file-reference)
 - [Usage examples](#usage-examples)
 - [Dual listener](#dual-listener)
+- [Agent proxy forwarding](#agent-proxy-forwarding)
 - [Stack resource protection](#stack-resource-protection)
 - [User onboarding](#user-onboarding)
 - [Docker Compose (local, no Swarm)](#docker-compose-local-no-swarm)
@@ -309,6 +310,18 @@ When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
 - **External** (`PROXY_LISTEN`, e.g. `:2376`): TLS with optional client certificate verification (`VerifyClientCertIfGiven`). Proxy and agent routes require a valid client cert when `PROXY_TLS_CLIENT_CA` is set; the onboard endpoint does not.
 
 This is the recommended production setup: the internal listener handles automation and the admin CLI (`swcproxy`), while the external listener faces users with mTLS.
+
+## Agent proxy forwarding
+
+When `PROXY_AGENT_URL` is set, all requests to `/v1/*` are forwarded to the specified backend. This is used in the SwarmCLI ecosystem to route agent commands (exec, logs) through the RBAC proxy, applying the same authentication and exec guard rules.
+
+```bash
+PROXY_AGENT_URL=tcp://agent-proxy:9090 ./swarm-rbac-proxy
+```
+
+Both standard HTTP requests and WebSocket upgrade (hijack) connections are supported. The exec guard applies to `/v1/exec` on the external listener: exec targeting a container in the protected stack requires admin role.
+
+If `PROXY_AGENT_URL` is not set, `/v1/*` requests are forwarded to the Docker daemon like any other path.
 
 ## Stack resource protection
 
