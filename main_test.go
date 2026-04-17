@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"swarm-rbac-proxy/internal/config"
 )
 
 // startMockSocket creates a Unix socket HTTP server at a temp path.
@@ -390,5 +392,82 @@ func TestIdleConn_ActiveResetsPreventsTimeout(t *testing.T) {
 			t.Fatalf("Write %d: %v", i, err)
 		}
 		time.Sleep(30 * time.Millisecond) // well under 100ms timeout
+	}
+}
+
+func TestCheckExternalListenerAuth(t *testing.T) {
+	tests := []struct {
+		name          string
+		cfg           config.Config
+		allowInsecure bool
+		wantErr       bool
+	}{
+		{
+			name:    "zero-auth is refused",
+			cfg:     config.Config{},
+			wantErr: true,
+		},
+		{
+			name:          "zero-auth passes when explicitly opted in",
+			cfg:           config.Config{},
+			allowInsecure: true,
+		},
+		{
+			name: "full mTLS with admin token passes",
+			cfg: config.Config{
+				TLSCert:     "/path/server-cert.pem",
+				TLSClientCA: "/path/ca.pem",
+				AdminToken:  "secret",
+			},
+		},
+		{
+			name: "full mTLS passes this guard (later admin-token check handles the /api/v1/* gap)",
+			cfg: config.Config{
+				TLSCert:     "/path/server-cert.pem",
+				TLSClientCA: "/path/ca.pem",
+			},
+		},
+		{
+			name:    "admin token alone is refused (Docker proxy path still unauthenticated)",
+			cfg:     config.Config{AdminToken: "secret"},
+			wantErr: true,
+		},
+		{
+			name:    "tls cert alone is refused (no mTLS means proxyAuth is a no-op)",
+			cfg:     config.Config{TLSCert: "/path/server-cert.pem"},
+			wantErr: true,
+		},
+		{
+			name:    "client CA alone is refused (mTLS cannot take effect without TLS cert)",
+			cfg:     config.Config{TLSClientCA: "/path/ca.pem"},
+			wantErr: true,
+		},
+		{
+			name:    "tls cert plus admin token but no mTLS is refused",
+			cfg:     config.Config{TLSCert: "/path/server-cert.pem", AdminToken: "secret"},
+			wantErr: true,
+		},
+		{
+			name:    "client CA plus admin token but no TLS cert is refused",
+			cfg:     config.Config{TLSClientCA: "/path/ca.pem", AdminToken: "secret"},
+			wantErr: true,
+		},
+		{
+			name:          "opt-in bypasses even when config would otherwise be secure",
+			cfg:           config.Config{TLSCert: "/path/server-cert.pem", TLSClientCA: "/path/ca.pem", AdminToken: "secret"},
+			allowInsecure: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkExternalListenerAuth(tc.cfg, tc.allowInsecure)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+		})
 	}
 }

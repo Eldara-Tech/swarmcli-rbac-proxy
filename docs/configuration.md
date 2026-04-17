@@ -43,6 +43,7 @@ These control how the proxy listens for incoming requests and which certificates
 | `PROXY_TLS_CLIENT_CA_KEY` | _(none)_ | Private key for the client CA. When set, the proxy auto-issues a client certificate (ECDSA P-256, 1-year validity) for each new user created via `POST /api/v1/users` or `swcproxy user add`, and returns it in the response. Requires `PROXY_TLS_CLIENT_CA`. |
 | `PROXY_INTERNAL_LISTEN` | _(none)_ | Address for a second, plain-TCP listener that bypasses mTLS and role checks. Intended for `docker exec`-style admin access from inside the container (e.g. `127.0.0.1:2375`). See [Dual listener](#dual-listener). |
 | `PROXY_EXTERNAL_URL` | _(none)_ | Base URL for onboarding `curl` instructions printed by `swcproxy user add` (e.g. `https://proxy.example.com:2376`). |
+| `PROXY_ALLOW_INSECURE` | _(none)_ | When set to the exact string `true`, bypasses the startup safety check that requires mTLS (both `PROXY_TLS_CERT` and `PROXY_TLS_CLIENT_CA`) for the external listener. Without mTLS, every caller can drive the full Docker API through the proxy passthrough — `PROXY_ADMIN_TOKEN` alone only protects the management routes, not the Docker API. Intended only for tests and deployments where network-level isolation (e.g. an internal-only Swarm overlay) provides the security boundary. Any value other than `true` — empty, `1`, `yes`, `TRUE` — leaves the guard active. |
 
 ### Docker backend
 
