@@ -8,6 +8,33 @@ services:
       - "2376:2376"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - proxy-data:/data
     environment:
-      - PROXY_LISTEN=:2376
-      # - PROXY_ADMIN_TOKEN=change-me
+      PROXY_LISTEN: ":2376"
+      PROXY_TLS_CERT: /run/secrets/rbac_server_cert
+      PROXY_TLS_KEY: /run/secrets/rbac_server_key
+      PROXY_TLS_CLIENT_CA: /run/secrets/rbac_client_ca
+      PROXY_TLS_CLIENT_CA_KEY: /run/secrets/rbac_client_ca_key
+      PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN}
+      PROXY_SEED_USERNAME: admin
+      PROXY_SEED_ROLE: admin
+      PROXY_DATABASE_PATH: /data/proxy.db
+      PROXY_INTERNAL_LISTEN: "127.0.0.1:2375"
+    secrets:
+      - rbac_server_cert
+      - rbac_server_key
+      - rbac_client_ca
+      - rbac_client_ca_key
+
+secrets:
+  rbac_server_cert:
+    external: true
+  rbac_server_key:
+    external: true
+  rbac_client_ca:
+    external: true
+  rbac_client_ca_key:
+    external: true
+
+volumes:
+  proxy-data:
