@@ -29,29 +29,33 @@ Docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix soc
 - **Three storage backends** -- SQLite (default), PostgreSQL, or in-memory (dev)
 - **Structured logging** -- JSON (prod) or console (dev) via zap
 
-## Quick start
+## Getting started
 
-Pull the image from Docker Hub:
-
-```bash
-docker run -d \
-  -p 2375:2375 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  eldaratech/swarmcli-rbac-proxy:latest
-```
-
-The proxy listens on `:2375` and forwards to `/var/run/docker.sock`. Point a Docker client at it:
-
-```bash
-docker context create via-proxy --docker "host=tcp://<proxy-host>:2375"
-docker --context via-proxy ps
-```
-
-This runs without TLS or authentication -- suitable for evaluation only. For production, enable mTLS and set an admin token. See [Configuration](docs/configuration.md).
+For a complete end-to-end setup — generating certificates, starting the proxy with mTLS, onboarding users, and verifying the exec guard — follow [docs/getting-started.md](docs/getting-started.md).
 
 ## Production deployment
 
-### Docker Compose
+The proxy reads its TLS material from file paths given in `PROXY_TLS_CERT`, `PROXY_TLS_KEY`, `PROXY_TLS_CLIENT_CA`, and `PROXY_TLS_CLIENT_CA_KEY`. Point those at `/run/secrets/...` and deliver the files via Docker secrets — in Swarm they are encrypted at rest in the raft log and delivered in-memory to containers. The admin token (`PROXY_ADMIN_TOKEN`) is read as a string env var; inject it from your CI or secret manager at deploy time, do not commit it to `stack.yml`.
+
+### Docker Swarm (recommended)
+
+The bundled `stack.yml` wires up the proxy with four secrets — server cert + key and client CA + key — plus a named volume for the database. Create the secrets from your cert files, export the admin token, then deploy:
+
+```bash
+docker secret create rbac_server_cert    certs/server-cert.pem
+docker secret create rbac_server_key     certs/server-key.pem
+docker secret create rbac_client_ca      certs/client-ca.pem
+docker secret create rbac_client_ca_key  certs/client-ca-key.pem
+
+export PROXY_ADMIN_TOKEN='choose-a-strong-token'
+docker stack deploy -c stack.yml rbac
+```
+
+Secrets are mounted at `/run/secrets/<name>` inside the container; `stack.yml` already points each `PROXY_TLS_*` at the right path. See [docs/configuration.md](docs/configuration.md) for the full environment-variable reference and [docs/getting-started.md § 1](docs/getting-started.md#1-generate-the-server-certificate-and-client-ca) for how to generate the certs.
+
+### Single host (Docker Compose)
+
+For a single-host deployment without Swarm, Compose can still deliver files via its `secrets:` block (backed by files on disk rather than the raft log):
 
 ```yaml
 services:
@@ -61,78 +65,65 @@ services:
       - "2376:2376"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./certs:/certs:ro
       - proxy-data:/data
     environment:
-      PROXY_TLS_CERT: /certs/server-cert.pem
-      PROXY_TLS_KEY: /certs/server-key.pem
-      PROXY_TLS_CLIENT_CA: /certs/client-ca.pem
-      PROXY_TLS_CLIENT_CA_KEY: /certs/client-ca-key.pem
-      PROXY_ADMIN_TOKEN: change-me
+      PROXY_LISTEN: ":2376"
+      PROXY_TLS_CERT: /run/secrets/server_cert
+      PROXY_TLS_KEY: /run/secrets/server_key
+      PROXY_TLS_CLIENT_CA: /run/secrets/client_ca
+      PROXY_TLS_CLIENT_CA_KEY: /run/secrets/client_ca_key
+      PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN}
       PROXY_SEED_USERNAME: admin
       PROXY_SEED_ROLE: admin
       PROXY_DATABASE_PATH: /data/proxy.db
       PROXY_EXTERNAL_URL: "https://proxy.example.com:2376"
       PROXY_INTERNAL_LISTEN: "127.0.0.1:2375"
+    secrets:
+      - server_cert
+      - server_key
+      - client_ca
+      - client_ca_key
+
+secrets:
+  server_cert:    { file: ./certs/server-cert.pem }
+  server_key:     { file: ./certs/server-key.pem }
+  client_ca:      { file: ./certs/client-ca.pem }
+  client_ca_key:  { file: ./certs/client-ca-key.pem }
 
 volumes:
   proxy-data:
 ```
 
-Place your TLS certificates in a `./certs/` directory on the host. See [Configuration](docs/configuration.md#docker-compose-local-no-swarm) for a PostgreSQL variant.
-
-### Docker Swarm
-
-A `stack.yml` is included for Docker Swarm. It constrains the proxy to manager nodes and mounts the Docker socket:
-
-```bash
-docker stack deploy -c stack.yml rbac
-```
+Export `PROXY_ADMIN_TOKEN` in the shell before `docker compose up`. Real encrypted-at-rest distribution requires Swarm — Compose secrets are only a delivery shape. See [docs/configuration.md](docs/configuration.md#data-store) for a PostgreSQL variant.
 
 ## Admin CLI
 
-The `swcproxy` CLI is included in the container image. Use it via `docker exec`:
+The `swcproxy` CLI ships inside the container image. For the Swarm deployment above, the proxy runs as service `rbac_proxy` — Docker Swarm prefixes each service with its stack name, so the `proxy` service in stack `rbac` becomes `rbac_proxy`:
 
 ```bash
-docker exec -it <container> swcproxy user ls
-docker exec -it <container> swcproxy user add alice
-docker exec -it <container> swcproxy user add bob --admin
-docker exec -it <container> swcproxy user delete alice
-docker exec -it <container> swcproxy user regenerate-token alice
-docker exec -it <container> swcproxy audit ls
-docker exec -it <container> swcproxy audit ls --limit 10
+# Resolve the container ID of the running proxy service and exec into it
+docker exec -it "$(docker ps -q -f name=rbac_proxy)" swcproxy user ls
 ```
 
-When a user is created, `swcproxy` prints a curl command to share with the user for one-command onboarding. See [User onboarding](docs/configuration.md#user-onboarding) for the full flow.
-
-### Audit log
-
-All business actions are recorded to the database and queryable via `swcproxy audit ls`. Tracked actions: user creation/deletion, certificate issuance, onboard completion, guard blocks (denied mutations to protected resources), and token regeneration. Each entry records who did what, when, from where, and whether it succeeded.
-
-## Connecting with Docker CLI
-
-Point a Docker client at the proxy (plain TCP, no auth):
+Common commands:
 
 ```bash
-docker context create via-proxy --docker "host=tcp://<proxy-host>:2375"
-docker context use via-proxy
-docker ps  # routed through the proxy
+swcproxy user ls
+swcproxy user add alice
+swcproxy user add bob --admin
+swcproxy user delete alice
+swcproxy user regenerate-token alice
+swcproxy audit ls --limit 10
 ```
 
-With mTLS enabled, use client certificates:
-
-```bash
-docker context create via-proxy \
-  --docker "host=tcp://<proxy-host>:2376,ca=ca.pem,cert=alice.pem,key=alice-key.pem"
-```
-
-See [User onboarding](docs/configuration.md#user-onboarding) for the automated onboarding flow using `swcproxy user add`.
+When a user is created, `swcproxy` prints the `curl` command to share with the user for one-command onboarding — see [the walkthrough](docs/getting-started.md#4-create-and-onboard-a-regular-user).
 
 ## Documentation
 
-- [Configuration reference](docs/configuration.md) -- environment variables, config file, Docker Compose examples
-- [API reference](docs/api.md) -- management API endpoints with curl examples
-- [Security model](docs/security.md) -- threat model, authentication layers, certificate lifecycle
+- [Getting started](docs/getting-started.md) — end-to-end walkthrough: cert generation, mTLS bootstrap, user onboarding, audit log
+- [Configuration reference](docs/configuration.md) — environment variables, JSON config, listener topology, stack protection
+- [API reference](docs/api.md) — management API endpoints with curl examples
+- [Security model](docs/security.md) — threat model, authentication layers, certificate lifecycle
 
 ## Development
 

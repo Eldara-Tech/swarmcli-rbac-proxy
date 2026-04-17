@@ -50,7 +50,7 @@ Response (`201 Created`):
 }
 ```
 
-When `PROXY_TLS_CLIENT_CA_KEY` is set, the response includes an auto-generated client certificate bundle. See [configuration.md](configuration.md#auto-generating-user-certificates) for details.
+When `PROXY_TLS_CLIENT_CA_KEY` is set, the response includes an auto-generated client certificate bundle (fields `certificate.cert_pem`, `certificate.key_pem`, `certificate.ca_pem`). The private key is generated in memory and never stored on the server — if lost, the user must be deleted and recreated. See [the walkthrough](getting-started.md#2-start-the-proxy-with-mtls) for a full example.
 
 ### Error: duplicate username
 
