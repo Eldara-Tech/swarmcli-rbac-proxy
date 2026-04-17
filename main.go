@@ -223,6 +223,49 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 	<-done
 }
 
+// errInsecureListener is returned by checkExternalListenerAuth when the
+// external listener would not enforce authentication on the Docker proxy
+// path.
+var errInsecureListener = errors.New(
+	"refusing to start: external listener does not enforce authentication on the Docker proxy path. " +
+		"Configure mTLS by setting PROXY_TLS_CERT, PROXY_TLS_KEY, and PROXY_TLS_CLIENT_CA together — " +
+		"PROXY_ADMIN_TOKEN alone protects only /api/v1/* routes and still lets any caller drive the Docker API. " +
+		"To opt in to an insecure external listener (tests or fully network-isolated deployments only) " +
+		"set PROXY_ALLOW_INSECURE=true",
+)
+
+// checkExternalListenerAuth refuses startup when the external listener would
+// not enforce end-to-end authentication on the Docker proxy path. Effective
+// mTLS on that path requires both PROXY_TLS_CERT and PROXY_TLS_CLIENT_CA:
+// without the server cert, the listener cannot negotiate TLS and the
+// RequireClientCert middleware is never attached; without the client CA,
+// proxyAuth degrades to a no-op (main.go below) and identity is never
+// checked. In either case any caller can drive the full Docker API,
+// including host-mounting container creation (root-equivalent on the daemon
+// host).
+//
+// PROXY_ADMIN_TOKEN alone is deliberately NOT sufficient: it only protects
+// /api/v1/* (user CRUD, onboarding) via RequireToken. The Docker proxy
+// passthrough at / and the agent proxy at /v1/* do not use that middleware.
+// An admin-token-only configuration leaves the Docker API wide open while
+// simultaneously transmitting the token over plain HTTP, which is worse
+// than "merely unauthenticated" because operators assume the token is
+// protecting things.
+//
+// The allowInsecure flag is an explicit override for tests and deployments
+// that rely on external network isolation (container overlays, bastioned
+// hosts) for confidentiality. When set it logs a loud warning so the bypass
+// is never silent.
+func checkExternalListenerAuth(cfg config.Config, allowInsecure bool) error {
+	if allowInsecure {
+		return nil
+	}
+	if cfg.TLSCert == "" || cfg.TLSClientCA == "" {
+		return errInsecureListener
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
@@ -243,6 +286,14 @@ func main() {
 	defer proxylog.Sync()
 
 	l().Infow("starting swarm-rbac-proxy", "version", version.Version, "commit", version.Commit)
+
+	allowInsecure := os.Getenv("PROXY_ALLOW_INSECURE") == "true"
+	if err := checkExternalListenerAuth(cfg, allowInsecure); err != nil {
+		l().Fatalw("insecure listener configuration", "error", err)
+	}
+	if allowInsecure {
+		l().Warnw("PROXY_ALLOW_INSECURE=true: external listener auth checks bypassed; ensure network-level isolation is in place")
+	}
 
 	listenAddr := cfg.Listen
 	if listenAddr == "" {
