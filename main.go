@@ -246,7 +246,7 @@ var errInsecureListener = errors.New(
 //
 // PROXY_ADMIN_TOKEN alone is deliberately NOT sufficient: it only protects
 // /api/v1/* (user CRUD, onboarding) via RequireToken. The Docker proxy
-// passthrough at / and the agent proxy at /v1/* do not use that middleware.
+// passthrough at / and the agent-manager proxy at /v1/* do not use that middleware.
 // An admin-token-only configuration leaves the Docker API wide open while
 // simultaneously transmitting the token over plain HTTP, which is worse
 // than "merely unauthenticated" because operators assume the token is
@@ -426,14 +426,14 @@ func main() {
 		proxyAuth = func(next http.Handler) http.Handler { return next }
 	}
 
-	var agentProxy http.Handler
-	if cfg.AgentProxyURL != "" {
-		agentBE, err := parseBackend(cfg.AgentProxyURL)
+	var agentManagerProxy http.Handler
+	if cfg.AgentManagerURL != "" {
+		agentBE, err := parseBackend(cfg.AgentManagerURL)
 		if err != nil {
-			l().Fatalw("parse agent proxy URL", "error", err)
+			l().Fatalw("parse agent-manager URL", "error", err)
 		}
-		agentProxy = newProxy(agentBE)
-		l().Infow("agent proxy forwarding enabled", "url", cfg.AgentProxyURL)
+		agentManagerProxy = newProxy(agentBE)
+		l().Infow("agent-manager forwarding enabled", "url", cfg.AgentManagerURL)
 	}
 
 	dockerProxy := guard.Wrap(newProxy(b))
@@ -446,8 +446,8 @@ func main() {
 		mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, userHandler))
 		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(cfg.AdminToken, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
-		if agentProxy != nil {
-			mux.Handle("/v1/", wrapProxy(wrapExec(agentProxy)))
+		if agentManagerProxy != nil {
+			mux.Handle("/v1/", wrapProxy(wrapExec(agentManagerProxy)))
 		}
 		mux.Handle("/", wrapProxy(wrapExec(dockerProxy)))
 	}
@@ -482,7 +482,7 @@ func main() {
 	// protected-stack containers requires admin. Without mTLS no caller can prove
 	// identity, so protected-stack exec is blocked (fail-closed); non-protected
 	// exec may pass without identity verification.
-	if cfg.AgentProxyURL != "" && cfg.TLSClientCA == "" {
+	if cfg.AgentManagerURL != "" && cfg.TLSClientCA == "" {
 		l().Warnw("exec guard active without mTLS: exec on protected stack will be blocked; non-protected exec may pass without identity; use PROXY_INTERNAL_LISTEN for local exec access")
 	}
 	registerRoutes(externalMux, proxyAuth, guard.ExecGuard)

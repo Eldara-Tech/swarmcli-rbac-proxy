@@ -65,12 +65,12 @@ The `RequireAdminForExec` middleware blocks non-admin users from exec/attach end
 
 ## Overlay network trust
 
-When deployed as a Docker Swarm stack, the rbac-proxy forwards `/v1/*` requests to the agent-proxy, which in turn connects to per-node agents. **None of these internal hops are authenticated** — there is no shared secret or mTLS between rbac-proxy, agent-proxy, and agent.
+When deployed as a Docker Swarm stack, the rbac-proxy forwards `/v1/*` requests to the agent-manager, which in turn connects to per-node agents. **None of these internal hops are authenticated** — there is no shared secret or mTLS between rbac-proxy, agent-manager, and agent.
 
 Security relies on Docker overlay network isolation:
 - The `swarmcli-agent-net` overlay is configured with `internal: true` (no external access) and `encrypted: "true"` (IPSec encryption of overlay traffic).
 - Only services attached to this overlay can communicate with each other.
-- A compromised container on the overlay network can directly access the agent-proxy or agent, gaining arbitrary exec access to all containers on the cluster.
+- A compromised container on the overlay network can directly access the agent-manager or agent, gaining arbitrary exec access to all containers on the cluster.
 
 ### Why inter-service auth is not implemented (accepted risk)
 
@@ -82,9 +82,9 @@ Adding a shared secret or internal mTLS between the three services was evaluated
 
 3. **Shared secrets are circular.** A shared token would be distributed as a Docker secret — readable by any service in the same stack, which is the same trust boundary it would try to protect.
 
-4. **Internal mTLS cost is disproportionate.** It requires a separate internal CA, cert generation during bootstrap, distribution via Docker secrets, validation code in both agent and agent-proxy (currently plain HTTP), and cert rotation automation — substantial complexity across three repos for marginal defence-in-depth.
+4. **Internal mTLS cost is disproportionate.** It requires a separate internal CA, cert generation during bootstrap, distribution via Docker secrets, validation code in both agent and agent-manager (currently plain HTTP), and cert rotation automation — substantial complexity across three repos for marginal defence-in-depth.
 
-**Residual risk**: a vulnerability in one of the three services (or any future service attached to the overlay) gives the attacker lateral access to the others. This is mitigated by: read-only Docker socket mounts, distroless base images (agent, agent-proxy), image vulnerability scanning, and restricting who can deploy to the swarm.
+**Residual risk**: a vulnerability in one of the three services (or any future service attached to the overlay) gives the attacker lateral access to the others. This is mitigated by: read-only Docker socket mounts, distroless base images (agent, agent-manager), image vulnerability scanning, and restricting who can deploy to the swarm.
 
 **Revisit if**: the overlay starts hosting third-party or multi-tenant workloads, or if Docker adds per-service network policies that make fine-grained isolation practical.
 

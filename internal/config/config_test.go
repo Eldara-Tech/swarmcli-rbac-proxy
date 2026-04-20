@@ -45,7 +45,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		"admin_token":     "secret",
 		"env":             "dev",
 		"log_level":       "debug",
-		"agent_proxy_url": "tcp://agent:9090",
+		"agent_manager_url": "tcp://agent:9090",
 		"seed_username":   "admin",
 		"protected_stack": "swarmcli-infra"
 	}`)
@@ -73,7 +73,7 @@ func TestLoad_JSONAllFields(t *testing.T) {
 		{"AdminToken", cfg.AdminToken, "secret"},
 		{"Env", cfg.Env, "dev"},
 		{"LogLevel", cfg.LogLevel, "debug"},
-		{"AgentProxyURL", cfg.AgentProxyURL, "tcp://agent:9090"},
+		{"AgentManagerURL", cfg.AgentManagerURL, "tcp://agent:9090"},
 		{"SeedUsername", cfg.SeedUsername, "admin"},
 		{"ProtectedStack", cfg.ProtectedStack, "swarmcli-infra"},
 	}
@@ -173,7 +173,7 @@ func TestLoad_AllEnvVars(t *testing.T) {
 		"PROXY_ADMIN_TOKEN":       "tok",
 		"PROXY_ENV":               "dev",
 		"PROXY_LOG_LEVEL":         "debug",
-		"PROXY_AGENT_URL":         "tcp://agent:9090",
+		"PROXY_AGENT_MANAGER_URL": "tcp://agent:9090",
 		"PROXY_SEED_USERNAME":     "admin",
 		"PROXY_PROTECTED_STACK":   "mystack",
 	}
@@ -233,8 +233,8 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q", cfg.LogLevel)
 	}
-	if cfg.AgentProxyURL != "tcp://agent:9090" {
-		t.Errorf("AgentProxyURL = %q", cfg.AgentProxyURL)
+	if cfg.AgentManagerURL != "tcp://agent:9090" {
+		t.Errorf("AgentManagerURL = %q", cfg.AgentManagerURL)
 	}
 	if cfg.SeedUsername != "admin" {
 		t.Errorf("SeedUsername = %q", cfg.SeedUsername)

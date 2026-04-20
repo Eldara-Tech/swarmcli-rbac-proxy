@@ -235,7 +235,7 @@ func TestProxy_UpgradeConnection(t *testing.T) {
 }
 
 func TestProxy_AgentUpgradeForwarding(t *testing.T) {
-	// Mock TCP server acting as the agent proxy backend.
+	// Mock TCP server acting as the agent-manager backend.
 	agentLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -25,7 +25,7 @@ Docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix soc
 - **Dual listener** -- external (mTLS) for users, internal (plain TCP) for admin automation
 - **Persisted audit log** -- all business actions (user CRUD, certificate issuance, guard blocks, onboarding) are recorded to the database and queryable via CLI
 - **Admin CLI (`swcproxy`)** -- manage users and query audit logs from inside the container without HTTP calls
-- **Agent proxy forwarding** -- transparently forwards `/v1/*` requests to a backend agent service (designed for [SwarmCLI](https://swarmcli.io/), coming soon)
+- **Agent-manager forwarding** -- transparently forwards `/v1/*` requests to a backend agent-manager service (designed for [SwarmCLI](https://swarmcli.io/), coming soon)
 - **Three storage backends** -- SQLite (default), PostgreSQL, or in-memory (dev)
 - **Structured logging** -- JSON (prod) or console (dev) via zap
 

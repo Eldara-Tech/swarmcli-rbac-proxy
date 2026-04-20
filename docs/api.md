@@ -132,9 +132,9 @@ Response (`410 Gone`):
 {"message": "token already consumed"}
 ```
 
-## Agent proxy forwarding
+## Agent-manager forwarding
 
-When `PROXY_AGENT_URL` is set, all `/v1/*` requests are forwarded to the configured backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon) and is not intended for standalone use. Both HTTP and WebSocket upgrade (hijack) connections are supported. See [configuration.md](configuration.md#agent-proxy-forwarding) for details.
+When `PROXY_AGENT_MANAGER_URL` is set, all `/v1/*` requests are forwarded to the configured backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon) and is not intended for standalone use. Both HTTP and WebSocket upgrade (hijack) connections are supported. See [configuration.md](configuration.md#agent-manager-forwarding) for details.
 
 ## Docker proxy
 

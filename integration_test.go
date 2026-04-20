@@ -1246,11 +1246,11 @@ func TestIntegration_ExecGuard_NoMTLS_Blocked(t *testing.T) {
 
 	agentBackend := startTCPServer(t, dockerMock())
 	agentBE := backend{network: "tcp", address: agentBackend}
-	agentProxy := newProxy(agentBE)
+	agentManagerProxy := newProxy(agentBE)
 
 	noAuth := func(next http.Handler) http.Handler { return next }
 	mux := http.NewServeMux()
-	mux.Handle("/v1/", noAuth(g.ExecGuard(agentProxy)))
+	mux.Handle("/v1/", noAuth(g.ExecGuard(agentManagerProxy)))
 
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
