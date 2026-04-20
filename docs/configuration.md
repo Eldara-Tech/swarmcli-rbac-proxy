@@ -9,7 +9,7 @@
   - [Integrations and observability](#integrations-and-observability)
 - [JSON config file](#json-config-file)
 - [Dual listener](#dual-listener)
-- [Agent proxy forwarding](#agent-proxy-forwarding)
+- [Agent-manager forwarding](#agent-manager-forwarding)
 - [Stack resource protection](#stack-resource-protection)
 - [User onboarding](#user-onboarding)
 - [Docker Compose examples](#docker-compose-examples)
@@ -82,7 +82,7 @@ The proxy persists users, onboarding tokens, and the audit log in one of three b
 | Variable | Default | Description |
 |---|---|---|
 | `PROXY_CONFIG` | _(none)_ | Path to a JSON config file. Values loaded from the file are overridden by any environment variables that are set. |
-| `PROXY_AGENT_URL` | _(none)_ | Backend URL for `/v1/*` agent-proxy forwarding (e.g. `tcp://agent-host:9090`). HTTP and WebSocket upgrade are supported. See [Agent proxy forwarding](#agent-proxy-forwarding). |
+| `PROXY_AGENT_MANAGER_URL` | _(none)_ | Backend URL for `/v1/*` agent-manager forwarding (e.g. `tcp://agent-manager:9090`). HTTP and WebSocket upgrade are supported. See [Agent-manager forwarding](#agent-manager-forwarding). |
 | `PROXY_PROTECTED_STACK` | _(auto-detected)_ | Name of the Docker Swarm stack containing the rbac-proxy itself — the stack whose resources should be protected from external mutation. Auto-detected from the container label `com.docker.stack.namespace` when the proxy runs as part of a Swarm stack. Set explicitly if auto-detection is not available (e.g. when running outside Swarm) and you still want the guard active. See [Stack resource protection](#stack-resource-protection). |
 | `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder). |
 | `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error`. |
@@ -112,7 +112,7 @@ JSON keys use snake_case (matching the Go struct tags). Unknown keys are rejecte
   "external_url":      "https://proxy.example.com:2376",
   "internal_listen":   "127.0.0.1:2375",
   "protected_stack":   "my-stack",
-  "agent_proxy_url":   "tcp://agent-host:9090",
+  "agent_manager_url": "tcp://agent-manager:9090",
   "env":               "prod",
   "log_level":         "info"
 }
@@ -129,17 +129,17 @@ When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
 
 This is the recommended production setup: the internal listener handles automation and the admin CLI (`swcproxy`), while the external listener faces users with mTLS.
 
-## Agent proxy forwarding
+## Agent-manager forwarding
 
-When `PROXY_AGENT_URL` is set, all requests to `/v1/*` are forwarded to the specified backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon), which routes agent commands (exec, logs) through the RBAC proxy, applying the same authentication and exec guard rules. It is not intended for standalone use.
+When `PROXY_AGENT_MANAGER_URL` is set, all requests to `/v1/*` are forwarded to the specified backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon), which routes agent commands (exec, logs) through the RBAC proxy, applying the same authentication and exec guard rules. It is not intended for standalone use.
 
 ```bash
-PROXY_AGENT_URL=tcp://agent-proxy:9090 ./swarm-rbac-proxy
+PROXY_AGENT_MANAGER_URL=tcp://agent-manager:9090 ./swarm-rbac-proxy
 ```
 
 Both standard HTTP requests and WebSocket upgrade (hijack) connections are supported. The exec guard applies to `/v1/exec` on the external listener: exec targeting a container in the protected stack requires admin role.
 
-If `PROXY_AGENT_URL` is not set, `/v1/*` requests are forwarded to the Docker daemon like any other path.
+If `PROXY_AGENT_MANAGER_URL` is not set, `/v1/*` requests are forwarded to the Docker daemon like any other path.
 
 ## Stack resource protection
 

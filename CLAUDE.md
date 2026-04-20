@@ -45,9 +45,9 @@ See [docs/configuration.md](docs/configuration.md) for all environment variables
 
 Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset).
 
-## Agent Proxy Forwarding
+## Agent-manager Forwarding
 
-When `PROXY_AGENT_URL` (env) or `agent_proxy_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-host:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
+When `PROXY_AGENT_MANAGER_URL` (env) or `agent_manager_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-manager:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
 
 The `/v1/exec` endpoint on the external listener is stack-aware: exec/attach targeting a container in the protected stack requires admin role; exec/attach targeting any other stack is allowed for all authenticated users. The internal listener (wired with `noExecGuard`) bypasses this check entirely.
 
@@ -153,7 +153,7 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 - `GET /api/v1/users` — List all users (200, always returns array)
 - `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
-- `/v1/*` — Forwarded to agent proxy (when `PROXY_AGENT_URL` is set; supports HTTP and WebSocket upgrade)
+- `/v1/*` — Forwarded to agent-manager (when `PROXY_AGENT_MANAGER_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
 
 ## Admin CLI (`swcproxy`)

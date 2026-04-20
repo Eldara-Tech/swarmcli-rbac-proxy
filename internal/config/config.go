@@ -12,28 +12,28 @@ import (
 
 // Config holds all proxy configuration values.
 type Config struct {
-	Listen         string `json:"listen"`
-	DockerURL      string `json:"docker_url"`
-	DockerSocket   string `json:"docker_socket"`
-	TLSCert        string `json:"tls_cert"`
-	TLSKey         string `json:"tls_key"`
-	TLSClientCA    string `json:"tls_client_ca"`
-	TLSClientCAKey string `json:"tls_client_ca_key"`
-	DockerTLSCA    string `json:"docker_tls_ca"`
-	DockerTLSCert  string `json:"docker_tls_cert"`
-	DockerTLSKey   string `json:"docker_tls_key"`
-	Store          string `json:"store"`
-	DatabasePath   string `json:"database_path"`
-	DatabaseURL    string `json:"database_url"`
-	AdminToken     string `json:"admin_token"`
-	Env            string `json:"env"`
-	LogLevel       string `json:"log_level"`
-	AgentProxyURL  string `json:"agent_proxy_url"`
-	SeedUsername   string `json:"seed_username"`
-	SeedRole       string `json:"seed_role"`
-	ExternalURL    string `json:"external_url"`
-	InternalListen string `json:"internal_listen"`
-	ProtectedStack string `json:"protected_stack"`
+	Listen          string `json:"listen"`
+	DockerURL       string `json:"docker_url"`
+	DockerSocket    string `json:"docker_socket"`
+	TLSCert         string `json:"tls_cert"`
+	TLSKey          string `json:"tls_key"`
+	TLSClientCA     string `json:"tls_client_ca"`
+	TLSClientCAKey  string `json:"tls_client_ca_key"`
+	DockerTLSCA     string `json:"docker_tls_ca"`
+	DockerTLSCert   string `json:"docker_tls_cert"`
+	DockerTLSKey    string `json:"docker_tls_key"`
+	Store           string `json:"store"`
+	DatabasePath    string `json:"database_path"`
+	DatabaseURL     string `json:"database_url"`
+	AdminToken      string `json:"admin_token"`
+	Env             string `json:"env"`
+	LogLevel        string `json:"log_level"`
+	AgentManagerURL string `json:"agent_manager_url"`
+	SeedUsername    string `json:"seed_username"`
+	SeedRole        string `json:"seed_role"`
+	ExternalURL     string `json:"external_url"`
+	InternalListen  string `json:"internal_listen"`
+	ProtectedStack  string `json:"protected_stack"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -57,7 +57,7 @@ var envOverrides = []struct {
 	{"PROXY_ADMIN_TOKEN", func(c *Config) *string { return &c.AdminToken }},
 	{"PROXY_ENV", func(c *Config) *string { return &c.Env }},
 	{"PROXY_LOG_LEVEL", func(c *Config) *string { return &c.LogLevel }},
-	{"PROXY_AGENT_URL", func(c *Config) *string { return &c.AgentProxyURL }},
+	{"PROXY_AGENT_MANAGER_URL", func(c *Config) *string { return &c.AgentManagerURL }},
 	{"PROXY_SEED_USERNAME", func(c *Config) *string { return &c.SeedUsername }},
 	{"PROXY_SEED_ROLE", func(c *Config) *string { return &c.SeedRole }},
 	{"PROXY_EXTERNAL_URL", func(c *Config) *string { return &c.ExternalURL }},
