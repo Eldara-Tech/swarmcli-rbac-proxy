@@ -213,8 +213,8 @@ Tracked issues from architecture audit:
 - **#59**: ~~Exec guard silently disabled without mTLS~~ — fixed: always applied on external listener (fail-closed)
 - **#60**: ~~`ResourceGuard` fails open on back-query errors (including delete operations)~~ — fixed: deletes now fail closed (503) on back-query errors
 - **#62**: No certificate rotation mechanism (client certs expire after 1 year)
-- **#63**: No inter-service authentication — accepted risk: overlay network isolation (`internal: true`, `encrypted: "true"`) is sufficient; see `docs/security.md` § "Overlay network trust"
-- **#64**: Admin token not persisted across redeployments
+- **#63**: No inter-service authentication — accepted risk: overlay network isolation (`internal: true`, `encrypted: "true"`) is sufficient; see `docs/security.md` § "Overlay network trust". As of 2026-04-20 the non-admin pivot vectors onto the overlay (T1, T2 in `swarmcli-agent/docs/threat-model.md`) are closed by `ResourceGuard`, restoring the overlay-closed premise for the `user` trust level.
+- **#64**: ~~Admin token not persisted across redeployments~~ — partially fixed: proxy now refuses to start when `PROXY_ADMIN_TOKEN` is empty and the user store contains ≥1 admin. Persistence across redeploys is still operator responsibility.
 - **#75**: Dockerfile runs as root — accepted risk: proxy requires Docker socket access, which is root-equivalent. Non-root would need root-start entrypoint for negligible benefit. Same reasoning as #63.
 
 ## Dependencies

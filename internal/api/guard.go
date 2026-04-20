@@ -74,6 +74,14 @@ func parseDockerPath(method, path string) *dockerRoute {
 	case len(parts) == 2 && method == http.MethodDelete:
 		return &dockerRoute{resource: resource, id: parts[1], action: "delete"}
 
+	// POST /networks/{id}/{connect,disconnect} — overlay-membership
+	// mutations; must match before the generic update case because action
+	// differs.
+	case len(parts) == 3 && resource == "networks" &&
+		(parts[2] == "connect" || parts[2] == "disconnect") &&
+		method == http.MethodPost:
+		return &dockerRoute{resource: "networks", id: parts[1], action: parts[2]}
+
 	// POST /{resource}/{id}/update
 	case len(parts) == 3 && parts[2] == "update" && method == http.MethodPost:
 		return &dockerRoute{resource: resource, id: parts[1], action: "update"}
@@ -214,7 +222,13 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 
 		switch route.action {
 		case "create":
-			protected, err := g.hasProtectedLabel(r)
+			data, err := g.readCreateBody(r)
+			if err != nil {
+				l().Warnw("guard: body read error, blocking create", "error", err)
+				writeError(w, http.StatusBadRequest, "invalid request body")
+				return
+			}
+			protected, err := g.bodyHasProtectedLabel(data)
 			if err != nil {
 				l().Warnw("guard: body parse error, blocking create", "error", err)
 				writeError(w, http.StatusBadRequest, "invalid request body")
@@ -225,6 +239,24 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 				recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":create", "denied", "protected stack")
 				writeError(w, http.StatusForbidden, "cannot create resources in protected stack")
 				return
+			}
+			// T1: a non-admin `user` role can otherwise create a service in a
+			// non-protected namespace that attaches to the protected overlay,
+			// pivoting onto `agent-net`. Admins bypass (symmetric with
+			// update branch).
+			if route.resource == "services" && !isAdmin(r) {
+				attached, err := g.bodyHasProtectedNetworkAttachment(r.Context(), data)
+				if err != nil {
+					l().Warnw("guard: network back-query failed, blocking create", "error", err)
+					writeError(w, http.StatusServiceUnavailable, "cannot verify network ownership")
+					return
+				}
+				if attached {
+					l().Warnw("guard: blocked create attaching to protected stack network", "path", r.URL.Path)
+					recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":create", "denied", "protected stack network attachment")
+					writeError(w, http.StatusForbidden, "cannot attach to protected stack network")
+					return
+				}
 			}
 
 		case "update":
@@ -241,6 +273,47 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 				l().Warnw("guard: blocked update of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
 				recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":"+route.id, "denied", "protected stack update")
 				writeError(w, http.StatusForbidden, "cannot modify protected stack resource")
+				return
+			}
+			// T1: same pivot as create, via service update.
+			if route.resource == "services" {
+				data, err := g.readCreateBody(r)
+				if err != nil {
+					l().Warnw("guard: body read error, blocking update", "error", err)
+					writeError(w, http.StatusBadRequest, "invalid request body")
+					return
+				}
+				attached, err := g.bodyHasProtectedNetworkAttachment(r.Context(), data)
+				if err != nil {
+					l().Warnw("guard: network back-query failed, blocking update", "error", err)
+					writeError(w, http.StatusServiceUnavailable, "cannot verify network ownership")
+					return
+				}
+				if attached {
+					l().Warnw("guard: blocked update attaching to protected stack network", "path", r.URL.Path, "resource", route.resource, "id", route.id)
+					recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":"+route.id, "denied", "protected stack network attachment (update)")
+					writeError(w, http.StatusForbidden, "cannot attach to protected stack network")
+					return
+				}
+			}
+
+		case "connect", "disconnect":
+			// T2: overlay-membership mutation. Admins bypass (symmetric with
+			// update); non-admins are blocked from (dis)connecting any
+			// workload to/from the protected stack overlay.
+			if isAdmin(r) {
+				break
+			}
+			protected, err := g.isProtectedResource(r.Context(), "networks", route.id)
+			if err != nil {
+				l().Warnw("guard: back-query failed, blocking network "+route.action, "error", err, "id", route.id)
+				writeError(w, http.StatusServiceUnavailable, "cannot verify network ownership")
+				return
+			}
+			if protected {
+				l().Warnw("guard: blocked "+route.action+" of protected stack network", "path", r.URL.Path, "id", route.id)
+				recordAudit(g.audit, r, store.AuditGuardBlocked, "networks:"+route.id, "denied", "protected stack network "+route.action)
+				writeError(w, http.StatusForbidden, "cannot "+route.action+" protected stack network")
 				return
 			}
 
@@ -310,29 +383,32 @@ func (g *ResourceGuard) isProtectedResource(ctx context.Context, resource, id st
 	return false, nil
 }
 
-// hasProtectedLabel reads the request body for create operations and checks
-// whether the payload contains the protected stack's namespace label.
-// The body is replaced so downstream handlers can still read it.
-func (g *ResourceGuard) hasProtectedLabel(r *http.Request) (bool, error) {
+// readCreateBody reads the request body with a 2 MB cap and restores it so
+// downstream handlers can still read it. Returns nil data for a nil body.
+// Multiple inspectors may call this: subsequent calls re-read the restored
+// NopCloser and see the same bytes.
+func (g *ResourceGuard) readCreateBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil {
-		return false, nil
+		return nil, nil
 	}
-
 	const maxCreateBodySize = 2 << 20 // 2 MB
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxCreateBodySize+1))
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	r.Body = io.NopCloser(bytes.NewReader(data))
 	if int64(len(data)) > maxCreateBodySize {
-		return false, fmt.Errorf("request body exceeds %d bytes", maxCreateBodySize)
+		return nil, fmt.Errorf("request body exceeds %d bytes", maxCreateBodySize)
 	}
+	return data, nil
+}
 
+// bodyHasProtectedLabel checks whether a create-request payload carries the
+// protected stack's namespace label at top level or under Spec.
+func (g *ResourceGuard) bodyHasProtectedLabel(data []byte) (bool, error) {
 	if len(data) == 0 {
 		return false, nil
 	}
-
-	// Check Labels at top level and under Spec.
 	var body struct {
 		Labels map[string]string `json:"Labels"`
 		Spec   struct {
@@ -342,12 +418,45 @@ func (g *ResourceGuard) hasProtectedLabel(r *http.Request) (bool, error) {
 	if err := json.Unmarshal(data, &body); err != nil {
 		return false, err
 	}
-
 	if body.Labels[stackNamespaceLabel] == g.stackName {
 		return true, nil
 	}
 	if body.Spec.Labels[stackNamespaceLabel] == g.stackName {
 		return true, nil
+	}
+	return false, nil
+}
+
+// bodyHasProtectedNetworkAttachment checks whether a service create/update
+// payload's TaskTemplate.Networks[] references any network that belongs to
+// the protected stack. Each referenced network id is resolved via the Docker
+// back-query; a 5xx from the daemon is surfaced as an error so the caller
+// can fail-closed.
+func (g *ResourceGuard) bodyHasProtectedNetworkAttachment(ctx context.Context, data []byte) (bool, error) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	var body struct {
+		TaskTemplate struct {
+			Networks []struct {
+				Target string `json:"Target"`
+			} `json:"Networks"`
+		} `json:"TaskTemplate"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return false, err
+	}
+	for _, n := range body.TaskTemplate.Networks {
+		if n.Target == "" {
+			continue
+		}
+		protected, err := g.isProtectedResource(ctx, "networks", n.Target)
+		if err != nil {
+			return false, err
+		}
+		if protected {
+			return true, nil
+		}
 	}
 	return false, nil
 }

@@ -20,6 +20,7 @@ type User struct {
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
 	OnboardToken    string     `json:"-"`
+	TokenIssuedAt   *time.Time `json:"-"`
 	TokenConsumedAt *time.Time `json:"-"`
 }
 
@@ -69,6 +70,7 @@ var (
 	ErrUserNotFound     = errors.New("user not found")
 	ErrTokenNotFound    = errors.New("onboard token not found")
 	ErrTokenConsumed    = errors.New("onboard token already consumed")
+	ErrTokenExpired     = errors.New("onboard token expired")
 )
 
 // newUUID generates a UUID v4 using crypto/rand.

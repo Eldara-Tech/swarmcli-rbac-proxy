@@ -54,6 +54,9 @@ func (h *OnboardHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "invalid token")
 		case errors.Is(err, store.ErrTokenConsumed):
 			writeError(w, http.StatusGone, "token already consumed")
+		case errors.Is(err, store.ErrTokenExpired):
+			recordAudit(h.audit, r, store.AuditGuardBlocked, "onboard:"+token, "denied", "token expired")
+			writeError(w, http.StatusGone, "token expired")
 		default:
 			l().Errorw("consume token failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "internal error")

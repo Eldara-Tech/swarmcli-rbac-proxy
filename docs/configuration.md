@@ -63,7 +63,8 @@ These control the seed user created at startup and the bearer token that protect
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token required on `/api/v1/*` requests. When unset and TLS is enabled, the proxy refuses to start. When unset without TLS, a warning is logged and the API is open. |
+| `PROXY_ADMIN_TOKEN` | _(none)_ | Bearer token required on `/api/v1/*` requests. When unset and TLS is enabled, the proxy refuses to start. When unset without TLS, a warning is logged and the API is open. Additionally, if any admin-role user exists in the store and this variable is unset, the proxy refuses to start regardless of TLS. |
+| `PROXY_ONBOARDING_TOKEN_TTL` | `24h` | Duration string (`time.ParseDuration`) for how long newly-issued onboarding tokens remain valid. Expired tokens return `410 Gone` with `"token expired"`. Set to `disabled` or `0` to turn expiry off entirely. Pre-existing tokens issued before this release are grandfathered in as never-expiring until regenerated. |
 | `PROXY_SEED_USERNAME` | _(none)_ | Username to create at startup if it does not exist. Used to bootstrap the first user so that the very first mTLS client has a matching identity in the store. |
 | `PROXY_SEED_ROLE` | `user` | Role assigned to the seed user: `user` or `admin`. See [the walkthrough](getting-started.md#2-start-the-proxy-with-mtls) for when to seed an admin versus a regular user. |
 
@@ -82,7 +83,7 @@ The proxy persists users, onboarding tokens, and the audit log in one of three b
 | Variable | Default | Description |
 |---|---|---|
 | `PROXY_CONFIG` | _(none)_ | Path to a JSON config file. Values loaded from the file are overridden by any environment variables that are set. |
-| `PROXY_AGENT_MANAGER_URL` | _(none)_ | Backend URL for `/v1/*` agent-manager forwarding (e.g. `tcp://agent-manager:9090`). HTTP and WebSocket upgrade are supported. See [Agent-manager forwarding](#agent-manager-forwarding). |
+| `PROXY_AGENT_MANAGER_URL` | _(none)_ | Backend URL for `/v1/*` agent-manager forwarding (e.g. `tcp://swarmctl_agent-manager:9090`). HTTP and WebSocket upgrade are supported. **Use the stack-qualified form** (`<stack>_agent-manager`) to avoid overlay DNS name-collision MITM; the proxy logs a warning if the host is a bare single-label name. See [Agent-manager forwarding](#agent-manager-forwarding) and `docs/security.md` § "Stack-qualified agent-manager URL". |
 | `PROXY_PROTECTED_STACK` | _(auto-detected)_ | Name of the Docker Swarm stack containing the rbac-proxy itself — the stack whose resources should be protected from external mutation. Auto-detected from the container label `com.docker.stack.namespace` when the proxy runs as part of a Swarm stack. Set explicitly if auto-detection is not available (e.g. when running outside Swarm) and you still want the guard active. See [Stack resource protection](#stack-resource-protection). |
 | `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder). |
 | `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error`. |

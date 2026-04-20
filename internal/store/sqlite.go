@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	proxylog "swarm-rbac-proxy/internal/log"
@@ -25,6 +26,7 @@ const sqliteSchema = `CREATE TABLE IF NOT EXISTS users (
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     onboard_token     TEXT,
+    token_issued_at   TEXT,
     token_consumed_at TEXT
 );`
 
@@ -45,11 +47,28 @@ var sqliteMigrations = []string{
 	`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`,
 	`ALTER TABLE users ADD COLUMN onboard_token TEXT`,
 	`ALTER TABLE users ADD COLUMN token_consumed_at TEXT`,
+	`ALTER TABLE users ADD COLUMN token_issued_at TEXT`,
 }
 
 // SQLiteStore implements UserStore backed by SQLite.
 type SQLiteStore struct {
-	db *sql.DB
+	db       *sql.DB
+	ttlMu    sync.RWMutex
+	tokenTTL time.Duration // 0 means disabled
+}
+
+// SetTokenTTL sets the onboarding-token TTL. Zero or negative disables
+// expiry. Safe to call concurrently.
+func (s *SQLiteStore) SetTokenTTL(d time.Duration) {
+	s.ttlMu.Lock()
+	defer s.ttlMu.Unlock()
+	s.tokenTTL = d
+}
+
+func (s *SQLiteStore) getTokenTTL() time.Duration {
+	s.ttlMu.RLock()
+	defer s.ttlMu.RUnlock()
+	return s.tokenTTL
 }
 
 // NewSQLiteStore opens a SQLite database and ensures the schema exists.
@@ -209,8 +228,8 @@ func (s *SQLiteStore) DeleteUser(ctx context.Context, username string) error {
 func (s *SQLiteStore) SetOnboardToken(ctx context.Context, username string, token string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE users SET onboard_token = ?, token_consumed_at = NULL, updated_at = ? WHERE username = ?`,
-		token, now, username,
+		`UPDATE users SET onboard_token = ?, token_issued_at = ?, token_consumed_at = NULL, updated_at = ? WHERE username = ?`,
+		token, now, now, username,
 	)
 	if err != nil {
 		return err
@@ -233,14 +252,14 @@ func (s *SQLiteStore) ConsumeOnboardToken(ctx context.Context, token string) (*U
 	defer func() { _ = tx.Rollback() }()
 
 	row := tx.QueryRowContext(ctx,
-		`SELECT id, username, role, enabled, created_at, updated_at, token_consumed_at
+		`SELECT id, username, role, enabled, created_at, updated_at, token_issued_at, token_consumed_at
 		 FROM users WHERE onboard_token = ?`, token,
 	)
 	var u User
 	var enabled int
 	var createdAt, updatedAt string
-	var consumedAt sql.NullString
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &enabled, &createdAt, &updatedAt, &consumedAt); err != nil {
+	var issuedAt, consumedAt sql.NullString
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &enabled, &createdAt, &updatedAt, &issuedAt, &consumedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrTokenNotFound
 		}
@@ -248,6 +267,14 @@ func (s *SQLiteStore) ConsumeOnboardToken(ctx context.Context, token string) (*U
 	}
 	if consumedAt.Valid {
 		return nil, ErrTokenConsumed
+	}
+	// TTL check: pre-existing tokens (issued_at NULL) are grandfathered in
+	// as never-expiring; post-release tokens always carry issued_at.
+	if ttl := s.getTokenTTL(); ttl > 0 && issuedAt.Valid {
+		t, perr := time.Parse(time.RFC3339Nano, issuedAt.String)
+		if perr == nil && time.Since(t) > ttl {
+			return nil, ErrTokenExpired
+		}
 	}
 
 	now := time.Now().UTC()
@@ -267,6 +294,11 @@ func (s *SQLiteStore) ConsumeOnboardToken(ctx context.Context, token string) (*U
 	u.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
 	u.UpdatedAt = now
 	u.TokenConsumedAt = &now
+	if issuedAt.Valid {
+		if t, perr := time.Parse(time.RFC3339Nano, issuedAt.String); perr == nil {
+			u.TokenIssuedAt = &t
+		}
+	}
 	return &u, nil
 }
 

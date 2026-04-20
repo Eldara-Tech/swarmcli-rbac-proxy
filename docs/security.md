@@ -88,6 +88,12 @@ Adding a shared secret or internal mTLS between the three services was evaluated
 
 **Revisit if**: the overlay starts hosting third-party or multi-tenant workloads, or if Docker adds per-service network policies that make fine-grained isolation practical.
 
+### Stack-qualified agent-manager URL (T5 mitigation)
+
+Because the rbac-proxy resolves `PROXY_AGENT_MANAGER_URL` via Docker overlay DNS, a bare single-label host (e.g. `tcp://agent-manager:8080`) is vulnerable to name-collision MITM: if an attacker ever reaches the overlay and registers a cross-stack service also named `agent-manager`, Docker's round-robin DNS would deliver half of the admin exec traffic to the attacker's endpoint, enabling token/session theft. See `swarmcli-agent/docs/threat-model.md §T5`.
+
+Always set `PROXY_AGENT_MANAGER_URL` to the stack-qualified form, for example `tcp://swarmctl_agent-manager:8080` (where `swarmctl` is the protected stack name). The proxy emits a startup warning when the host portion is an unqualified short name.
+
 ## Operational recommendations
 
 - **Bind the internal listener to loopback** (`127.0.0.1:2375`) or access it only via `docker exec`. Never expose it to the network.

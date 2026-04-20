@@ -15,6 +15,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"swarm-rbac-proxy/internal/api"
@@ -98,6 +99,35 @@ func parseBackend(raw string) (backend, error) {
 	default:
 		return backend{}, fmt.Errorf("unsupported scheme %q in %q (expected unix or tcp)", u.Scheme, raw)
 	}
+}
+
+// warnIfUnqualifiedAgentManagerHost emits a warning when the agent-manager
+// host is a bare single-label DNS name. Inside a Docker Swarm overlay, a
+// bare name resolves via overlay DNS to *any* service of that name in the
+// stack namespace; a colluding workload on the same overlay could register
+// an `agent-manager` service and MITM admin exec traffic. Stack-qualified
+// names like "swarmctl_agent-manager" scope resolution to the protected
+// stack. See swarmcli-agent/docs/threat-model.md §T5.
+func warnIfUnqualifiedAgentManagerHost(hostPort string) {
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		host = hostPort
+	}
+	if host == "" {
+		return
+	}
+	// IP literal or FQDN (contains ".") or stack-qualified (contains "_") →
+	// fine. Single-label short name → warn.
+	if strings.ContainsAny(host, "._") {
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return
+	}
+	l().Warnw("PROXY_AGENT_MANAGER_URL uses an unqualified service name; "+
+		"within a Docker Swarm overlay this is vulnerable to name-collision "+
+		"MITM (see threat-model.md T5). Use a stack-qualified form like "+
+		"tcp://<stack>_agent-manager:<port>", "host", host)
 }
 
 // newProxy builds the reverse-proxy handler for the given Docker backend.
@@ -334,10 +364,12 @@ func main() {
 			l().Fatalw("sqlite store init failed", "error", err)
 		}
 		defer sq.Close()
+		sq.SetTokenTTL(cfg.OnboardingTokenTTL)
 		userStore = sq
 		auditStore = sq
 	case "memory":
 		ms := store.NewMemoryStore()
+		ms.SetTokenTTL(cfg.OnboardingTokenTTL)
 		userStore = ms
 		auditStore = ms
 	case "postgres":
@@ -349,10 +381,34 @@ func main() {
 			l().Fatalw("postgres store init failed", "error", err)
 		}
 		defer pg.Close()
+		pg.SetTokenTTL(cfg.OnboardingTokenTTL)
 		userStore = pg
 		auditStore = pg
 	default:
 		l().Fatalw("unknown store type", "store", cfg.Store)
+	}
+	if cfg.OnboardingTokenTTL > 0 {
+		l().Infow("onboarding token TTL", "ttl", cfg.OnboardingTokenTTL)
+	} else {
+		l().Warnw("onboarding token TTL is disabled (PROXY_ONBOARDING_TOKEN_TTL=disabled); tokens never expire")
+	}
+
+	// T7b: refuse to start with an empty admin token when the user store
+	// already contains admin-role identities. On a redeploy that drops
+	// PROXY_ADMIN_TOKEN, the management API would otherwise open up because
+	// RequireToken with an empty token short-circuits to pass-through
+	// (api/auth.go:11-26). Fresh installs (no admins yet) still bootstrap.
+	if cfg.AdminToken == "" {
+		users, err := userStore.ListUsers(context.Background())
+		if err != nil {
+			l().Fatalw("list users for admin-token consistency check", "error", err)
+		}
+		for _, u := range users {
+			if u.Role == "admin" {
+				l().Fatalw("PROXY_ADMIN_TOKEN is empty but admins exist in the store; refusing to start",
+					"admin_username", u.Username)
+			}
+		}
 	}
 
 	if cfg.SeedUsername != "" {
@@ -432,6 +488,7 @@ func main() {
 		if err != nil {
 			l().Fatalw("parse agent-manager URL", "error", err)
 		}
+		warnIfUnqualifiedAgentManagerHost(agentBE.address)
 		agentManagerProxy = newProxy(agentBE)
 		l().Infow("agent-manager forwarding enabled", "url", cfg.AgentManagerURL)
 	}
