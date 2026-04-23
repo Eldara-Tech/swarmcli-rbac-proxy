@@ -7,8 +7,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
+	"time"
 )
 
 func newTestPostgresStore(t *testing.T) *PostgresStore {
@@ -39,6 +41,34 @@ func TestPostgresStore_Contract(t *testing.T) {
 
 func TestPostgresStore_AuditContract(t *testing.T) {
 	testAuditStoreContract(t, func() AuditStore { return newTestPostgresStore(t) })
+}
+
+// TestPostgresStore_NilIssuedAtExpires simulates an in-place upgrade
+// row: non-null onboard_token, NULL token_issued_at. Consume must fail
+// closed with ErrTokenExpired once a positive TTL is configured.
+func TestPostgresStore_NilIssuedAtExpires(t *testing.T) {
+	s := newTestPostgresStore(t)
+	ctx := context.Background()
+	if err := s.CreateUser(ctx, &User{Username: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE users SET onboard_token = $1, token_issued_at = NULL, updated_at = $2 WHERE username = $3`,
+		"tok-nil-issued", time.Now().UTC(), "legacy",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	s.SetTokenTTL(time.Hour)
+	if _, err := s.ConsumeOnboardToken(ctx, "tok-nil-issued"); !errors.Is(err, ErrTokenExpired) {
+		t.Fatalf("expected ErrTokenExpired for NULL issued_at, got %v", err)
+	}
+	if err := s.SetOnboardToken(ctx, "legacy", "tok-nil-issued"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConsumeOnboardToken(ctx, "tok-nil-issued"); err != nil {
+		t.Fatalf("expected re-issued token to consume, got %v", err)
+	}
 }
 
 func TestPostgresStore_SchemaCreated(t *testing.T) {

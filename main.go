@@ -387,11 +387,7 @@ func main() {
 	default:
 		l().Fatalw("unknown store type", "store", cfg.Store)
 	}
-	if cfg.OnboardingTokenTTL > 0 {
-		l().Infow("onboarding token TTL", "ttl", cfg.OnboardingTokenTTL)
-	} else {
-		l().Warnw("onboarding token TTL is disabled (PROXY_ONBOARDING_TOKEN_TTL=disabled); tokens never expire")
-	}
+	l().Infow("onboarding token TTL", "ttl", cfg.OnboardingTokenTTL)
 
 	// T7b: refuse to start with an empty admin token when the user store
 	// already contains admin-role identities. On a redeploy that drops

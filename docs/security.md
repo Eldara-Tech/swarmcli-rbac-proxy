@@ -71,6 +71,7 @@ Security relies on Docker overlay network isolation:
 - The `swarmcli-agent-net` overlay is configured with `internal: true` (no external access) and `encrypted: "true"` (IPSec encryption of overlay traffic).
 - Only services attached to this overlay can communicate with each other.
 - A compromised container on the overlay network can directly access the agent-manager or agent, gaining arbitrary exec access to all containers on the cluster.
+- Overlay-membership mutations through the external proxy listener are blocked for **every role, including admin** — `POST /services/create` with `TaskTemplate.Networks` targeting the protected overlay, `POST /services/{id}/update` pulling a non-protected service onto it, and `POST /networks/{id}/{connect,disconnect}` against the protected overlay all return `403`. An admin-cert compromise therefore cannot bootstrap a pivot onto `swarmcli-agent-net`. Legitimate sysadmin overlay work (attaching troubleshooting sidecars, joining containers to `agent-net` for diagnostics) must happen via the host Docker socket on a manager node or via the internal loopback listener (`PROXY_INTERNAL_LISTEN`). Admin `docker exec` / `attach` into containers that are already on the overlay continues to work through the proxy — the guard scope is membership, not traffic.
 
 ### Why inter-service auth is not implemented (accepted risk)
 

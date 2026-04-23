@@ -268,11 +268,15 @@ func (s *SQLiteStore) ConsumeOnboardToken(ctx context.Context, token string) (*U
 	if consumedAt.Valid {
 		return nil, ErrTokenConsumed
 	}
-	// TTL check: pre-existing tokens (issued_at NULL) are grandfathered in
-	// as never-expiring; post-release tokens always carry issued_at.
-	if ttl := s.getTokenTTL(); ttl > 0 && issuedAt.Valid {
+	// TTL check: a NULL issued_at (rows written before this release) is
+	// treated as expired and must be re-issued via
+	// `swcproxy user regenerate-token`.
+	if ttl := s.getTokenTTL(); ttl > 0 {
+		if !issuedAt.Valid {
+			return nil, ErrTokenExpired
+		}
 		t, perr := time.Parse(time.RFC3339Nano, issuedAt.String)
-		if perr == nil && time.Since(t) > ttl {
+		if perr != nil || time.Since(t) > ttl {
 			return nil, ErrTokenExpired
 		}
 	}

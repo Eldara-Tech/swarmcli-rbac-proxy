@@ -43,8 +43,8 @@ type Config struct {
 
 	// OnboardingTokenTTL is the expiry window for newly issued onboarding
 	// tokens. Zero is interpreted as DefaultOnboardingTokenTTL after Load.
-	// A negative value (stored by passing the string "0" or "disabled"
-	// through the env var) disables expiry.
+	// Must be strictly positive after defaults are applied; Load returns
+	// an error on non-positive values.
 	OnboardingTokenTTL time.Duration `json:"onboarding_token_ttl"`
 }
 
@@ -101,16 +101,14 @@ func Load(path string) (Config, error) {
 	}
 
 	if v := os.Getenv("PROXY_ONBOARDING_TOKEN_TTL"); v != "" {
-		// Use "disabled" or "0" to disable expiry explicitly.
-		if v == "disabled" || v == "0" {
-			cfg.OnboardingTokenTTL = -1
-		} else {
-			d, err := time.ParseDuration(v)
-			if err != nil {
-				return cfg, fmt.Errorf("parse PROXY_ONBOARDING_TOKEN_TTL %q: %w", v, err)
-			}
-			cfg.OnboardingTokenTTL = d
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("parse PROXY_ONBOARDING_TOKEN_TTL %q: %w", v, err)
 		}
+		if d <= 0 {
+			return cfg, fmt.Errorf("PROXY_ONBOARDING_TOKEN_TTL must be a positive duration, got %q", v)
+		}
+		cfg.OnboardingTokenTTL = d
 	}
 
 	if cfg.Store == "" {
@@ -121,6 +119,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.OnboardingTokenTTL == 0 {
 		cfg.OnboardingTokenTTL = DefaultOnboardingTokenTTL
+	}
+	if cfg.OnboardingTokenTTL < 0 {
+		return cfg, fmt.Errorf("onboarding_token_ttl must be a positive duration, got %s", cfg.OnboardingTokenTTL)
 	}
 
 	return cfg, nil

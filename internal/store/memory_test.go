@@ -5,9 +5,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	proxylog "swarm-rbac-proxy/internal/log"
 )
@@ -24,6 +26,43 @@ func TestMemoryStore_Contract(t *testing.T) {
 
 func TestMemoryStore_AuditContract(t *testing.T) {
 	testAuditStoreContract(t, func() AuditStore { return NewMemoryStore() })
+}
+
+// TestMemoryStore_NilIssuedAtExpires exercises the "rows written before
+// TokenIssuedAt was introduced" path — a token whose issued_at is nil
+// must not be consumable once a positive TTL is configured. Rows can
+// only reach this state on an in-place upgrade; new code always stamps
+// issued_at.
+func TestMemoryStore_NilIssuedAtExpires(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := context.Background()
+	if err := s.CreateUser(ctx, &User{Username: "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	// Inject a pre-TTL row by bypassing SetOnboardToken.
+	s.mu.Lock()
+	for id, u := range s.users {
+		if u.Username == "legacy" {
+			u.OnboardToken = "tok-nil-issued"
+			u.TokenIssuedAt = nil
+			u.UpdatedAt = time.Now().UTC()
+			s.users[id] = u
+		}
+	}
+	s.mu.Unlock()
+
+	s.SetTokenTTL(time.Hour)
+	if _, err := s.ConsumeOnboardToken(ctx, "tok-nil-issued"); !errors.Is(err, ErrTokenExpired) {
+		t.Fatalf("expected ErrTokenExpired for nil issued_at, got %v", err)
+	}
+	// Regenerating the token via SetOnboardToken must set issued_at and
+	// restore consumability.
+	if err := s.SetOnboardToken(ctx, "legacy", "tok-nil-issued"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConsumeOnboardToken(ctx, "tok-nil-issued"); err != nil {
+		t.Fatalf("expected re-issued token to consume, got %v", err)
+	}
 }
 
 func TestMemoryStore_ConcurrentCreates(t *testing.T) {

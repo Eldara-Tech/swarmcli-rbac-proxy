@@ -240,11 +240,11 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 				writeError(w, http.StatusForbidden, "cannot create resources in protected stack")
 				return
 			}
-			// T1: a non-admin `user` role can otherwise create a service in a
-			// non-protected namespace that attaches to the protected overlay,
-			// pivoting onto `agent-net`. Admins bypass (symmetric with
-			// update branch).
-			if route.resource == "services" && !isAdmin(r) {
+			// T1: block any create whose TaskTemplate.Networks[].Target is a
+			// protected-stack network. Applies to admins too: overlay-membership
+			// mutations are never permitted via the proxy — sysadmins must use
+			// the host Docker socket or the internal listener.
+			if route.resource == "services" {
 				attached, err := g.bodyHasProtectedNetworkAttachment(r.Context(), data)
 				if err != nil {
 					l().Warnw("guard: network back-query failed, blocking create", "error", err)
@@ -260,23 +260,26 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			}
 
 		case "update":
-			if isAdmin(r) {
-				break // admins may update protected resources
-			}
 			protected, err := g.isProtectedResource(r.Context(), route.resource, route.id)
 			if err != nil {
 				l().Warnw("guard: back-query failed, blocking update", "error", err, "resource", route.resource, "id", route.id)
 				writeError(w, http.StatusServiceUnavailable, "cannot verify resource ownership")
 				return
 			}
-			if protected {
+			if protected && !isAdmin(r) {
 				l().Warnw("guard: blocked update of protected resource", "path", r.URL.Path, "resource", route.resource, "id", route.id)
 				recordAudit(g.audit, r, store.AuditGuardBlocked, route.resource+":"+route.id, "denied", "protected stack update")
 				writeError(w, http.StatusForbidden, "cannot modify protected stack resource")
 				return
 			}
-			// T1: same pivot as create, via service update.
-			if route.resource == "services" {
+			// T1 pivot guard: fires for admin and non-admin alike, but only
+			// when the service being updated is NOT itself on the protected
+			// stack. In-place updates of protected-stack services (image
+			// rotate, scale, secret rotate) continue to work for admins,
+			// because the target is already on agent-net. Pulling a user-
+			// owned service onto agent-net via update is blocked regardless
+			// of role — overlay mutation is a host-only operation.
+			if route.resource == "services" && !protected {
 				data, err := g.readCreateBody(r)
 				if err != nil {
 					l().Warnw("guard: body read error, blocking update", "error", err)
@@ -298,12 +301,11 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 			}
 
 		case "connect", "disconnect":
-			// T2: overlay-membership mutation. Admins bypass (symmetric with
-			// update); non-admins are blocked from (dis)connecting any
-			// workload to/from the protected stack overlay.
-			if isAdmin(r) {
-				break
-			}
+			// T2: overlay-membership mutation. Blocked for every role on
+			// the external listener — legitimate sysadmin (dis)connection
+			// must go through the host Docker socket or the internal
+			// listener, not the proxy. An admin-cert compromise must not
+			// yield pivot onto agent-net.
 			protected, err := g.isProtectedResource(r.Context(), "networks", route.id)
 			if err != nil {
 				l().Warnw("guard: back-query failed, blocking network "+route.action, "error", err, "id", route.id)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoad_JSONOnly(t *testing.T) {
@@ -242,6 +243,52 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	if cfg.ProtectedStack != "mystack" {
 		t.Errorf("ProtectedStack = %q", cfg.ProtectedStack)
 	}
+}
+
+func TestLoad_OnboardingTokenTTL(t *testing.T) {
+	t.Run("unset uses default", func(t *testing.T) {
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OnboardingTokenTTL != DefaultOnboardingTokenTTL {
+			t.Errorf("OnboardingTokenTTL = %s, want %s", cfg.OnboardingTokenTTL, DefaultOnboardingTokenTTL)
+		}
+	})
+	t.Run("valid duration parses", func(t *testing.T) {
+		t.Setenv("PROXY_ONBOARDING_TOKEN_TTL", "2h")
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OnboardingTokenTTL != 2*time.Hour {
+			t.Errorf("OnboardingTokenTTL = %s, want 2h", cfg.OnboardingTokenTTL)
+		}
+	})
+	t.Run("zero is rejected", func(t *testing.T) {
+		t.Setenv("PROXY_ONBOARDING_TOKEN_TTL", "0")
+		if _, err := Load(""); err == nil {
+			t.Fatal("expected error for PROXY_ONBOARDING_TOKEN_TTL=0")
+		}
+	})
+	t.Run("negative is rejected", func(t *testing.T) {
+		t.Setenv("PROXY_ONBOARDING_TOKEN_TTL", "-5m")
+		if _, err := Load(""); err == nil {
+			t.Fatal("expected error for negative PROXY_ONBOARDING_TOKEN_TTL")
+		}
+	})
+	t.Run("disabled string is rejected", func(t *testing.T) {
+		t.Setenv("PROXY_ONBOARDING_TOKEN_TTL", "disabled")
+		if _, err := Load(""); err == nil {
+			t.Fatal("expected error for PROXY_ONBOARDING_TOKEN_TTL=disabled (no longer supported)")
+		}
+	})
+	t.Run("invalid duration is rejected", func(t *testing.T) {
+		t.Setenv("PROXY_ONBOARDING_TOKEN_TTL", "not-a-duration")
+		if _, err := Load(""); err == nil {
+			t.Fatal("expected parse error")
+		}
+	})
 }
 
 func writeJSON(t *testing.T, content string) string {

@@ -228,8 +228,13 @@ func (s *PostgresStore) ConsumeOnboardToken(ctx context.Context, token string) (
 	if consumedAt != nil {
 		return nil, ErrTokenConsumed
 	}
-	if ttl := s.getTokenTTL(); ttl > 0 && issuedAt != nil && time.Since(*issuedAt) > ttl {
-		return nil, ErrTokenExpired
+	// Missing issued_at is treated as expired; only rows written before
+	// this release carry NULL, and they must be re-issued via
+	// `swcproxy user regenerate-token`.
+	if ttl := s.getTokenTTL(); ttl > 0 {
+		if issuedAt == nil || time.Since(*issuedAt) > ttl {
+			return nil, ErrTokenExpired
+		}
 	}
 
 	now := time.Now().UTC()

@@ -109,12 +109,13 @@ func (s *MemoryStore) ConsumeOnboardToken(_ context.Context, token string) (*Use
 			if u.TokenConsumedAt != nil {
 				return nil, ErrTokenConsumed
 			}
-			// TTL check: tokens issued before this release (nil
-			// TokenIssuedAt) are treated as never-expiring for a one-time
-			// grace; new tokens always have TokenIssuedAt set.
-			if s.tokenTTL > 0 && u.TokenIssuedAt != nil &&
-				time.Since(*u.TokenIssuedAt) > s.tokenTTL {
-				return nil, ErrTokenExpired
+			// TTL check: a missing TokenIssuedAt is treated as expired —
+			// only rows written before this release carry nil, and they
+			// must be re-issued via `swcproxy user regenerate-token`.
+			if s.tokenTTL > 0 {
+				if u.TokenIssuedAt == nil || time.Since(*u.TokenIssuedAt) > s.tokenTTL {
+					return nil, ErrTokenExpired
+				}
 			}
 			now := time.Now().UTC()
 			u.TokenConsumedAt = &now
