@@ -15,15 +15,25 @@ func lMemory() *proxylog.ProxyLogger { return proxylog.L().With("component", "st
 
 // MemoryStore is an in-memory UserStore and AuditStore for development and testing.
 type MemoryStore struct {
-	mu    sync.RWMutex
-	users map[string]User
-	audit []AuditEntry
+	mu       sync.RWMutex
+	users    map[string]User
+	audit    []AuditEntry
+	tokenTTL time.Duration // 0 means disabled
 }
 
 // NewMemoryStore creates a new in-memory store.
 func NewMemoryStore() *MemoryStore {
 	lMemory().Infow("store initialized")
 	return &MemoryStore{users: make(map[string]User)}
+}
+
+// SetTokenTTL sets the onboarding-token TTL. A zero or negative duration
+// disables expiry. Safe to call concurrently; applies to subsequent
+// ConsumeOnboardToken calls.
+func (s *MemoryStore) SetTokenTTL(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokenTTL = d
 }
 
 func (s *MemoryStore) CreateUser(_ context.Context, u *User) error {
@@ -77,9 +87,12 @@ func (s *MemoryStore) SetOnboardToken(_ context.Context, username string, token 
 
 	for id, u := range s.users {
 		if u.Username == username {
+			now := time.Now().UTC()
 			u.OnboardToken = token
 			u.TokenConsumedAt = nil
-			u.UpdatedAt = time.Now().UTC()
+			issued := now
+			u.TokenIssuedAt = &issued
+			u.UpdatedAt = now
 			s.users[id] = u
 			return nil
 		}
@@ -95,6 +108,14 @@ func (s *MemoryStore) ConsumeOnboardToken(_ context.Context, token string) (*Use
 		if u.OnboardToken == token {
 			if u.TokenConsumedAt != nil {
 				return nil, ErrTokenConsumed
+			}
+			// TTL check: a missing TokenIssuedAt is treated as expired —
+			// only rows written before this release carry nil, and they
+			// must be re-issued via `swcproxy user regenerate-token`.
+			if s.tokenTTL > 0 {
+				if u.TokenIssuedAt == nil || time.Since(*u.TokenIssuedAt) > s.tokenTTL {
+					return nil, ErrTokenExpired
+				}
 			}
 			now := time.Now().UTC()
 			u.TokenConsumedAt = &now

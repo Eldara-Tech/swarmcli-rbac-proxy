@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	proxylog "swarm-rbac-proxy/internal/log"
@@ -25,6 +26,7 @@ const schema = `CREATE TABLE IF NOT EXISTS users (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     onboard_token     TEXT,
+    token_issued_at   TIMESTAMPTZ,
     token_consumed_at TIMESTAMPTZ
 );`
 
@@ -45,11 +47,28 @@ var pgMigrations = []string{
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS onboard_token TEXT`,
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_consumed_at TIMESTAMPTZ`,
+	`ALTER TABLE users ADD COLUMN IF NOT EXISTS token_issued_at TIMESTAMPTZ`,
 }
 
 // PostgresStore implements UserStore backed by PostgreSQL.
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	ttlMu    sync.RWMutex
+	tokenTTL time.Duration // 0 means disabled
+}
+
+// SetTokenTTL sets the onboarding-token TTL. Zero or negative disables
+// expiry. Safe to call concurrently.
+func (s *PostgresStore) SetTokenTTL(d time.Duration) {
+	s.ttlMu.Lock()
+	defer s.ttlMu.Unlock()
+	s.tokenTTL = d
+}
+
+func (s *PostgresStore) getTokenTTL() time.Duration {
+	s.ttlMu.RLock()
+	defer s.ttlMu.RUnlock()
+	return s.tokenTTL
 }
 
 // NewPostgresStore connects to PostgreSQL and ensures the schema exists.
@@ -175,7 +194,7 @@ func (s *PostgresStore) DeleteUser(ctx context.Context, username string) error {
 func (s *PostgresStore) SetOnboardToken(ctx context.Context, username string, token string) error {
 	now := time.Now().UTC()
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE users SET onboard_token = $1, token_consumed_at = NULL, updated_at = $2 WHERE username = $3`,
+		`UPDATE users SET onboard_token = $1, token_issued_at = $2, token_consumed_at = NULL, updated_at = $2 WHERE username = $3`,
 		token, now, username,
 	)
 	if err != nil {
@@ -195,12 +214,12 @@ func (s *PostgresStore) ConsumeOnboardToken(ctx context.Context, token string) (
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	row := tx.QueryRow(ctx,
-		`SELECT id, username, role, enabled, created_at, updated_at, token_consumed_at
+		`SELECT id, username, role, enabled, created_at, updated_at, token_issued_at, token_consumed_at
 		 FROM users WHERE onboard_token = $1 FOR UPDATE`, token,
 	)
 	var u User
-	var consumedAt *time.Time
-	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt, &consumedAt); err != nil {
+	var issuedAt, consumedAt *time.Time
+	if err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt, &issuedAt, &consumedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTokenNotFound
 		}
@@ -208,6 +227,14 @@ func (s *PostgresStore) ConsumeOnboardToken(ctx context.Context, token string) (
 	}
 	if consumedAt != nil {
 		return nil, ErrTokenConsumed
+	}
+	// Missing issued_at is treated as expired; only rows written before
+	// this release carry NULL, and they must be re-issued via
+	// `swcproxy user regenerate-token`.
+	if ttl := s.getTokenTTL(); ttl > 0 {
+		if issuedAt == nil || time.Since(*issuedAt) > ttl {
+			return nil, ErrTokenExpired
+		}
 	}
 
 	now := time.Now().UTC()
@@ -224,6 +251,7 @@ func (s *PostgresStore) ConsumeOnboardToken(ctx context.Context, token string) (
 
 	u.UpdatedAt = now
 	u.TokenConsumedAt = &now
+	u.TokenIssuedAt = issuedAt
 	return &u, nil
 }
 

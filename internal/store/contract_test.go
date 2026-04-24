@@ -7,7 +7,15 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
+
+// tokenTTLConfigurable is implemented by stores whose onboarding-token TTL
+// can be set per test. All three production stores implement it; the
+// contract tests type-assert and skip if ever absent.
+type tokenTTLConfigurable interface {
+	SetTokenTTL(time.Duration)
+}
 
 // testUserStoreContract exercises the full UserStore contract.
 // Both memory and postgres implementations must pass these tests.
@@ -265,6 +273,83 @@ func testUserStoreContract(t *testing.T, newStore func() UserStore) {
 		err := s.SetOnboardToken(ctx, "nobody", "tok")
 		if !errors.Is(err, ErrUserNotFound) {
 			t.Fatalf("expected ErrUserNotFound, got %v", err)
+		}
+	})
+
+	t.Run("OnboardToken_WithinTTL_Consumes", func(t *testing.T) {
+		s := newStore()
+		ttl, ok := s.(tokenTTLConfigurable)
+		if !ok {
+			t.Skip("store does not support SetTokenTTL")
+		}
+		ttl.SetTokenTTL(time.Hour)
+
+		ctx := context.Background()
+		if err := s.CreateUser(ctx, &User{Username: "ttlok"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetOnboardToken(ctx, "ttlok", "tok-ttl-ok"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ConsumeOnboardToken(ctx, "tok-ttl-ok"); err != nil {
+			t.Fatalf("expected consume to succeed within TTL, got %v", err)
+		}
+	})
+
+	t.Run("OnboardToken_BeyondTTL_Expires", func(t *testing.T) {
+		s := newStore()
+		ttl, ok := s.(tokenTTLConfigurable)
+		if !ok {
+			t.Skip("store does not support SetTokenTTL")
+		}
+
+		ctx := context.Background()
+		if err := s.CreateUser(ctx, &User{Username: "ttlexp"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetOnboardToken(ctx, "ttlexp", "tok-ttl-expired"); err != nil {
+			t.Fatal(err)
+		}
+		// Tighten TTL to effectively "already expired" after the token was
+		// issued. time.Since(issuedAt) > 1ns is true on any real clock.
+		ttl.SetTokenTTL(time.Nanosecond)
+		time.Sleep(2 * time.Millisecond)
+		_, err := s.ConsumeOnboardToken(ctx, "tok-ttl-expired")
+		if !errors.Is(err, ErrTokenExpired) {
+			t.Fatalf("expected ErrTokenExpired, got %v", err)
+		}
+	})
+
+	t.Run("OnboardToken_ExpiredCannotBeRevived", func(t *testing.T) {
+		s := newStore()
+		ttl, ok := s.(tokenTTLConfigurable)
+		if !ok {
+			t.Skip("store does not support SetTokenTTL")
+		}
+
+		ctx := context.Background()
+		if err := s.CreateUser(ctx, &User{Username: "ttlrevive"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetOnboardToken(ctx, "ttlrevive", "tok-revive"); err != nil {
+			t.Fatal(err)
+		}
+		ttl.SetTokenTTL(time.Nanosecond)
+		time.Sleep(2 * time.Millisecond)
+		if _, err := s.ConsumeOnboardToken(ctx, "tok-revive"); !errors.Is(err, ErrTokenExpired) {
+			t.Fatalf("expected ErrTokenExpired, got %v", err)
+		}
+		// Relaxing TTL afterwards does not resurrect the expired window:
+		// time.Since(issuedAt) keeps growing, but the already-issued token
+		// remains expired for the duration of its issuance — it must be
+		// re-issued via SetOnboardToken to become valid again.
+		// Verify by re-issuing with a long TTL.
+		ttl.SetTokenTTL(time.Hour)
+		if err := s.SetOnboardToken(ctx, "ttlrevive", "tok-revive"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ConsumeOnboardToken(ctx, "tok-revive"); err != nil {
+			t.Fatalf("expected re-issued token to consume, got %v", err)
 		}
 	})
 }

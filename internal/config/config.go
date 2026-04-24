@@ -8,7 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
+
+// DefaultOnboardingTokenTTL is the default lifetime for newly issued
+// onboarding tokens when PROXY_ONBOARDING_TOKEN_TTL is unset. Leaked
+// tokens in wikis, CI logs, or chat stop being usable after this window.
+const DefaultOnboardingTokenTTL = 24 * time.Hour
 
 // Config holds all proxy configuration values.
 type Config struct {
@@ -34,6 +40,12 @@ type Config struct {
 	ExternalURL     string `json:"external_url"`
 	InternalListen  string `json:"internal_listen"`
 	ProtectedStack  string `json:"protected_stack"`
+
+	// OnboardingTokenTTL is the expiry window for newly issued onboarding
+	// tokens. Zero is interpreted as DefaultOnboardingTokenTTL after Load.
+	// Must be strictly positive after defaults are applied; Load returns
+	// an error on non-positive values.
+	OnboardingTokenTTL time.Duration `json:"onboarding_token_ttl"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -88,11 +100,28 @@ func Load(path string) (Config, error) {
 		}
 	}
 
+	if v := os.Getenv("PROXY_ONBOARDING_TOKEN_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("parse PROXY_ONBOARDING_TOKEN_TTL %q: %w", v, err)
+		}
+		if d <= 0 {
+			return cfg, fmt.Errorf("PROXY_ONBOARDING_TOKEN_TTL must be a positive duration, got %q", v)
+		}
+		cfg.OnboardingTokenTTL = d
+	}
+
 	if cfg.Store == "" {
 		cfg.Store = "sqlite"
 	}
 	if cfg.DatabasePath == "" {
 		cfg.DatabasePath = "proxy.db"
+	}
+	if cfg.OnboardingTokenTTL == 0 {
+		cfg.OnboardingTokenTTL = DefaultOnboardingTokenTTL
+	}
+	if cfg.OnboardingTokenTTL < 0 {
+		return cfg, fmt.Errorf("onboarding_token_ttl must be a positive duration, got %s", cfg.OnboardingTokenTTL)
 	}
 
 	return cfg, nil

@@ -62,8 +62,12 @@ When running inside a Docker Swarm stack, the proxy auto-detects its own stack n
 | Read (GET) — any resource | allowed | allowed | allowed |
 | Create (POST .../create) — protected stack | allowed | blocked (403) | blocked (403) |
 | Create (POST .../create) — other stack | allowed | allowed | allowed |
+| Create service — `TaskTemplate.Networks` attaches to protected overlay | allowed | blocked (403) | blocked (403) |
 | Update (POST .../update) — protected stack | allowed | allowed | blocked (403) |
 | Update (POST .../update) — other stack | allowed | allowed | allowed |
+| Update service — attaches a non-protected service to the protected overlay | allowed | blocked (403) | blocked (403) |
+| Network connect/disconnect (POST /networks/{id}/{connect,disconnect}) — protected overlay | allowed | blocked (403) | blocked (403) |
+| Network connect/disconnect — other network | allowed | allowed | allowed |
 | Delete (DELETE .../{id}) — protected stack | allowed | blocked (403) | blocked (403) |
 | Delete (DELETE .../{id}) — other stack | allowed | allowed | allowed |
 | Exec/attach — protected stack container | allowed | allowed | blocked (403) |
@@ -76,8 +80,9 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 
 - **Create blocked for all external users on protected stack**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
 - **Update allowed for admins on protected stack**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
+- **Overlay-membership mutations blocked for every external role — including admin**: `TaskTemplate.Networks` attaches to the protected overlay on `create`/`update`, and `POST /networks/{id}/{connect,disconnect}` against the protected overlay, all return `403` regardless of role. An admin-cert compromise therefore cannot bootstrap a pivot onto `agent-net`. The only legitimate paths to mutate overlay membership are the host Docker socket on a manager node or the internal loopback listener (`PROXY_INTERNAL_LISTEN`). In-place updates of protected-stack services whose spec re-affirms the existing overlay attachment continue to work (pivot-only T1: the check fires only when the target service is not itself on the protected stack).
 - **Delete blocked for all external users on protected stack**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
-- **Exec/attach admin-only for protected stack**: shell access to infrastructure containers enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Regular users may exec into their own service containers freely.
+- **Exec/attach admin-only for protected stack**: shell access to infrastructure containers enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Regular users may exec into their own service containers freely. Admin `exec`/`attach` into an already-overlay-resident container is unaffected by the overlay-membership block above — the guard scope is membership, not traffic.
 - **Swarm leave blocked for all external users**: destructive — tears down the entire cluster. Only via internal listener.
 
 ## Architecture
@@ -213,8 +218,8 @@ Tracked issues from architecture audit:
 - **#59**: ~~Exec guard silently disabled without mTLS~~ — fixed: always applied on external listener (fail-closed)
 - **#60**: ~~`ResourceGuard` fails open on back-query errors (including delete operations)~~ — fixed: deletes now fail closed (503) on back-query errors
 - **#62**: No certificate rotation mechanism (client certs expire after 1 year)
-- **#63**: No inter-service authentication — accepted risk: overlay network isolation (`internal: true`, `encrypted: "true"`) is sufficient; see `docs/security.md` § "Overlay network trust"
-- **#64**: Admin token not persisted across redeployments
+- **#63**: No inter-service authentication — accepted risk: overlay network isolation (`internal: true`, `encrypted: "true"`) is sufficient; see `docs/security.md` § "Overlay network trust". As of 2026-04-23 the T1/T2 overlay-pivot vectors (see `swarmcli-agent/docs/threat-model.md`) are closed by `ResourceGuard` for every external role, including admin. An admin-cert compromise no longer yields a pivot onto `agent-net` — legitimate overlay-membership mutations must go through the host Docker socket or the internal listener. The T1 body-inspect on service update uses pivot-only semantics, so in-place updates of protected-stack services continue to work for admin.
+- **#64**: ~~Admin token not persisted across redeployments~~ — partially fixed: proxy now refuses to start when `PROXY_ADMIN_TOKEN` is empty and the user store contains ≥1 admin. Persistence across redeploys is still operator responsibility.
 - **#75**: Dockerfile runs as root — accepted risk: proxy requires Docker socket access, which is root-equivalent. Non-root would need root-start entrypoint for negligible benefit. Same reasoning as #63.
 
 ## Dependencies

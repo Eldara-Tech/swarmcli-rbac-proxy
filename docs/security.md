@@ -71,6 +71,7 @@ Security relies on Docker overlay network isolation:
 - The `swarmcli-agent-net` overlay is configured with `internal: true` (no external access) and `encrypted: "true"` (IPSec encryption of overlay traffic).
 - Only services attached to this overlay can communicate with each other.
 - A compromised container on the overlay network can directly access the agent-manager or agent, gaining arbitrary exec access to all containers on the cluster.
+- Overlay-membership mutations through the external proxy listener are blocked for **every role, including admin** — `POST /services/create` with `TaskTemplate.Networks` targeting the protected overlay, `POST /services/{id}/update` pulling a non-protected service onto it, and `POST /networks/{id}/{connect,disconnect}` against the protected overlay all return `403`. An admin-cert compromise therefore cannot bootstrap a pivot onto `swarmcli-agent-net`. Legitimate sysadmin overlay work (attaching troubleshooting sidecars, joining containers to `agent-net` for diagnostics) must happen via the host Docker socket on a manager node or via the internal loopback listener (`PROXY_INTERNAL_LISTEN`). Admin `docker exec` / `attach` into containers that are already on the overlay continues to work through the proxy — the guard scope is membership, not traffic.
 
 ### Why inter-service auth is not implemented (accepted risk)
 
@@ -87,6 +88,12 @@ Adding a shared secret or internal mTLS between the three services was evaluated
 **Residual risk**: a vulnerability in one of the three services (or any future service attached to the overlay) gives the attacker lateral access to the others. This is mitigated by: read-only Docker socket mounts, distroless base images (agent, agent-manager), image vulnerability scanning, and restricting who can deploy to the swarm.
 
 **Revisit if**: the overlay starts hosting third-party or multi-tenant workloads, or if Docker adds per-service network policies that make fine-grained isolation practical.
+
+### Stack-qualified agent-manager URL (T5 mitigation)
+
+Because the rbac-proxy resolves `PROXY_AGENT_MANAGER_URL` via Docker overlay DNS, a bare single-label host (e.g. `tcp://agent-manager:8080`) is vulnerable to name-collision MITM: if an attacker ever reaches the overlay and registers a cross-stack service also named `agent-manager`, Docker's round-robin DNS would deliver half of the admin exec traffic to the attacker's endpoint, enabling token/session theft. See `swarmcli-agent/docs/threat-model.md §T5`.
+
+Always set `PROXY_AGENT_MANAGER_URL` to the stack-qualified form, for example `tcp://swarmctl_agent-manager:8080` (where `swarmctl` is the protected stack name). The proxy emits a startup warning when the host portion is an unqualified short name.
 
 ## Operational recommendations
 

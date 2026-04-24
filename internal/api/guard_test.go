@@ -37,6 +37,10 @@ func TestParseDockerPath(t *testing.T) {
 
 		// Networks
 		{"DELETE", "/v1.44/networks/mynet", &dockerRoute{"networks", "mynet", "delete"}},
+		{"POST", "/v1.47/networks/mynet/connect", &dockerRoute{"networks", "mynet", "connect"}},
+		{"POST", "/networks/mynet/connect", &dockerRoute{"networks", "mynet", "connect"}},
+		{"POST", "/v1.47/networks/mynet/disconnect", &dockerRoute{"networks", "mynet", "disconnect"}},
+		{"POST", "/networks/mynet/disconnect", &dockerRoute{"networks", "mynet", "disconnect"}},
 
 		// Volumes
 		{"DELETE", "/v1.44/volumes/myvol", &dockerRoute{"volumes", "myvol", "delete"}},
@@ -59,6 +63,14 @@ func TestParseDockerPath(t *testing.T) {
 		{"GET", "/swarm/leave", nil}, // wrong method
 		{"GET", "/", nil},
 		{"GET", "", nil},
+
+		// connect/disconnect only apply to networks; other resources fall
+		// through to nil (not a protected action).
+		{"POST", "/v1.47/services/mysvc/connect", nil},
+		{"POST", "/v1.47/networks/mynet/connect", &dockerRoute{"networks", "mynet", "connect"}},
+		// wrong method
+		{"GET", "/v1.47/networks/mynet/connect", nil},
+		{"DELETE", "/v1.47/networks/mynet/connect", nil},
 	}
 
 	for _, tt := range tests {
@@ -573,6 +585,353 @@ func TestGuard_CreateSpecLabels(t *testing.T) {
 
 	if w.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+// networkMock returns a handler that responds to /networks/{id} and
+// /services/{id} back-queries. Networks carry their label at top level;
+// the service branch keeps non-protected so update-path tests can isolate
+// the body-inspect check from the service-id check.
+func networkMock(networkStackLabel, serviceStackLabel string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/networks/"):
+			fmt.Fprintf(w, `{"Labels":{"com.docker.stack.namespace":%q}}`, networkStackLabel)
+		case strings.HasPrefix(r.URL.Path, "/services/"):
+			fmt.Fprintf(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":%q}}}`, serviceStackLabel)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// --- T1: service create/update Networks[].Target body inspection ---
+
+const serviceCreateWithProtectedNet = `{
+  "Name": "pivot",
+  "TaskTemplate": {
+    "ContainerSpec": {"Image": "alpine"},
+    "Networks": [{"Target": "proto-net-id"}]
+  }
+}`
+
+func TestGuard_NonAdminServiceCreateWithProtectedNetAttachment(t *testing.T) {
+	sock := startTestSocket(t, networkMock("swarmcli-infra", "user-app"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/create", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestGuard_AdminServiceCreateWithProtectedNetAttachment_Blocked(t *testing.T) {
+	// Admins are also blocked from attaching a service to the protected
+	// overlay via the proxy — overlay mutation requires host Docker.
+	sock := startTestSocket(t, networkMock("swarmcli-infra", "user-app"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/create", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestGuard_NonAdminServiceCreateNonProtectedNetAttachment_Allowed(t *testing.T) {
+	sock := startTestSocket(t, networkMock("user-app", "user-app"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/create", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestGuard_NonAdminServiceUpdateWithProtectedNetAttachment(t *testing.T) {
+	// Service itself is non-protected (so the isProtectedResource check
+	// passes), but the body attaches to the protected overlay.
+	sock := startTestSocket(t, networkMock("swarmcli-infra", "user-app"))
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/user-svc/update", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+	entries, _ := audit.ListAuditEntries(context.Background(), 10)
+	if len(entries) != 1 || entries[0].Detail != "protected stack network attachment (update)" {
+		t.Errorf("expected audit entry with 'protected stack network attachment (update)' detail, got %+v", entries)
+	}
+}
+
+func TestGuard_AdminServiceUpdateInPlaceOnProtectedService_Allowed(t *testing.T) {
+	// Admin updating a protected-stack service whose body re-affirms
+	// agent-net attachment: pivot-only semantics leave this allowed —
+	// the service is already on the overlay, this is an in-place update
+	// (image rotate / scale / secret rotate), not a pivot.
+	sock := startTestSocket(t, networkMock("swarmcli-infra", "swarmcli-infra"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/proto-svc/update", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestGuard_AdminServiceUpdatePivotOntoProtectedNet_Blocked(t *testing.T) {
+	// Admin updating a non-protected service whose body attaches to
+	// agent-net: this IS a pivot and is blocked for admins too.
+	sock := startTestSocket(t, networkMock("swarmcli-infra", "user-app"))
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/user-svc/update", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+	entries, _ := audit.ListAuditEntries(context.Background(), 10)
+	if len(entries) != 1 || entries[0].Detail != "protected stack network attachment (update)" {
+		t.Errorf("expected audit entry with 'protected stack network attachment (update)' detail, got %+v", entries)
+	}
+}
+
+func TestGuard_ServiceCreateBodyStillReadableAfterNetCheck(t *testing.T) {
+	sock := startTestSocket(t, networkMock("user-app", "user-app"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	var innerBody string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		innerBody = string(data)
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/create", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if innerBody != serviceCreateWithProtectedNet {
+		t.Errorf("inner body = %q, want %q", innerBody, serviceCreateWithProtectedNet)
+	}
+}
+
+func TestGuard_ServiceCreateNetAttachmentBackQueryFailure_FailClosed(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	})
+	sock := startTestSocket(t, mock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/services/create", strings.NewReader(serviceCreateWithProtectedNet))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (fail closed)", w.Code, http.StatusServiceUnavailable)
+	}
+	if *called {
+		t.Error("inner handler should not have been called (fail closed)")
+	}
+}
+
+// --- T2: /networks/{id}/connect and /disconnect ---
+
+func TestGuard_NonAdminNetworkConnect_Protected(t *testing.T) {
+	sock := startTestSocket(t, networkMock("swarmcli-infra", ""))
+	audit := store.NewMemoryStore()
+	guard := NewResourceGuard("swarmcli-infra", sock, audit)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/networks/infra-net/connect", strings.NewReader(`{"Container":"ctr-abc"}`))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+	entries, _ := audit.ListAuditEntries(context.Background(), 10)
+	if len(entries) != 1 || entries[0].Detail != "protected stack network connect" {
+		t.Errorf("expected audit entry with 'protected stack network connect' detail, got %+v", entries)
+	}
+}
+
+func TestGuard_NonAdminNetworkDisconnect_Protected(t *testing.T) {
+	sock := startTestSocket(t, networkMock("swarmcli-infra", ""))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/networks/infra-net/disconnect", strings.NewReader(`{"Container":"ctr-abc"}`))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestGuard_AdminNetworkConnect_Blocked(t *testing.T) {
+	// Admins are also blocked from (dis)connecting workloads to the
+	// protected overlay via the proxy.
+	sock := startTestSocket(t, networkMock("swarmcli-infra", ""))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/networks/infra-net/connect", strings.NewReader(`{"Container":"ctr-abc"}`))
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestGuard_AdminNetworkDisconnect_Blocked(t *testing.T) {
+	sock := startTestSocket(t, networkMock("swarmcli-infra", ""))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/networks/infra-net/disconnect", strings.NewReader(`{"Container":"ctr-abc"}`))
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestGuard_NonAdminNetworkConnect_NonProtected_Allowed(t *testing.T) {
+	sock := startTestSocket(t, networkMock("user-app", ""))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/networks/user-net/connect", strings.NewReader(`{"Container":"ctr-abc"}`))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+func TestGuard_NetworkConnect_BackQueryFailure_FailClosed(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	})
+	sock := startTestSocket(t, mock)
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.Wrap(inner)
+
+	r := httptest.NewRequest("POST", "/v1.47/networks/some-net/connect", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d (fail closed)", w.Code, http.StatusServiceUnavailable)
 	}
 	if *called {
 		t.Error("inner handler should not have been called")
