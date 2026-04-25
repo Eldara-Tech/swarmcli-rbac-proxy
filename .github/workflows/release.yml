@@ -47,6 +47,13 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Force goreleaser to use the pushed tag rather than `git describe`,
+          # which is non-deterministic when two tags (e.g. v1.1.0-rc1 and
+          # v1.1.0) point at the same commit. Without this, promoting an RC
+          # to GA at the same commit fails because goreleaser tries to
+          # re-publish the RC. The docker job already does the equivalent
+          # via docker/metadata-action's type=semver parser.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
   docker:
     needs: update_release_draft
