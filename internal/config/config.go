@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -97,6 +98,22 @@ func Load(path string) (Config, error) {
 	for _, ov := range envOverrides {
 		if v := os.Getenv(ov.key); v != "" {
 			*ov.dest(&cfg) = v
+		}
+	}
+
+	// PROXY_ADMIN_TOKEN_FILE delivers the admin token via a file path —
+	// e.g. a Docker Swarm secret mounted at /run/secrets/admin-token —
+	// so callers don't have to interpolate the plaintext into stack YAML
+	// where it would be visible to anyone with `docker service inspect`.
+	// Trailing whitespace/newlines are trimmed; the env var still wins
+	// when both are set, matching the precedence already used elsewhere.
+	if cfg.AdminToken == "" {
+		if path := os.Getenv("PROXY_ADMIN_TOKEN_FILE"); path != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return cfg, fmt.Errorf("read PROXY_ADMIN_TOKEN_FILE %q: %w", path, err)
+			}
+			cfg.AdminToken = strings.TrimRight(string(data), " \t\r\n")
 		}
 	}
 

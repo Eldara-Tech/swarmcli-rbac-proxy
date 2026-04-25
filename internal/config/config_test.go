@@ -291,10 +291,81 @@ func TestLoad_OnboardingTokenTTL(t *testing.T) {
 	})
 }
 
+func TestLoad_AdminTokenFile(t *testing.T) {
+	t.Run("reads token from file when env unset", func(t *testing.T) {
+		path := writeFile(t, "admin-token", "admin:abcdef0123456789\n")
+		t.Setenv("PROXY_ADMIN_TOKEN_FILE", path)
+
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AdminToken != "admin:abcdef0123456789" {
+			t.Errorf("AdminToken = %q, want %q (trailing newline trimmed)", cfg.AdminToken, "admin:abcdef0123456789")
+		}
+	})
+
+	t.Run("env var takes precedence over file", func(t *testing.T) {
+		path := writeFile(t, "admin-token", "from-file")
+		t.Setenv("PROXY_ADMIN_TOKEN", "from-env")
+		t.Setenv("PROXY_ADMIN_TOKEN_FILE", path)
+
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AdminToken != "from-env" {
+			t.Errorf("AdminToken = %q, want %q", cfg.AdminToken, "from-env")
+		}
+	})
+
+	t.Run("missing file returns error", func(t *testing.T) {
+		t.Setenv("PROXY_ADMIN_TOKEN_FILE", "/nonexistent/admin-token")
+		if _, err := Load(""); err == nil {
+			t.Fatal("expected error for missing PROXY_ADMIN_TOKEN_FILE path")
+		}
+	})
+
+	t.Run("trims only trailing whitespace, preserves leading", func(t *testing.T) {
+		path := writeFile(t, "admin-token", " leading-space-token\r\n")
+		t.Setenv("PROXY_ADMIN_TOKEN_FILE", path)
+
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AdminToken != " leading-space-token" {
+			t.Errorf("AdminToken = %q, want %q (only trailing trimmed)", cfg.AdminToken, " leading-space-token")
+		}
+	})
+
+	t.Run("empty file leaves token empty", func(t *testing.T) {
+		path := writeFile(t, "admin-token", "")
+		t.Setenv("PROXY_ADMIN_TOKEN_FILE", path)
+
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AdminToken != "" {
+			t.Errorf("AdminToken = %q, want empty for empty file", cfg.AdminToken)
+		}
+	})
+}
+
 func writeJSON(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func writeFile(t *testing.T, name, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return p
