@@ -1518,3 +1518,132 @@ func TestGuard_NonProtectedDelete_NoAudit(t *testing.T) {
 		t.Errorf("expected 0 audit entries for non-protected delete, got %d", len(entries))
 	}
 }
+
+// --- /v1/forward (port-forward) gate tests ---
+
+func TestIsAgentControlPath(t *testing.T) {
+	tests := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		{"GET", "/v1/forward", true},
+		{"GET", "/v1/forward/", true},
+		{"GET", "/v1/forward/extra", true},
+		{"GET", "/v1/exec", true},
+		{"POST", "/v1.44/containers/abc/exec", true},
+		{"GET", "/v1/logs", false},
+		{"GET", "/v1/forwarding", false}, // not a prefix-only match
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			if got := isAgentControlPath(tt.method, tt.path); got != tt.want {
+				t.Errorf("isAgentControlPath(%q, %q) = %v, want %v", tt.method, tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// Forward to a protected-stack task is denied for every external role —
+// admin too. This is stricter than exec, which permits admin.
+func TestExecGuard_Forward_ProtectedStack_Admin_Blocked(t *testing.T) {
+	sock := startTestSocket(t, containerMock("swarmcli-infra"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/forward?task_id=task-xyz&container_port=80", nil)
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestExecGuard_Forward_ProtectedStack_NonAdmin_Blocked(t *testing.T) {
+	sock := startTestSocket(t, containerMock("swarmcli-infra"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/forward?task_id=task-xyz&container_port=80", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+	if *called {
+		t.Error("inner handler should not have been called")
+	}
+}
+
+func TestExecGuard_Forward_NonProtectedStack_UserAllowed(t *testing.T) {
+	sock := startTestSocket(t, containerMock("user-app"))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/forward?task_id=task-xyz&container_port=80", nil)
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("inner handler should have been called")
+	}
+}
+
+// dest_addr is rejected at the proxy edge with 400 — never honoured upstream.
+func TestExecGuard_Forward_DestAddr_Rejected(t *testing.T) {
+	guard := NewResourceGuard("swarmcli-infra", "", nil)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/forward?task_id=task-xyz&container_port=80&dest_addr=10.0.0.5", nil)
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+	if *called {
+		t.Error("inner handler should not have been called when dest_addr present")
+	}
+}
+
+func TestExecGuard_Forward_BackQueryFailure_FailClosed(t *testing.T) {
+	sock := startTestSocket(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	guard := NewResourceGuard("swarmcli-infra", sock, nil)
+	inner, called := passHandler()
+	handler := guard.ExecGuard(inner)
+
+	r := httptest.NewRequest("GET", "/v1/forward?task_id=task-xyz&container_port=80", nil)
+	r = withUser(r, &store.User{Role: "admin"})
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	if *called {
+		t.Error("inner handler should not have been called on back-query failure")
+	}
+}
