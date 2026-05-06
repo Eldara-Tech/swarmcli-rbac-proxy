@@ -136,6 +136,16 @@ Response (`410 Gone`):
 
 When `PROXY_AGENT_MANAGER_URL` is set, all `/v1/*` requests are forwarded to the configured backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon) and is not intended for standalone use. Both HTTP and WebSocket upgrade (hijack) connections are supported. See [configuration.md](configuration.md#agent-manager-forwarding) for details.
 
+The recognised agent-manager verbs:
+
+| Path           | Method | Purpose                                                              | Guarded by                                                                                                  |
+|----------------|--------|----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `/v1/exec`     | GET    | WebSocket exec into a Swarm task (`?task_id=&cmd=`).                 | `ExecGuard`: protected-stack containers require `admin` role; non-protected allowed for all authenticated. |
+| `/v1/logs`     | GET    | WebSocket service log stream (`?task_id=&follow=&tail=`).            | None (read-only).                                                                                           |
+| `/v1/forward`  | GET    | WebSocket raw-TCP relay (`?task_id=&container_port=`).               | `ExecGuard`: forward to protected-stack tasks is **denied for every external role, including admin**. `dest_addr` query parameter is **rejected with HTTP 400** at the proxy edge (SSRF mitigation). |
+
+Audit denials use `AuditGuardBlocked` with a discriminator of `exec:<path>` or `forward:<path>`.
+
 ## Docker proxy
 
 All other paths are forwarded to the Docker daemon:
