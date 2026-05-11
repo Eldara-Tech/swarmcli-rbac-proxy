@@ -63,6 +63,20 @@ The `RequireAdminForExec` middleware blocks non-admin users from exec/attach end
 - **Fail-closed without mTLS**: when `PROXY_TLS_CLIENT_CA` is not set, the guard blocks all exec/attach on the external listener because no user can prove admin status. Use the internal listener (`PROXY_INTERNAL_LISTEN`) for exec access without mTLS. Bootstrap always configures mTLS.
 - **Identity is cert-based**: user identity comes from the client certificate CN, not from any in-app user selection. To test exec restrictions with a non-admin user, that user must have their own client certificate and Docker context (obtained via the onboarding flow).
 
+## Port-forward guard
+
+The same `ExecGuard` middleware also gates `/v1/forward` (raw-TCP port-forward via the agent-manager). The path is recognised by `isAgentControlPath`, which is a sibling of `isExecPath` covering both verbs.
+
+The forward policy is **stricter than exec**:
+
+- **Forward to a task on the protected stack is denied for every external role — including admin.** Symmetric to the existing T2 connect/disconnect block: an admin-cert compromise must not yield an exfil channel through this very proxy. Legitimate admin-driven forwarding into infrastructure containers must happen via the host Docker socket or the internal listener.
+- **Forward to any non-protected task is allowed for all authenticated users** (same policy as exec).
+- **`dest_addr` query parameter is rejected at the proxy edge with HTTP 400.** The agent computes the forward destination from `container_id` itself; allowing a client-supplied IP would give a confused-deputy SSRF on the overlay. Defence-in-depth: `agent-manager` and `agent` both reject `dest_addr` too.
+
+Audit denials use `AuditGuardBlocked` with a `forward:<path>` discriminator, matching the existing exec convention.
+
+A per-user open-rate cap (default 16, hard 64; returning `429 Too Many Requests`) is planned but not yet enforced — tracked as a follow-up to limit port-enumeration via repeated forward opens. Every successful open is already audited.
+
 ## Overlay network trust
 
 When deployed as a Docker Swarm stack, the rbac-proxy forwards `/v1/*` requests to the agent-manager, which in turn connects to per-node agents. **None of these internal hops are authenticated** — there is no shared secret or mTLS between rbac-proxy, agent-manager, and agent.

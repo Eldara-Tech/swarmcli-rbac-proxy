@@ -47,9 +47,13 @@ Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIEN
 
 ## Agent-manager Forwarding
 
-When `PROXY_AGENT_MANAGER_URL` (env) or `agent_manager_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-manager:9090`). This covers `/v1/exec`, `/v1/logs`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
+When `PROXY_AGENT_MANAGER_URL` (env) or `agent_manager_url` (JSON config) is set, all `/v1/*` requests are forwarded to the specified backend (e.g. `tcp://agent-manager:9090`). This covers `/v1/exec`, `/v1/logs`, `/v1/forward`, and other agent endpoints. Both normal HTTP and WebSocket upgrade (hijack) connections are supported via the same `newProxy` handler used for the Docker backend.
 
-The `/v1/exec` endpoint on the external listener is stack-aware: exec/attach targeting a container in the protected stack requires admin role; exec/attach targeting any other stack is allowed for all authenticated users. The internal listener (wired with `noExecGuard`) bypasses this check entirely.
+The `/v1/exec` and `/v1/forward` endpoints on the external listener are both stack-aware via `isAgentControlPath` in `internal/api/guard.go`:
+- **Exec**: targeting a container in the protected stack requires admin role; non-protected is allowed for all authenticated users.
+- **Forward**: targeting a task in the protected stack is denied for **every external role, including admin** — admin-cert compromise must not yield an exfil channel. Non-protected forwarding is allowed for all authenticated users. The `dest_addr` query parameter is rejected at the proxy edge with HTTP 400 (SSRF mitigation).
+
+The internal listener (wired with `noExecGuard`) bypasses both checks entirely.
 
 ## Stack Resource Protection
 
@@ -72,6 +76,9 @@ When running inside a Docker Swarm stack, the proxy auto-detects its own stack n
 | Delete (DELETE .../{id}) — other stack | allowed | allowed | allowed |
 | Exec/attach — protected stack container | allowed | allowed | blocked (403) |
 | Exec/attach — non-protected container | allowed | allowed | allowed |
+| Port-forward (`GET /v1/forward`) — protected stack task | allowed | blocked (403) | blocked (403) |
+| Port-forward (`GET /v1/forward`) — non-protected task | allowed | allowed | allowed |
+| Port-forward with `dest_addr` query param | allowed | blocked (400) | blocked (400) |
 | Swarm leave (POST /swarm/leave) | allowed | blocked (403) | blocked (403) |
 
 If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
@@ -83,6 +90,8 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 - **Overlay-membership mutations blocked for every external role — including admin**: `TaskTemplate.Networks` attaches to the protected overlay on `create`/`update`, and `POST /networks/{id}/{connect,disconnect}` against the protected overlay, all return `403` regardless of role. An admin-cert compromise therefore cannot bootstrap a pivot onto `agent-net`. The only legitimate paths to mutate overlay membership are the host Docker socket on a manager node or the internal loopback listener (`PROXY_INTERNAL_LISTEN`). In-place updates of protected-stack services whose spec re-affirms the existing overlay attachment continue to work (pivot-only T1: the check fires only when the target service is not itself on the protected stack).
 - **Delete blocked for all external users on protected stack**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
 - **Exec/attach admin-only for protected stack**: shell access to infrastructure containers enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Regular users may exec into their own service containers freely. Admin `exec`/`attach` into an already-overlay-resident container is unaffected by the overlay-membership block above — the guard scope is membership, not traffic.
+- **Port-forward to protected stack blocked for every role — including admin**: raw-TCP relay through the proxy to an infrastructure container is an exfil channel that survives the per-request authorization model (a forwarded socket can be reused indefinitely). Symmetric to the T2 connect/disconnect block. Legitimate admin port-forwarding into infrastructure must use the host Docker socket or the internal listener.
+- **Port-forward `dest_addr` query rejected (400)**: the agent computes the destination from `container_id` itself; honouring a client-supplied IP would defeat the protected-stack `task_id` check. SSRF mitigation. Both `agent-manager` and `agent` reject `dest_addr` defensively.
 - **Swarm leave blocked for all external users**: destructive — tears down the entire cluster. Only via internal listener.
 
 ## Architecture

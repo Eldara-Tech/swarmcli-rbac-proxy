@@ -113,7 +113,12 @@ func isAdmin(r *http.Request) bool {
 // requests targeting containers that belong to the protected stack. Exec on
 // containers in any other stack is allowed for all authenticated users.
 //
-// If stackName is empty the guard is a no-op (exec unrestricted).
+// The same middleware also gates /v1/forward (port-forward). Forward to a
+// protected-stack target is denied for every external role — including
+// admin — because forward through this very proxy is an exfil channel for
+// an admin-cert compromise. Symmetric to the T2 connect/disconnect block.
+//
+// If stackName is empty the guard is a no-op (exec/forward unrestricted).
 // The internal listener (no user context) always bypasses this check.
 // A back-query error (Docker daemon unreachable) causes fail-closed (503).
 func (g *ResourceGuard) ExecGuard(next http.Handler) http.Handler {
@@ -121,8 +126,17 @@ func (g *ResourceGuard) ExecGuard(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isExecPath(r.Method, r.URL.Path) {
+		if !isAgentControlPath(r.Method, r.URL.Path) {
 			next.ServeHTTP(w, r)
+			return
+		}
+		// SSRF guard: dest_addr must never be honoured. Reject before any
+		// upstream sees it. Belt-and-braces: agent-manager and agent both
+		// reject too.
+		isForward := isForwardPath(r.URL.Path)
+		if isForward && r.URL.Query().Has("dest_addr") {
+			recordAudit(g.audit, r, store.AuditGuardBlocked, "forward:"+r.URL.Path, "denied", "dest_addr not permitted")
+			writeError(w, http.StatusBadRequest, "dest_addr not permitted")
 			return
 		}
 		// No isInternalListener bypass here: the internal listener is wired
@@ -131,17 +145,45 @@ func (g *ResourceGuard) ExecGuard(next http.Handler) http.Handler {
 		// external-without-mTLS — keep fail-closed for protected containers.
 		protected, err := g.isProtectedExecTarget(r.Context(), r.URL.Path, r.URL.Query())
 		if err != nil {
-			l().Warnw("guard: back-query failed, blocking exec", "error", err)
-			writeError(w, http.StatusServiceUnavailable, "cannot verify exec target ownership")
+			verb := "exec"
+			if isForward {
+				verb = "forward"
+			}
+			l().Warnw("guard: back-query failed, blocking "+verb, "error", err)
+			writeError(w, http.StatusServiceUnavailable, "cannot verify "+verb+" target ownership")
 			return
 		}
-		if protected && !isAdmin(r) {
-			recordAudit(g.audit, r, store.AuditGuardBlocked, "exec:"+r.URL.Path, "denied", "protected stack exec")
-			writeError(w, http.StatusForbidden, "exec on protected stack requires admin role")
-			return
+		if protected {
+			// Forward to protected stack: denied for every role (admin too).
+			// Exec to protected stack: admin allowed; non-admin denied.
+			if isForward {
+				recordAudit(g.audit, r, store.AuditGuardBlocked, "forward:"+r.URL.Path, "denied", "protected stack forward")
+				writeError(w, http.StatusForbidden, "forward on protected stack is not permitted")
+				return
+			}
+			if !isAdmin(r) {
+				recordAudit(g.audit, r, store.AuditGuardBlocked, "exec:"+r.URL.Path, "denied", "protected stack exec")
+				writeError(w, http.StatusForbidden, "exec on protected stack requires admin role")
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isAgentControlPath returns true if the request targets a control-plane
+// endpoint that ExecGuard must inspect: exec/attach (existing) or
+// /v1/forward (port-forward).
+func isAgentControlPath(method, path string) bool {
+	if isForwardPath(path) {
+		return true
+	}
+	return isExecPath(method, path)
+}
+
+// isForwardPath returns true for the agent-manager port-forward endpoint.
+func isForwardPath(path string) bool {
+	return path == "/v1/forward" || strings.HasPrefix(path, "/v1/forward/")
 }
 
 // isExecPath returns true if the request targets an exec/attach endpoint,
@@ -463,15 +505,18 @@ func (g *ResourceGuard) bodyHasProtectedNetworkAttachment(ctx context.Context, d
 	return false, nil
 }
 
-// isProtectedExecTarget resolves the exec target from the request path and
-// query to determine whether it belongs to the protected stack.
+// isProtectedExecTarget resolves the exec/forward target from the request
+// path and query to determine whether it belongs to the protected stack.
 // Returns (false, nil) when the target cannot be identified (allow through).
 func (g *ResourceGuard) isProtectedExecTarget(ctx context.Context, path string, query url.Values) (bool, error) {
 	// Agent exec: /v1/exec?task_id=<swarm-task-id>
-	if path == "/v1/exec" || strings.HasPrefix(path, "/v1/exec/") {
+	// Agent forward: /v1/forward?task_id=<swarm-task-id>&container_port=<port>
+	// Both resolve through the same task-id → service → stack chain.
+	if path == "/v1/exec" || strings.HasPrefix(path, "/v1/exec/") ||
+		path == "/v1/forward" || strings.HasPrefix(path, "/v1/forward/") {
 		taskID := query.Get("task_id")
 		if taskID == "" {
-			return false, nil // no target to check; agent will reject the request anyway
+			return false, nil // no target to check; upstream will reject the request anyway
 		}
 		return g.isProtectedTask(ctx, taskID)
 	}
