@@ -542,6 +542,7 @@ func testAuditStoreContract(t *testing.T, newStore func() AuditStore) {
 		all := []AuditAction{
 			AuditUserCreated, AuditUserDeleted, AuditCertIssued,
 			AuditOnboardCompleted, AuditGuardBlocked, AuditTokenRegenerated,
+			AuditBackupExported, AuditBackupRestored,
 		}
 		for _, a := range all {
 			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "test", Action: a, Resource: "x", Status: "success"}); err != nil {
@@ -650,6 +651,205 @@ func testAuditStoreContract(t *testing.T, newStore func() AuditStore) {
 		}
 		if len(entries) != 5 {
 			t.Fatalf("got %d entries, want 5", len(entries))
+		}
+	})
+}
+
+func eqTimePtr(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+func equalUser(a, b User) bool {
+	return a.ID == b.ID && a.Username == b.Username && a.Role == b.Role &&
+		a.Enabled == b.Enabled && a.CreatedAt.Equal(b.CreatedAt) &&
+		a.UpdatedAt.Equal(b.UpdatedAt) && a.OnboardToken == b.OnboardToken &&
+		eqTimePtr(a.TokenIssuedAt, b.TokenIssuedAt) &&
+		eqTimePtr(a.TokenConsumedAt, b.TokenConsumedAt)
+}
+
+// testBackupStoreContract exercises the full BackupStore contract. All three
+// store implementations must pass these tests. The fixtures use timestamps
+// truncated to microseconds so the round-trip is exact on every backend
+// (SQLite keeps nanoseconds, PostgreSQL timestamptz keeps microseconds).
+func testBackupStoreContract(t *testing.T, newStore func() BackupStore) {
+	t.Helper()
+
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	issued := base.Add(time.Minute)
+	consumed := base.Add(2 * time.Minute)
+	fixtureUsers := func() []User {
+		return []User{
+			{ID: "11111111-1111-4111-8111-111111111111", Username: "alice", Role: "user",
+				Enabled: true, CreatedAt: base, UpdatedAt: base,
+				OnboardToken: "tok-alice", TokenIssuedAt: &issued},
+			{ID: "22222222-2222-4222-8222-222222222222", Username: "bob", Role: "admin",
+				Enabled: false, CreatedAt: base.Add(time.Second), UpdatedAt: consumed,
+				OnboardToken: "tok-bob", TokenIssuedAt: &issued, TokenConsumedAt: &consumed},
+			{ID: "33333333-3333-4333-8333-333333333333", Username: "carol", Role: "user",
+				Enabled: true, CreatedAt: base.Add(2 * time.Second), UpdatedAt: base.Add(2 * time.Second)},
+		}
+	}
+	fixtureAudit := func() []AuditEntry {
+		return []AuditEntry{
+			{ID: "aaaaaaaa-0000-4000-8000-000000000001", Timestamp: base, Actor: "cli",
+				Action: AuditUserCreated, Resource: "user:alice", Status: "success", Detail: "role:user"},
+			{ID: "aaaaaaaa-0000-4000-8000-000000000002", Timestamp: base.Add(time.Second),
+				Actor: "cli", Action: AuditBackupExported, Resource: "backup", Status: "success"},
+		}
+	}
+
+	t.Run("EmptyExport", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+		users, err := s.ExportUsers(ctx)
+		if err != nil {
+			t.Fatalf("ExportUsers: %v", err)
+		}
+		if users == nil || len(users) != 0 {
+			t.Fatalf("want empty non-nil slice, got %#v", users)
+		}
+		entries, err := s.ExportAuditEntries(ctx)
+		if err != nil {
+			t.Fatalf("ExportAuditEntries: %v", err)
+		}
+		if entries == nil || len(entries) != 0 {
+			t.Fatalf("want empty non-nil slice, got %#v", entries)
+		}
+	})
+
+	t.Run("UserRoundTripVerbatim", func(t *testing.T) {
+		ctx := context.Background()
+		src := newStore()
+		if err := src.ImportUsers(ctx, fixtureUsers(), false); err != nil {
+			t.Fatalf("ImportUsers(src): %v", err)
+		}
+		exported, err := src.ExportUsers(ctx)
+		if err != nil {
+			t.Fatalf("ExportUsers(src): %v", err)
+		}
+
+		dst := newStore()
+		if err := dst.ImportUsers(ctx, exported, false); err != nil {
+			t.Fatalf("ImportUsers(dst): %v", err)
+		}
+		got, err := dst.ExportUsers(ctx)
+		if err != nil {
+			t.Fatalf("ExportUsers(dst): %v", err)
+		}
+
+		want := fixtureUsers()
+		if len(got) != len(want) {
+			t.Fatalf("got %d users, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if !equalUser(got[i], want[i]) {
+				t.Errorf("user[%d] mismatch:\n got  %#v\n want %#v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("UserExportOrderedByCreatedAt", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		if err := s.ImportUsers(ctx, fixtureUsers(), false); err != nil {
+			t.Fatalf("ImportUsers: %v", err)
+		}
+		got, err := s.ExportUsers(ctx)
+		if err != nil {
+			t.Fatalf("ExportUsers: %v", err)
+		}
+		for i := 0; i < len(got)-1; i++ {
+			if got[i].CreatedAt.After(got[i+1].CreatedAt) {
+				t.Errorf("users not ordered ascending by created_at at %d", i)
+			}
+		}
+	})
+
+	t.Run("DuplicateUsername", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		if err := s.ImportUsers(ctx, fixtureUsers()[:1], false); err != nil {
+			t.Fatalf("ImportUsers: %v", err)
+		}
+		dup := []User{{ID: "99999999-9999-4999-8999-999999999999", Username: "alice",
+			Role: "user", Enabled: true, CreatedAt: base, UpdatedAt: base}}
+		if err := s.ImportUsers(ctx, dup, false); !errors.Is(err, ErrUsernameExists) {
+			t.Fatalf("want ErrUsernameExists, got %v", err)
+		}
+	})
+
+	t.Run("ImportUsersReplaceClears", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		if err := s.ImportUsers(ctx, fixtureUsers(), false); err != nil {
+			t.Fatalf("ImportUsers(initial): %v", err)
+		}
+		repl := []User{{ID: "44444444-4444-4444-8444-444444444444", Username: "dave",
+			Role: "user", Enabled: true, CreatedAt: base, UpdatedAt: base}}
+		if err := s.ImportUsers(ctx, repl, true); err != nil {
+			t.Fatalf("ImportUsers(replace): %v", err)
+		}
+		got, err := s.ExportUsers(ctx)
+		if err != nil {
+			t.Fatalf("ExportUsers: %v", err)
+		}
+		if len(got) != 1 || got[0].Username != "dave" {
+			t.Fatalf("replace did not clear; got %#v", got)
+		}
+	})
+
+	t.Run("AuditRoundTripVerbatim", func(t *testing.T) {
+		ctx := context.Background()
+		src := newStore()
+		if err := src.ImportAuditEntries(ctx, fixtureAudit(), false); err != nil {
+			t.Fatalf("ImportAuditEntries(src): %v", err)
+		}
+		exported, err := src.ExportAuditEntries(ctx)
+		if err != nil {
+			t.Fatalf("ExportAuditEntries(src): %v", err)
+		}
+		dst := newStore()
+		if err := dst.ImportAuditEntries(ctx, exported, false); err != nil {
+			t.Fatalf("ImportAuditEntries(dst): %v", err)
+		}
+		got, err := dst.ExportAuditEntries(ctx)
+		if err != nil {
+			t.Fatalf("ExportAuditEntries(dst): %v", err)
+		}
+		want := fixtureAudit()
+		if len(got) != len(want) {
+			t.Fatalf("got %d entries, want %d", len(got), len(want))
+		}
+		for i := range want {
+			g, w := got[i], want[i]
+			if g.ID != w.ID || !g.Timestamp.Equal(w.Timestamp) || g.Actor != w.Actor ||
+				g.Action != w.Action || g.Resource != w.Resource || g.Status != w.Status ||
+				g.Detail != w.Detail || g.SourceIP != w.SourceIP {
+				t.Errorf("entry[%d] mismatch:\n got  %#v\n want %#v", i, g, w)
+			}
+		}
+	})
+
+	t.Run("ImportAuditReplaceClears", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		if err := s.ImportAuditEntries(ctx, fixtureAudit(), false); err != nil {
+			t.Fatalf("ImportAuditEntries(initial): %v", err)
+		}
+		repl := []AuditEntry{{ID: "bbbbbbbb-0000-4000-8000-000000000001", Timestamp: base,
+			Actor: "cli", Action: AuditBackupRestored, Resource: "backup", Status: "success"}}
+		if err := s.ImportAuditEntries(ctx, repl, true); err != nil {
+			t.Fatalf("ImportAuditEntries(replace): %v", err)
+		}
+		got, err := s.ExportAuditEntries(ctx)
+		if err != nil {
+			t.Fatalf("ExportAuditEntries: %v", err)
+		}
+		if len(got) != 1 || got[0].Action != AuditBackupRestored {
+			t.Fatalf("replace did not clear; got %#v", got)
 		}
 	})
 }

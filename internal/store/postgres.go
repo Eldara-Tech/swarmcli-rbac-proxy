@@ -501,7 +501,121 @@ func (s *PostgresStore) DeleteBinding(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *PostgresStore) ExportUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, username, role, enabled, created_at, updated_at,
+		        onboard_token, token_issued_at, token_consumed_at
+		 FROM users ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make([]User, 0)
+	for rows.Next() {
+		var u User
+		var token *string
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt,
+			&token, &u.TokenIssuedAt, &u.TokenConsumedAt); err != nil {
+			return nil, err
+		}
+		if token != nil {
+			u.OnboardToken = *token
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
+func (s *PostgresStore) ExportAuditEntries(ctx context.Context) ([]AuditEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, timestamp, actor, action, resource, status, detail, source_ip
+		 FROM audit_log ORDER BY timestamp`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]AuditEntry, 0)
+	for rows.Next() {
+		var e AuditEntry
+		var action string
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Actor, &action, &e.Resource, &e.Status, &e.Detail, &e.SourceIP); err != nil {
+			return nil, err
+		}
+		e.Action = AuditAction(action)
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+func (s *PostgresStore) ImportUsers(ctx context.Context, users []User, replace bool) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if replace {
+		if _, err := tx.Exec(ctx, `DELETE FROM users`); err != nil {
+			return err
+		}
+	}
+	for i := range users {
+		u := &users[i]
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO users (id, username, role, enabled, created_at, updated_at,
+			                    onboard_token, token_issued_at, token_consumed_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			u.ID, u.Username, u.Role, u.Enabled, u.CreatedAt, u.UpdatedAt,
+			pgNullStr(u.OnboardToken), u.TokenIssuedAt, u.TokenConsumedAt,
+		); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrUsernameExists
+			}
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) ImportAuditEntries(ctx context.Context, entries []AuditEntry, replace bool) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if replace {
+		if _, err := tx.Exec(ctx, `DELETE FROM audit_log`); err != nil {
+			return err
+		}
+	}
+	for i := range entries {
+		e := &entries[i]
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO audit_log (id, timestamp, actor, action, resource, status, detail, source_ip)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			e.ID, e.Timestamp, e.Actor, string(e.Action),
+			e.Resource, e.Status, e.Detail, e.SourceIP,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// pgNullStr maps an empty string to a SQL NULL.
+func pgNullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // Ensure interface compliance.
 var _ UserStore = (*PostgresStore)(nil)
 var _ AuditStore = (*PostgresStore)(nil)
 var _ RBACStore = (*PostgresStore)(nil)
+var _ BackupStore = (*PostgresStore)(nil)

@@ -173,7 +173,9 @@ swarm-rbac-proxy/
   stack.yml             — Docker Swarm stack definition
   cmd/
     swcproxy/
-      main.go           — Admin CLI: version, user ls/add/delete/regenerate-token (direct store access)
+      main.go           — Admin CLI: version, user ls/add/delete/regenerate-token, audit ls (direct store access)
+      backup.go         — Admin CLI: backup/restore (logical JSON export/import, optional CA bundle)
+      main_test.go      — CLI unit tests (flag parsing, helpers)
   internal/
     version/
       version.go        — Build-time version vars (Version/Commit/Date), shared by both binaries
@@ -188,11 +190,11 @@ swarm-rbac-proxy/
       logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
-      store.go          — UserStore + AuditStore interfaces, User/AuditEntry types, AuditAction constants, sentinel errors
+      store.go          — UserStore + AuditStore + BackupStore interfaces, User/AuditEntry types, AuditAction constants, sentinel errors
       rbac.go           — RBACStore interface, Role/RoleBinding/PermissionRule types, resource/verb vocabulary, built-in roles, effective-permission resolver, seeding, legacy migration, last-admin lockout helpers
-      memory.go         — in-memory UserStore + AuditStore + RBACStore (dev/testing)
-      sqlite.go         — SQLite UserStore + AuditStore + RBACStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
-      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore (pgx/v5, with migrations; rules stored as JSONB)
+      memory.go         — in-memory UserStore + AuditStore + RBACStore + BackupStore (dev/testing)
+      sqlite.go         — SQLite UserStore + AuditStore + RBACStore + BackupStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
+      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore + BackupStore (pgx/v5, with migrations; rules stored as JSONB)
       contract_test.go  — shared contract tests for all store implementations (user + audit)
       rbac_contract_test.go — shared RBAC contract tests (roles, bindings, resolver, seeding, migration, lockout)
       memory_test.go    — memory store unit tests
@@ -267,14 +269,21 @@ swcproxy role show <name>                 # Show a role's rules
 swcproxy binding ls                       # List role bindings
 swcproxy binding add <user> <role>        # Bind a user to a role
 swcproxy binding rm <id>                  # Remove a role binding (last-admin protected)
+swcproxy backup [-o <file>] [--include-ca] # Logical JSON export of users + audit (optional CA bundle)
+swcproxy restore [-i <file>] [--force] [--ca-out <dir>] # Import a backup verbatim
 swcproxy --help                           # Usage info
 ```
 
 `swcproxy user add` also creates a matching role binding (`--admin` → `admin`, else `operator`) so the legacy role and RBAC binding stay in sync.
 
+Backup/restore is a logical export (portable across sqlite/postgres), not a
+file copy. The client CA lives in Docker secrets, **not** the database — see
+[docs/backup-restore.md](docs/backup-restore.md) for why a DB restore alone
+does not preserve user connections, and the `--include-ca` DR bundle.
+
 ## Audit Log
 
-All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), and the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted` (recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
+All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, and the logical-backup actions `backup.exported`, `backup.restored` (all recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
 
 Each entry records: id, timestamp, actor (username/"cli"/"anonymous"), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
 

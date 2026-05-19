@@ -53,6 +53,10 @@ func TestPostgresStore_RBACContract(t *testing.T) {
 	testRBACStoreContract(t, func() rbacTestStore { return newTestPostgresStore(t) })
 }
 
+func TestPostgresStore_BackupContract(t *testing.T) {
+	testBackupStoreContract(t, func() BackupStore { return newTestPostgresStore(t) })
+}
+
 // TestPostgresStore_NilIssuedAtExpires simulates an in-place upgrade
 // row: non-null onboard_token, NULL token_issued_at. Consume must fail
 // closed with ErrTokenExpired once a positive TTL is configured.

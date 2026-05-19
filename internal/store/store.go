@@ -61,6 +61,9 @@ const (
 	AuditVolumeFileRenamed  AuditAction = "volume.file.renamed"
 	AuditVolumeFileUploaded AuditAction = "volume.file.uploaded"
 	AuditVolumePruned       AuditAction = "volume.pruned"
+	// Logical backup/restore (recorded on success).
+	AuditBackupExported AuditAction = "backup.exported"
+	AuditBackupRestored AuditAction = "backup.restored"
 )
 
 // AuditEntry represents a single audit log entry.
@@ -79,6 +82,19 @@ type AuditEntry struct {
 type AuditStore interface {
 	RecordAudit(ctx context.Context, e *AuditEntry) error
 	ListAuditEntries(ctx context.Context, limit int) ([]AuditEntry, error)
+}
+
+// BackupStore defines the persistence interface for logical backup and
+// restore. Export reads every row (no limit) including the onboarding-token
+// columns that ListUsers omits; Import writes rows verbatim, preserving IDs,
+// timestamps and token state so a restored deployment is indistinguishable
+// from the original. When replace is true the target table is cleared first,
+// atomically within the same transaction as the insert.
+type BackupStore interface {
+	ExportUsers(ctx context.Context) ([]User, error)
+	ExportAuditEntries(ctx context.Context) ([]AuditEntry, error)
+	ImportUsers(ctx context.Context, users []User, replace bool) error
+	ImportAuditEntries(ctx context.Context, entries []AuditEntry, replace bool) error
 }
 
 var (

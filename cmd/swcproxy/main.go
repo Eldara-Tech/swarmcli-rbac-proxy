@@ -52,6 +52,10 @@ func main() {
 			os.Exit(1)
 		}
 		runBindingCommand(os.Args[2], os.Args[3:])
+	case "backup":
+		runBackupCommand(os.Args[2:])
+	case "restore":
+		runRestoreCommand(os.Args[2:])
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -76,6 +80,8 @@ Usage:
   swcproxy binding ls                      List role bindings
   swcproxy binding add <user> <role>       Bind a user to a role
   swcproxy binding rm <id>                 Remove a role binding
+  swcproxy backup [-o <file>] [--include-ca]  Export users + audit as JSON
+  swcproxy restore [-i <file>] [--force]   Import a backup
   swcproxy --help                          Show this help
 `)
 }

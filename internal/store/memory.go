@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -321,6 +322,61 @@ func (s *MemoryStore) DeleteBinding(_ context.Context, id string) error {
 	return nil
 }
 
+func (s *MemoryStore) ExportUsers(_ context.Context) ([]User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]User, 0, len(s.users))
+	for _, u := range s.users {
+		result = append(result, u)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.Before(result[j].CreatedAt)
+	})
+	return result, nil
+}
+
+func (s *MemoryStore) ExportAuditEntries(_ context.Context) ([]AuditEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]AuditEntry, len(s.audit))
+	copy(result, s.audit)
+	return result, nil
+}
+
+func (s *MemoryStore) ImportUsers(_ context.Context, users []User, replace bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if replace {
+		s.users = make(map[string]User)
+	}
+	for i := range users {
+		u := users[i]
+		for _, existing := range s.users {
+			if existing.Username == u.Username {
+				return ErrUsernameExists
+			}
+		}
+		s.users[u.ID] = u
+	}
+	return nil
+}
+
+func (s *MemoryStore) ImportAuditEntries(_ context.Context, entries []AuditEntry, replace bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if replace {
+		s.audit = nil
+	}
+	s.audit = append(s.audit, entries...)
+	return nil
+}
+
 // Ensure interface compliance.
+var _ UserStore = (*MemoryStore)(nil)
 var _ AuditStore = (*MemoryStore)(nil)
 var _ RBACStore = (*MemoryStore)(nil)
+var _ BackupStore = (*MemoryStore)(nil)
