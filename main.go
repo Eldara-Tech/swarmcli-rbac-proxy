@@ -28,6 +28,15 @@ import (
 
 func l() *proxylog.ProxyLogger { return proxylog.L().With("component", "proxy") }
 
+// internalServerName is the SAN the bootstrap-issued internal-server cert
+// carries for the agent-manager. It is fixed and stack-name-independent
+// (the cert is generated without knowing the stack name), so the proxy must
+// verify against this name rather than the stack-qualified dial host such
+// as "<stack>_agent-manager". Must stay in lockstep with
+// swarmcli-be/bootstrap/tls.go internalServerSANs and the agent-manager's
+// own ServerName pin.
+const internalServerName = "swarmcli-agent-manager"
+
 // backend represents a Docker daemon endpoint (Unix socket or TCP).
 type backend struct {
 	network   string      // "unix" or "tcp"
@@ -495,8 +504,11 @@ func main() {
 		// the confidentiality the encrypted overlay used to provide and
 		// additionally authenticates the agent-manager — defence the
 		// IPsec overlay never offered. Required (fail-closed) whenever the
-		// URL is wss://; the ServerName is derived by tls.Dial from the
-		// stack-qualified dial host, which the internal-server cert SANs.
+		// URL is wss://. ServerName is pinned to internalServerName below:
+		// the internal-server cert carries fixed, stack-name-independent
+		// SANs (swarmcli-agent / swarmcli-agent-manager), so verification
+		// must NOT use the stack-qualified dial host (e.g.
+		// "<stack>_agent-manager"), which is not a SAN.
 		tlsUpstream := strings.HasPrefix(cfg.AgentManagerURL, "wss://") ||
 			strings.HasPrefix(cfg.AgentManagerURL, "https://")
 		if tlsUpstream {
@@ -510,6 +522,7 @@ func main() {
 				l().Fatalw("invalid agent-manager TLS config", "error", err)
 			}
 			agentBE.tlsConfig.MinVersion = tls.VersionTLS13
+			agentBE.tlsConfig.ServerName = internalServerName
 		}
 
 		agentManagerProxy = newProxy(agentBE)
