@@ -84,7 +84,10 @@ The proxy persists users, onboarding tokens, and the audit log in one of three b
 | Variable | Default | Description |
 |---|---|---|
 | `PROXY_CONFIG` | _(none)_ | Path to a JSON config file. Values loaded from the file are overridden by any environment variables that are set. |
-| `PROXY_AGENT_MANAGER_URL` | _(none)_ | Backend URL for `/v1/*` agent-manager forwarding (e.g. `tcp://swarmctl_agent-manager:9090`). HTTP and WebSocket upgrade are supported. **Use the stack-qualified form** (`<stack>_agent-manager`) to avoid overlay DNS name-collision MITM; the proxy logs a warning if the host is a bare single-label name. See [Agent-manager forwarding](#agent-manager-forwarding) and `docs/security.md` § "Stack-qualified agent-manager URL". |
+| `PROXY_AGENT_MANAGER_URL` | _(none)_ | Backend URL for `/v1/*` agent-manager forwarding (e.g. `wss://swarmctl_agent-manager:8080`). HTTP and WebSocket upgrade are supported. A `wss://`/`https://` URL enables mutual TLS on this hop (see the three vars below). **Use the stack-qualified form** (`<stack>_agent-manager`) to avoid overlay DNS name-collision MITM; the proxy logs a warning if the host is a bare single-label name. See [Agent-manager forwarding](#agent-manager-forwarding) and `docs/security.md` § "Stack-qualified agent-manager URL". |
+| `PROXY_AGENT_MANAGER_TLS_CERT` | _(none)_ | Client certificate the proxy presents to the agent-manager (mutual TLS). Required when `PROXY_AGENT_MANAGER_URL` is `wss://`. |
+| `PROXY_AGENT_MANAGER_TLS_KEY` | _(none)_ | Private key for `PROXY_AGENT_MANAGER_TLS_CERT`. |
+| `PROXY_AGENT_MANAGER_TLS_CA` | _(none)_ | CA used to verify the agent-manager's server certificate. |
 | `PROXY_PROTECTED_STACK` | _(auto-detected)_ | Name of the Docker Swarm stack containing the rbac-proxy itself — the stack whose resources should be protected from external mutation. Auto-detected from the container label `com.docker.stack.namespace` when the proxy runs as part of a Swarm stack. Set explicitly if auto-detection is not available (e.g. when running outside Swarm) and you still want the guard active. See [Stack resource protection](#stack-resource-protection). |
 | `PROXY_ENV` | `prod` | Logging mode: `dev` (console encoder) or `prod` (JSON encoder). |
 | `PROXY_LOG_LEVEL` | `debug` (dev) / `info` (prod) | Minimum log level: `debug`, `info`, `warn`, `error`. |

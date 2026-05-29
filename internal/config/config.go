@@ -19,28 +19,36 @@ const DefaultOnboardingTokenTTL = 24 * time.Hour
 
 // Config holds all proxy configuration values.
 type Config struct {
-	Listen          string `json:"listen"`
-	DockerURL       string `json:"docker_url"`
-	DockerSocket    string `json:"docker_socket"`
-	TLSCert         string `json:"tls_cert"`
-	TLSKey          string `json:"tls_key"`
-	TLSClientCA     string `json:"tls_client_ca"`
-	TLSClientCAKey  string `json:"tls_client_ca_key"`
-	DockerTLSCA     string `json:"docker_tls_ca"`
-	DockerTLSCert   string `json:"docker_tls_cert"`
-	DockerTLSKey    string `json:"docker_tls_key"`
-	Store           string `json:"store"`
-	DatabasePath    string `json:"database_path"`
-	DatabaseURL     string `json:"database_url"`
-	AdminToken      string `json:"admin_token"`
-	Env             string `json:"env"`
-	LogLevel        string `json:"log_level"`
-	AgentManagerURL string `json:"agent_manager_url"`
-	SeedUsername    string `json:"seed_username"`
-	SeedRole        string `json:"seed_role"`
-	ExternalURL     string `json:"external_url"`
-	InternalListen  string `json:"internal_listen"`
-	ProtectedStack  string `json:"protected_stack"`
+	Listen         string `json:"listen"`
+	DockerURL      string `json:"docker_url"`
+	DockerSocket   string `json:"docker_socket"`
+	TLSCert        string `json:"tls_cert"`
+	TLSKey         string `json:"tls_key"`
+	TLSClientCA    string `json:"tls_client_ca"`
+	TLSClientCAKey string `json:"tls_client_ca_key"`
+	DockerTLSCA    string `json:"docker_tls_ca"`
+	DockerTLSCert  string `json:"docker_tls_cert"`
+	DockerTLSKey   string `json:"docker_tls_key"`
+	// AgentManager*TLS* secure the rbac-proxy → agent-manager hop with
+	// mutual TLS at the application layer. Set together by bootstrap so the
+	// agent-net overlay no longer needs to be an encrypted (IPsec/ESP)
+	// network — the requirement that broke worker-node shells on clusters
+	// that block ESP. Mirror the PROXY_DOCKER_TLS_* backend-TLS pattern.
+	AgentManagerTLSCA   string `json:"agent_manager_tls_ca"`
+	AgentManagerTLSCert string `json:"agent_manager_tls_cert"`
+	AgentManagerTLSKey  string `json:"agent_manager_tls_key"`
+	Store               string `json:"store"`
+	DatabasePath        string `json:"database_path"`
+	DatabaseURL         string `json:"database_url"`
+	AdminToken          string `json:"admin_token"`
+	Env                 string `json:"env"`
+	LogLevel            string `json:"log_level"`
+	AgentManagerURL     string `json:"agent_manager_url"`
+	SeedUsername        string `json:"seed_username"`
+	SeedRole            string `json:"seed_role"`
+	ExternalURL         string `json:"external_url"`
+	InternalListen      string `json:"internal_listen"`
+	ProtectedStack      string `json:"protected_stack"`
 
 	// OnboardingTokenTTL is the expiry window for newly issued onboarding
 	// tokens. Zero is interpreted as DefaultOnboardingTokenTTL after Load.
@@ -71,6 +79,9 @@ var envOverrides = []struct {
 	{"PROXY_ENV", func(c *Config) *string { return &c.Env }},
 	{"PROXY_LOG_LEVEL", func(c *Config) *string { return &c.LogLevel }},
 	{"PROXY_AGENT_MANAGER_URL", func(c *Config) *string { return &c.AgentManagerURL }},
+	{"PROXY_AGENT_MANAGER_TLS_CA", func(c *Config) *string { return &c.AgentManagerTLSCA }},
+	{"PROXY_AGENT_MANAGER_TLS_CERT", func(c *Config) *string { return &c.AgentManagerTLSCert }},
+	{"PROXY_AGENT_MANAGER_TLS_KEY", func(c *Config) *string { return &c.AgentManagerTLSKey }},
 	{"PROXY_SEED_USERNAME", func(c *Config) *string { return &c.SeedUsername }},
 	{"PROXY_SEED_ROLE", func(c *Config) *string { return &c.SeedRole }},
 	{"PROXY_EXTERNAL_URL", func(c *Config) *string { return &c.ExternalURL }},

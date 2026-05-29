@@ -28,6 +28,15 @@ import (
 
 func l() *proxylog.ProxyLogger { return proxylog.L().With("component", "proxy") }
 
+// internalServerName is the SAN the bootstrap-issued internal-server cert
+// carries for the agent-manager. It is fixed and stack-name-independent
+// (the cert is generated without knowing the stack name), so the proxy must
+// verify against this name rather than the stack-qualified dial host such
+// as "<stack>_agent-manager". Must stay in lockstep with
+// swarmcli-be/bootstrap/tls.go internalServerSANs and the agent-manager's
+// own ServerName pin.
+const internalServerName = "swarmcli-agent-manager"
+
 // backend represents a Docker daemon endpoint (Unix socket or TCP).
 type backend struct {
 	network   string      // "unix" or "tcp"
@@ -96,8 +105,13 @@ func parseBackend(raw string) (backend, error) {
 		return backend{network: "unix", address: u.Path}, nil
 	case "tcp":
 		return backend{network: "tcp", address: u.Host}, nil
+	case "wss", "https":
+		// TLS-secured TCP backend (used for the agent-manager hop). The
+		// caller attaches the mutual-TLS client config; here we only
+		// resolve the transport address.
+		return backend{network: "tcp", address: u.Host}, nil
 	default:
-		return backend{}, fmt.Errorf("unsupported scheme %q in %q (expected unix or tcp)", u.Scheme, raw)
+		return backend{}, fmt.Errorf("unsupported scheme %q in %q (expected unix, tcp, wss, or https)", u.Scheme, raw)
 	}
 }
 
@@ -485,8 +499,35 @@ func main() {
 			l().Fatalw("parse agent-manager URL", "error", err)
 		}
 		warnIfUnqualifiedAgentManagerHost(agentBE.address)
+
+		// Mutual TLS on the rbac-proxy → agent-manager hop. This replaces
+		// the confidentiality the encrypted overlay used to provide and
+		// additionally authenticates the agent-manager — defence the
+		// IPsec overlay never offered. Required (fail-closed) whenever the
+		// URL is wss://. ServerName is pinned to internalServerName below:
+		// the internal-server cert carries fixed, stack-name-independent
+		// SANs (swarmcli-agent / swarmcli-agent-manager), so verification
+		// must NOT use the stack-qualified dial host (e.g.
+		// "<stack>_agent-manager"), which is not a SAN.
+		tlsUpstream := strings.HasPrefix(cfg.AgentManagerURL, "wss://") ||
+			strings.HasPrefix(cfg.AgentManagerURL, "https://")
+		if tlsUpstream {
+			if cfg.AgentManagerTLSCert == "" || cfg.AgentManagerTLSKey == "" || cfg.AgentManagerTLSCA == "" {
+				l().Fatalw("agent-manager TLS misconfigured",
+					"error", "wss:// agent-manager URL requires PROXY_AGENT_MANAGER_TLS_CERT, _KEY and _CA")
+			}
+			agentBE.tlsConfig, err = buildBackendTLS(
+				cfg.AgentManagerTLSCA, cfg.AgentManagerTLSCert, cfg.AgentManagerTLSKey)
+			if err != nil {
+				l().Fatalw("invalid agent-manager TLS config", "error", err)
+			}
+			agentBE.tlsConfig.MinVersion = tls.VersionTLS13
+			agentBE.tlsConfig.ServerName = internalServerName
+		}
+
 		agentManagerProxy = newProxy(agentBE)
-		l().Infow("agent-manager forwarding enabled", "url", cfg.AgentManagerURL)
+		l().Infow("agent-manager forwarding enabled",
+			"url", cfg.AgentManagerURL, "tls", tlsUpstream)
 	}
 
 	dockerProxy := guard.Wrap(newProxy(b))
