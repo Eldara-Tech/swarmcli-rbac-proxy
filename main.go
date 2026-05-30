@@ -86,6 +86,27 @@ func buildBackendTLS(caFile, certFile, keyFile string) (*tls.Config, error) {
 	return cfg, nil
 }
 
+// buildBundleTLS constructs a backend tls.Config from a single consolidated PEM
+// file (client cert + key + CA cert) — the `internal-client` Docker secret.
+// The keypair is read with X509KeyPair (the leaf is the first CERTIFICATE
+// block) and the CA pool from the same bytes; the leaf also lands in the pool
+// harmlessly, as it is not a CA.
+func buildBundleTLS(bundleFile string) (*tls.Config, error) {
+	pemBytes, err := os.ReadFile(bundleFile)
+	if err != nil {
+		return nil, fmt.Errorf("read TLS bundle %s: %w", bundleFile, err)
+	}
+	cert, err := tls.X509KeyPair(pemBytes, pemBytes)
+	if err != nil {
+		return nil, fmt.Errorf("load keypair from bundle %s: %w", bundleFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("no CA certificate in bundle %s", bundleFile)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}, RootCAs: pool}, nil
+}
+
 // parseBackend parses a Docker endpoint URL into a backend.
 // Supported forms: "unix:///path", "tcp://host:port", or a bare "/path" (unix).
 func parseBackend(raw string) (backend, error) {
@@ -512,12 +533,18 @@ func main() {
 		tlsUpstream := strings.HasPrefix(cfg.AgentManagerURL, "wss://") ||
 			strings.HasPrefix(cfg.AgentManagerURL, "https://")
 		if tlsUpstream {
-			if cfg.AgentManagerTLSCert == "" || cfg.AgentManagerTLSKey == "" || cfg.AgentManagerTLSCA == "" {
+			// PROXY_AGENT_MANAGER_TLS_BUNDLE (one PEM: cert+key+CA) supersedes
+			// the CA/Cert/Key trio; the trio is the fallback for older bootstraps.
+			switch {
+			case cfg.AgentManagerTLSBundle != "":
+				agentBE.tlsConfig, err = buildBundleTLS(cfg.AgentManagerTLSBundle)
+			case cfg.AgentManagerTLSCert != "" && cfg.AgentManagerTLSKey != "" && cfg.AgentManagerTLSCA != "":
+				agentBE.tlsConfig, err = buildBackendTLS(
+					cfg.AgentManagerTLSCA, cfg.AgentManagerTLSCert, cfg.AgentManagerTLSKey)
+			default:
 				l().Fatalw("agent-manager TLS misconfigured",
-					"error", "wss:// agent-manager URL requires PROXY_AGENT_MANAGER_TLS_CERT, _KEY and _CA")
+					"error", "wss:// agent-manager URL requires PROXY_AGENT_MANAGER_TLS_BUNDLE (or _TLS_CERT, _KEY and _CA together)")
 			}
-			agentBE.tlsConfig, err = buildBackendTLS(
-				cfg.AgentManagerTLSCA, cfg.AgentManagerTLSCert, cfg.AgentManagerTLSKey)
 			if err != nil {
 				l().Fatalw("invalid agent-manager TLS config", "error", err)
 			}

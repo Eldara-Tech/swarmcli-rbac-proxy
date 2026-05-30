@@ -37,18 +37,23 @@ type Config struct {
 	AgentManagerTLSCA   string `json:"agent_manager_tls_ca"`
 	AgentManagerTLSCert string `json:"agent_manager_tls_cert"`
 	AgentManagerTLSKey  string `json:"agent_manager_tls_key"`
-	Store               string `json:"store"`
-	DatabasePath        string `json:"database_path"`
-	DatabaseURL         string `json:"database_url"`
-	AdminToken          string `json:"admin_token"`
-	Env                 string `json:"env"`
-	LogLevel            string `json:"log_level"`
-	AgentManagerURL     string `json:"agent_manager_url"`
-	SeedUsername        string `json:"seed_username"`
-	SeedRole            string `json:"seed_role"`
-	ExternalURL         string `json:"external_url"`
-	InternalListen      string `json:"internal_listen"`
-	ProtectedStack      string `json:"protected_stack"`
+	// AgentManagerTLSBundle is the consolidated form: one PEM file holding the
+	// internal-client cert, its key, and the internal CA cert (the
+	// `internal-client` Docker secret). When set it supersedes the CA/Cert/Key
+	// trio above; the trio remains the fallback for older bootstraps.
+	AgentManagerTLSBundle string `json:"agent_manager_tls_bundle"`
+	Store                 string `json:"store"`
+	DatabasePath          string `json:"database_path"`
+	DatabaseURL           string `json:"database_url"`
+	AdminToken            string `json:"admin_token"`
+	Env                   string `json:"env"`
+	LogLevel              string `json:"log_level"`
+	AgentManagerURL       string `json:"agent_manager_url"`
+	SeedUsername          string `json:"seed_username"`
+	SeedRole              string `json:"seed_role"`
+	ExternalURL           string `json:"external_url"`
+	InternalListen        string `json:"internal_listen"`
+	ProtectedStack        string `json:"protected_stack"`
 
 	// OnboardingTokenTTL is the expiry window for newly issued onboarding
 	// tokens. Zero is interpreted as DefaultOnboardingTokenTTL after Load.
@@ -82,6 +87,7 @@ var envOverrides = []struct {
 	{"PROXY_AGENT_MANAGER_TLS_CA", func(c *Config) *string { return &c.AgentManagerTLSCA }},
 	{"PROXY_AGENT_MANAGER_TLS_CERT", func(c *Config) *string { return &c.AgentManagerTLSCert }},
 	{"PROXY_AGENT_MANAGER_TLS_KEY", func(c *Config) *string { return &c.AgentManagerTLSKey }},
+	{"PROXY_AGENT_MANAGER_TLS_BUNDLE", func(c *Config) *string { return &c.AgentManagerTLSBundle }},
 	{"PROXY_SEED_USERNAME", func(c *Config) *string { return &c.SeedUsername }},
 	{"PROXY_SEED_ROLE", func(c *Config) *string { return &c.SeedRole }},
 	{"PROXY_EXTERNAL_URL", func(c *Config) *string { return &c.ExternalURL }},
