@@ -245,6 +245,17 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	}
 }
 
+func TestLoad_AgentManagerTLSBundle(t *testing.T) {
+	t.Setenv("PROXY_AGENT_MANAGER_TLS_BUNDLE", "/run/secrets/internal-client")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentManagerTLSBundle != "/run/secrets/internal-client" {
+		t.Errorf("AgentManagerTLSBundle = %q", cfg.AgentManagerTLSBundle)
+	}
+}
+
 func TestLoad_OnboardingTokenTTL(t *testing.T) {
 	t.Run("unset uses default", func(t *testing.T) {
 		cfg, err := Load("")
