@@ -139,6 +139,8 @@ swarm-rbac-proxy/
       mtls_test.go      — mTLS middleware unit tests
       users.go          — UserHandler: POST/GET /api/v1/users, DELETE /api/v1/users/{username}
       users_test.go     — handler tests using MemoryStore
+      me.go             — MeHandler: GET /api/v1/me → caller's own {username, role} from mTLS cert
+      me_test.go        — me handler tests (admin/user/no-user/method)
       onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
       onboard_test.go   — onboard handler tests
       guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation; RequireAdminForExec: admin-only exec/attach
@@ -169,6 +171,7 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 - `GET /api/v1/users` — List all users (200, always returns array)
 - `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
+- `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
 - `/v1/*` — Forwarded to agent-manager (when `PROXY_AGENT_MANAGER_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
 

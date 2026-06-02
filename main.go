@@ -503,6 +503,7 @@ func main() {
 
 	userHandler := api.NewUserHandler(userStore, ca, auditStore)
 	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL, auditStore)
+	meHandler := api.NewMeHandler()
 
 	var proxyAuth func(http.Handler) http.Handler
 	if cfg.TLSClientCA != "" {
@@ -567,6 +568,12 @@ func main() {
 		mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, userHandler))
 		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(cfg.AdminToken, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
+		// Self-identity: cert-authenticated (wrapProxy = RequireClientCert on
+		// the external listener), so the caller's role is resolved from their
+		// mTLS CN. On the internal listener wrapProxy is MarkInternalRequest,
+		// which sets no user, so this returns 401 there — the internal listener
+		// has no per-user identity and is not used for role discovery.
+		mux.Handle("GET /api/v1/me", wrapProxy(meHandler))
 		if agentManagerProxy != nil {
 			mux.Handle("/v1/", wrapProxy(wrapExec(agentManagerProxy)))
 		}
