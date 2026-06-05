@@ -215,6 +215,8 @@ Requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets.
 
 See `RELEASING.md` for local testing and manual release process.
 
+**Versioning.** A `C1-breaking-change` PR merged since the last GA forces a **major** tag (`vX.0.0`); the pushed tag is authoritative (it overrides release-drafter's `$RESOLVED_VERSION`). The published release notes are type-only (no dedicated "Breaking" section); the customer-facing upgrade story for proxy changes that reach BE users is captured in swarmcli-be's `.github/UPGRADE_NOTES.md` when BE bumps its compat pin across an rbac-proxy major.
+
 ## Pre-push Checklist
 
 Always run before pushing:
