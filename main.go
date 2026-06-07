@@ -556,6 +556,21 @@ func main() {
 		agentManagerProxy = newProxy(agentBE)
 		l().Infow("agent-manager forwarding enabled",
 			"url", cfg.AgentManagerURL, "tls", tlsUpstream)
+
+		// Volume-ownership back-query: the guard resolves a volume's stack via
+		// the agent-manager (volumes are node-local; the Docker-socket
+		// back-query can't see them). Same mTLS material and SAN pinning as
+		// the reverse proxy above.
+		bqScheme := "http"
+		bqTransport := &http.Transport{}
+		if tlsUpstream {
+			bqScheme = "https"
+			bqTransport.TLSClientConfig = agentBE.tlsConfig
+		}
+		guard.SetAgentManager(
+			&http.Client{Timeout: 5 * time.Second, Transport: bqTransport},
+			bqScheme+"://"+agentBE.address,
+		)
 	}
 
 	dockerProxy := guard.Wrap(newProxy(b))

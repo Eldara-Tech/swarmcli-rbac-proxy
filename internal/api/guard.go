@@ -126,6 +126,10 @@ func (g *ResourceGuard) ExecGuard(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isVolumePath(r.URL.Path) {
+			g.guardVolume(w, r, next)
+			return
+		}
 		if !isAgentControlPath(r.Method, r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
@@ -217,6 +221,23 @@ type ResourceGuard struct {
 	stackName  string
 	httpClient *http.Client
 	audit      store.AuditStore
+
+	// agentMgrClient / agentMgrBase back-query the agent-manager to resolve a
+	// volume's stack ownership. Volumes are node-local, so the Docker socket
+	// back-query (httpClient) can't see them; these are set via
+	// SetAgentManager when an agent-manager backend is configured.
+	agentMgrClient *http.Client
+	agentMgrBase   string
+}
+
+// SetAgentManager configures the agent-manager back-query used by the volume
+// guard. baseURL is the http(s) origin (e.g. "https://stack_agent-manager:8080").
+func (g *ResourceGuard) SetAgentManager(client *http.Client, baseURL string) {
+	if g == nil {
+		return
+	}
+	g.agentMgrClient = client
+	g.agentMgrBase = strings.TrimRight(baseURL, "/")
 }
 
 // NewResourceGuard creates a ResourceGuard that protects the given stack.
