@@ -50,6 +50,7 @@ const (
 	AuditVolumeDeleted     AuditAction = "volume.deleted"
 	AuditVolumeFileDeleted AuditAction = "volume.file.deleted"
 	AuditVolumeFileRenamed AuditAction = "volume.file.renamed"
+	AuditVolumePruned      AuditAction = "volume.pruned"
 )
 
 // AuditEntry represents a single audit log entry.

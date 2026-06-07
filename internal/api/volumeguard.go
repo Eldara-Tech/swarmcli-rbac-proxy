@@ -35,6 +35,23 @@ func (g *ResourceGuard) guardVolume(w http.ResponseWriter, r *http.Request, next
 		return
 	}
 
+	// Prune is a node-wide bulk delete not tied to a single volume, so the
+	// per-volume stack back-query doesn't apply: gate it on admin outright.
+	if r.URL.Path == "/v1/volumes/prune" {
+		if !isAdmin(r) {
+			l().Warnw("guard: blocked volume prune by non-admin", "path", r.URL.Path)
+			recordAudit(g.audit, r, store.AuditGuardBlocked, "volumes:prune", "denied", "prune requires admin")
+			writeError(w, http.StatusForbidden, "pruning volumes requires admin role")
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		if rec.status >= 200 && rec.status < 300 {
+			recordAudit(g.audit, r, store.AuditVolumePruned, "volumes:prune", "success", "prune unused volumes")
+		}
+		return
+	}
+
 	nodeID := r.URL.Query().Get("node_id")
 	name, err := g.volumeNameForRequest(r)
 	if err != nil {

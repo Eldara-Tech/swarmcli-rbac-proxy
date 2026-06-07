@@ -139,6 +139,40 @@ func TestIntegration_VolumeGuard_NonAdminMutateNonProtected_Allowed(t *testing.T
 	}
 }
 
+func TestIntegration_VolumeGuard_NonAdminPrune_Denied(t *testing.T) {
+	ca := newTestCA(t)
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+	c, addr := volGuardClient(t, ca, caPool, "alice", "user")
+
+	req, _ := http.NewRequest(http.MethodPost, "https://"+addr+"/v1/volumes/prune?node_id=n1", nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (prune is admin-only)", resp.StatusCode)
+	}
+}
+
+func TestIntegration_VolumeGuard_AdminPrune_Allowed(t *testing.T) {
+	ca := newTestCA(t)
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(ca.certPEM)
+	c, addr := volGuardClient(t, ca, caPool, "admin", "admin")
+
+	req, _ := http.NewRequest(http.MethodPost, "https://"+addr+"/v1/volumes/prune?node_id=n1", nil)
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 (forwarded)", resp.StatusCode)
+	}
+}
+
 func TestIntegration_VolumeGuard_NonAdminList_Allowed(t *testing.T) {
 	ca := newTestCA(t)
 	caPool := x509.NewCertPool()

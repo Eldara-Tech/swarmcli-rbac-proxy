@@ -54,7 +54,7 @@ A `wss://` (or `https://`) URL secures this hop with **mutual TLS**: the proxy p
 The `/v1/exec` and `/v1/forward` endpoints on the external listener are both stack-aware via `isAgentControlPath` in `internal/api/guard.go`:
 - **Exec**: targeting a container in the protected stack requires admin role; non-protected is allowed for all authenticated users.
 - **Forward**: targeting a task in the protected stack is denied for **every external role, including admin** — admin-cert compromise must not yield an exfil channel. Non-protected forwarding is allowed for all authenticated users. The `dest_addr` query parameter is rejected at the proxy edge with HTTP 400 (SSRF mitigation).
-- **Volumes** (`/v1/volumes...`, `guardVolume` in `internal/api/volumeguard.go`): reads (GET) are allowed for all authenticated users; mutations (create / delete volume / delete file / rename file) on a volume that belongs to the protected stack require admin, others are allowed for all. The volume's stack is resolved server-side via an agent-manager back-query (`GET /v1/volumes?node_id=`) — volumes are node-local so a client-supplied label can't be trusted and the Docker-socket back-query can't see worker-node volumes. Back-query failure fails closed (503); successful mutations are audited (`volume.*`).
+- **Volumes** (`/v1/volumes...`, `guardVolume` in `internal/api/volumeguard.go`): reads (GET) are allowed for all authenticated users; mutations (create / delete volume / delete file / rename file) on a volume that belongs to the protected stack require admin, others are allowed for all. Prune (`POST /v1/volumes/prune`) is a node-wide bulk delete not tied to one volume, so it is **admin-only outright** (no per-volume back-query). The volume's stack is resolved server-side via an agent-manager back-query (`GET /v1/volumes?node_id=`) — volumes are node-local so a client-supplied label can't be trusted and the Docker-socket back-query can't see worker-node volumes. Back-query failure fails closed (503); successful mutations are audited (`volume.*`).
 
 The internal listener (wired with `noExecGuard`) bypasses these checks entirely.
 
@@ -85,6 +85,7 @@ When running inside a Docker Swarm stack, the proxy auto-detects its own stack n
 | Volume read (`GET /v1/volumes...`) | allowed | allowed | allowed |
 | Volume mutate (create/delete/file delete/rename) — protected-stack volume | allowed | allowed | blocked (403) |
 | Volume mutate — non-protected volume | allowed | allowed | allowed |
+| Volume prune (`POST /v1/volumes/prune`) — bulk, node-wide | allowed | allowed | blocked (403) |
 | Swarm leave (POST /swarm/leave) | allowed | blocked (403) | blocked (403) |
 
 If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
@@ -197,7 +198,7 @@ swcproxy --help                           # Usage info
 
 ## Audit Log
 
-All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op). Auth events (mTLS success/failure) are logged via zap only, not persisted.
+All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op). Auth events (mTLS success/failure) are logged via zap only, not persisted.
 
 Each entry records: id, timestamp, actor (username/"cli"/"anonymous"), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
 
