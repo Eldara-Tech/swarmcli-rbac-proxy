@@ -44,6 +44,13 @@ const (
 	AuditOnboardCompleted AuditAction = "onboard.completed"
 	AuditGuardBlocked     AuditAction = "guard.blocked"
 	AuditTokenRegenerated AuditAction = "token.regenerated"
+	// Volume management mutations (recorded on success; denials use
+	// AuditGuardBlocked like every other guarded operation).
+	AuditVolumeCreated     AuditAction = "volume.created"
+	AuditVolumeDeleted     AuditAction = "volume.deleted"
+	AuditVolumeFileDeleted AuditAction = "volume.file.deleted"
+	AuditVolumeFileRenamed AuditAction = "volume.file.renamed"
+	AuditVolumePruned      AuditAction = "volume.pruned"
 )
 
 // AuditEntry represents a single audit log entry.
