@@ -307,6 +307,12 @@ func computeAdmins(ctx context.Context, us UserStore, rs RBACStore, override *Ro
 	}
 	admins := map[string]bool{}
 	for _, u := range users {
+		// A disabled user cannot authenticate (RequireClientCert rejects them),
+		// so they do not count as a surviving admin for lockout purposes —
+		// otherwise the last *enabled* admin's binding could be removed.
+		if !u.Enabled {
+			continue
+		}
 		bindings, err := rs.ListBindingsForUser(ctx, u.Username)
 		if err != nil {
 			return nil, err

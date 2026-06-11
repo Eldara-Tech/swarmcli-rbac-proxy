@@ -86,9 +86,12 @@ func classifyRequest(method, path string) (rbacRoute, bool) {
 		return rbacRoute{}, false
 	}
 
-	// System handshake endpoints — read-only, granted to every role.
+	// System handshake endpoints — read-only, granted to every role. NB:
+	// /events is deliberately NOT here — it streams cluster-wide resource
+	// lifecycle (incl. secret/config names) and is not part of the handshake,
+	// so it falls through to the admin-only unmapped fallback.
 	switch parts[0] {
-	case "_ping", "version", "info", "events":
+	case "_ping", "version", "info":
 		return rbacRoute{resource: store.ResourceSystem, verb: store.VerbGet}, true
 	}
 
@@ -103,6 +106,8 @@ func classifyRequest(method, path string) (rbacRoute, bool) {
 		return mapTasks(method, parts)
 	case "containers":
 		return mapContainers(method, parts)
+	case "exec":
+		return mapExec(method, parts)
 	}
 	return rbacRoute{}, false
 }
@@ -214,6 +219,25 @@ func mapContainers(method string, parts []string) (rbacRoute, bool) {
 			return rbacRoute{resource: store.ResourceServices, verb: store.VerbList}, true
 		}
 		return rbacRoute{resource: store.ResourceServices, verb: store.VerbGet}, true
+	}
+	return rbacRoute{}, false
+}
+
+// mapExec maps the Docker exec lifecycle that follows POST /containers/{id}/exec:
+// POST /exec/{id}/start (the hijack that actually runs it), POST
+// /exec/{id}/resize, and GET /exec/{id}/json. The whole lifecycle is one
+// capability, so all of it maps to exec:create — otherwise a role granted exec
+// could create an exec instance but not start it.
+func mapExec(method string, parts []string) (rbacRoute, bool) {
+	if len(parts) >= 3 {
+		switch {
+		case parts[2] == "start" && method == http.MethodPost:
+			return rbacRoute{resource: store.ResourceExec, verb: store.VerbCreate}, true
+		case parts[2] == "resize" && method == http.MethodPost:
+			return rbacRoute{resource: store.ResourceExec, verb: store.VerbCreate}, true
+		case parts[2] == "json" && method == http.MethodGet:
+			return rbacRoute{resource: store.ResourceExec, verb: store.VerbCreate}, true
+		}
 	}
 	return rbacRoute{}, false
 }

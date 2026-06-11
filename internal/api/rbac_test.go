@@ -94,10 +94,15 @@ func TestRBACMatrix(t *testing.T) {
 		{"stack network create", "POST", "/networks/create", labeled, deny, allow, allow},
 		{"stack config create", "POST", "/configs/create", labeled, deny, allow, allow},
 
-		// Interactive access.
-		{"docker exec", "POST", "/containers/c1/exec", "", deny, allow, allow},
+		// Interactive access — incl. the exec lifecycle that follows the
+		// create call, so an operator can actually start the exec it created.
+		{"docker exec create", "POST", "/containers/c1/exec", "", deny, allow, allow},
+		{"docker exec start", "POST", "/exec/e1/start", "", deny, allow, allow},
 		{"agent exec", "POST", "/v1/exec", "", deny, allow, allow},
 		{"agent forward", "GET", "/v1/forward", "", deny, allow, allow},
+
+		// /events streams resource lifecycle metadata → admin-only.
+		{"events", "GET", "/events", "", deny, deny, allow},
 
 		// Agent volume mutations (operator is read-only on volumes).
 		{"agent volume create", "POST", "/v1/volumes", "{}", deny, deny, allow},

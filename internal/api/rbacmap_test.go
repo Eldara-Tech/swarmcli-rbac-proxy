@@ -51,10 +51,20 @@ func TestMapRequest(t *testing.T) {
 		{"container exec", "POST", "/containers/c1/exec", store.ResourceExec, store.VerbCreate, false},
 		{"container attach", "POST", "/containers/c1/attach", store.ResourceExec, store.VerbCreate, false},
 
+		// Exec lifecycle (the calls that follow /containers/{id}/exec) — same
+		// capability, so all exec:create. A role granted exec must be able to
+		// start/resize/inspect the exec it created.
+		{"exec start", "POST", "/exec/e1/start", store.ResourceExec, store.VerbCreate, false},
+		{"exec start versioned", "POST", "/v1.47/exec/e1/start", store.ResourceExec, store.VerbCreate, false},
+		{"exec resize", "POST", "/exec/e1/resize", store.ResourceExec, store.VerbCreate, false},
+		{"exec inspect", "GET", "/exec/e1/json", store.ResourceExec, store.VerbCreate, false},
+
 		// System handshake.
 		{"ping", "GET", "/_ping", store.ResourceSystem, store.VerbGet, false},
 		{"version", "GET", "/version", store.ResourceSystem, store.VerbGet, false},
 		{"info versioned", "GET", "/v1.47/info", store.ResourceSystem, store.VerbGet, false},
+		// /events is NOT a handshake endpoint → admin-only (unmapped).
+		{"events admin-only", "GET", "/events", resourceUnmapped, store.VerbGet, false},
 
 		// Agent-manager control + volumes.
 		{"agent exec", "POST", "/v1/exec", store.ResourceExec, store.VerbCreate, false},
