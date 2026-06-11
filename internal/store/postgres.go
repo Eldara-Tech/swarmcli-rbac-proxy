@@ -5,6 +5,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -42,6 +43,23 @@ const pgAuditSchema = `CREATE TABLE IF NOT EXISTS audit_log (
 );`
 
 const pgAuditIndex = `CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);`
+
+const pgRBACSchema = `CREATE TABLE IF NOT EXISTS roles (
+    id         UUID PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    rules      JSONB NOT NULL DEFAULT '[]',
+    builtin    BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS role_bindings (
+    id         UUID PRIMARY KEY,
+    username   TEXT NOT NULL,
+    role_name  TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(username, role_name)
+);
+CREATE INDEX IF NOT EXISTS idx_role_bindings_username ON role_bindings(username);`
 
 var pgMigrations = []string{
 	`ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`,
@@ -98,6 +116,11 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 	if _, err := pool.Exec(ctx, pgAuditIndex); err != nil {
 		pool.Close()
 		lPostgres().Errorw("audit index failed", "error", err)
+		return nil, err
+	}
+	if _, err := pool.Exec(ctx, pgRBACSchema); err != nil {
+		pool.Close()
+		lPostgres().Errorw("rbac schema failed", "error", err)
 		return nil, err
 	}
 	lPostgres().Infow("store initialized")
@@ -296,6 +319,189 @@ func (s *PostgresStore) ListAuditEntries(ctx context.Context, limit int) ([]Audi
 	return entries, nil
 }
 
+func (s *PostgresStore) CreateRole(ctx context.Context, r *Role) error {
+	if r.Name == "" {
+		return ErrRoleNameRequired
+	}
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	rulesJSON, err := json.Marshal(r.Rules)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO roles (id, name, rules, builtin, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $5)`,
+		id, r.Name, string(rulesJSON), r.Builtin, now,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrRoleExists
+		}
+		return err
+	}
+	r.ID = id
+	r.CreatedAt = now
+	r.UpdatedAt = now
+	return nil
+}
+
+func pgScanRole(scan func(...any) error) (*Role, error) {
+	var r Role
+	var rulesJSON []byte
+	if err := scan(&r.ID, &r.Name, &rulesJSON, &r.Builtin, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(rulesJSON, &r.Rules); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *PostgresStore) GetRole(ctx context.Context, name string) (*Role, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, name, rules, builtin, created_at, updated_at FROM roles WHERE name = $1`, name)
+	r, err := pgScanRole(row.Scan)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRoleNotFound
+		}
+		return nil, err
+	}
+	return r, nil
+}
+
+func (s *PostgresStore) ListRoles(ctx context.Context) ([]Role, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, name, rules, builtin, created_at, updated_at FROM roles ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	roles := make([]Role, 0)
+	for rows.Next() {
+		r, err := pgScanRole(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		roles = append(roles, *r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+func (s *PostgresStore) UpdateRole(ctx context.Context, r *Role) error {
+	rulesJSON, err := json.Marshal(r.Rules)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE roles SET rules = $1, updated_at = $2 WHERE name = $3`,
+		string(rulesJSON), now, r.Name)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRoleNotFound
+	}
+	r.UpdatedAt = now
+	return nil
+}
+
+func (s *PostgresStore) DeleteRole(ctx context.Context, name string) error {
+	existing, err := s.GetRole(ctx, name)
+	if err != nil {
+		return err
+	}
+	if existing.Builtin {
+		return ErrRoleBuiltin
+	}
+	var count int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM role_bindings WHERE role_name = $1`, name).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return ErrRoleInUse
+	}
+	_, err = s.pool.Exec(ctx, `DELETE FROM roles WHERE name = $1`, name)
+	return err
+}
+
+func (s *PostgresStore) CreateBinding(ctx context.Context, b *RoleBinding) error {
+	if _, err := s.GetRole(ctx, b.RoleName); err != nil {
+		return err // ErrRoleNotFound if absent
+	}
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO role_bindings (id, username, role_name, created_at) VALUES ($1, $2, $3, $4)`,
+		id, b.Username, b.RoleName, now)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrBindingExists
+		}
+		return err
+	}
+	b.ID = id
+	b.CreatedAt = now
+	return nil
+}
+
+func (s *PostgresStore) listBindingsWhere(ctx context.Context, where string, args ...any) ([]RoleBinding, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, username, role_name, created_at FROM role_bindings `+where+` ORDER BY created_at`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	bindings := make([]RoleBinding, 0)
+	for rows.Next() {
+		var b RoleBinding
+		if err := rows.Scan(&b.ID, &b.Username, &b.RoleName, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return bindings, nil
+}
+
+func (s *PostgresStore) ListBindings(ctx context.Context) ([]RoleBinding, error) {
+	return s.listBindingsWhere(ctx, "")
+}
+
+func (s *PostgresStore) ListBindingsForUser(ctx context.Context, username string) ([]RoleBinding, error) {
+	return s.listBindingsWhere(ctx, "WHERE username = $1", username)
+}
+
+func (s *PostgresStore) DeleteBinding(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM role_bindings WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrBindingNotFound
+	}
+	return nil
+}
+
 // Ensure interface compliance.
 var _ UserStore = (*PostgresStore)(nil)
 var _ AuditStore = (*PostgresStore)(nil)
+var _ RBACStore = (*PostgresStore)(nil)

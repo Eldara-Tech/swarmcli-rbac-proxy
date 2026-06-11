@@ -28,6 +28,10 @@ func TestMemoryStore_AuditContract(t *testing.T) {
 	testAuditStoreContract(t, func() AuditStore { return NewMemoryStore() })
 }
 
+func TestMemoryStore_RBACContract(t *testing.T) {
+	testRBACStoreContract(t, func() rbacTestStore { return NewMemoryStore() })
+}
+
 // TestMemoryStore_NilIssuedAtExpires exercises the "rows written before
 // TokenIssuedAt was introduced" path — a token whose issued_at is nil
 // must not be consumable once a positive TTL is configured. Rows can

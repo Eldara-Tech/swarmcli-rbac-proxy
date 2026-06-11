@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -42,6 +43,23 @@ const sqliteAuditSchema = `CREATE TABLE IF NOT EXISTS audit_log (
 );`
 
 const sqliteAuditIndex = `CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);`
+
+const sqliteRBACSchema = `CREATE TABLE IF NOT EXISTS roles (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    rules      TEXT NOT NULL DEFAULT '[]',
+    builtin    INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS role_bindings (
+    id         TEXT PRIMARY KEY,
+    username   TEXT NOT NULL,
+    role_name  TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(username, role_name)
+);
+CREATE INDEX IF NOT EXISTS idx_role_bindings_username ON role_bindings(username);`
 
 var sqliteMigrations = []string{
 	`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`,
@@ -106,6 +124,11 @@ func NewSQLiteStore(ctx context.Context, dsn string) (*SQLiteStore, error) {
 	if _, err := db.ExecContext(ctx, sqliteAuditIndex); err != nil {
 		_ = db.Close()
 		lSqlite().Errorw("audit index failed", "error", err)
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, sqliteRBACSchema); err != nil {
+		_ = db.Close()
+		lSqlite().Errorw("rbac schema failed", "error", err)
 		return nil, err
 	}
 	lSqlite().Infow("store initialized", "dsn", dsn)
@@ -368,6 +391,223 @@ func (s *SQLiteStore) ListAuditEntries(ctx context.Context, limit int) ([]AuditE
 	return entries, nil
 }
 
+func (s *SQLiteStore) CreateRole(ctx context.Context, r *Role) error {
+	if r.Name == "" {
+		return ErrRoleNameRequired
+	}
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	rulesJSON, err := json.Marshal(r.Rules)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	builtin := 0
+	if r.Builtin {
+		builtin = 1
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO roles (id, name, rules, builtin, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		id, r.Name, string(rulesJSON), builtin,
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		if isSQLiteUniqueViolation(err) {
+			return ErrRoleExists
+		}
+		return err
+	}
+	r.ID = id
+	r.CreatedAt = now
+	r.UpdatedAt = now
+	return nil
+}
+
+func scanRole(scan func(...any) error) (*Role, error) {
+	var r Role
+	var rulesJSON string
+	var builtin int
+	var createdAt, updatedAt string
+	if err := scan(&r.ID, &r.Name, &rulesJSON, &builtin, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(rulesJSON), &r.Rules); err != nil {
+		return nil, err
+	}
+	r.Builtin = builtin != 0
+	var err error
+	if r.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		return nil, err
+	}
+	if r.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *SQLiteStore) GetRole(ctx context.Context, name string) (*Role, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, name, rules, builtin, created_at, updated_at FROM roles WHERE name = ?`, name)
+	r, err := scanRole(row.Scan)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrRoleNotFound
+		}
+		return nil, err
+	}
+	return r, nil
+}
+
+func (s *SQLiteStore) ListRoles(ctx context.Context) ([]Role, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, rules, builtin, created_at, updated_at FROM roles ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	roles := make([]Role, 0)
+	for rows.Next() {
+		r, err := scanRole(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		roles = append(roles, *r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+func (s *SQLiteStore) UpdateRole(ctx context.Context, r *Role) error {
+	rulesJSON, err := json.Marshal(r.Rules)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE roles SET rules = ?, updated_at = ? WHERE name = ?`,
+		string(rulesJSON), now.Format(time.RFC3339Nano), r.Name)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrRoleNotFound
+	}
+	r.UpdatedAt = now
+	return nil
+}
+
+func (s *SQLiteStore) DeleteRole(ctx context.Context, name string) error {
+	existing, err := s.GetRole(ctx, name)
+	if err != nil {
+		return err
+	}
+	if existing.Builtin {
+		return ErrRoleBuiltin
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM role_bindings WHERE role_name = ?`, name).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return ErrRoleInUse
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM roles WHERE name = ?`, name)
+	return err
+}
+
+func (s *SQLiteStore) CreateBinding(ctx context.Context, b *RoleBinding) error {
+	if _, err := s.GetRole(ctx, b.RoleName); err != nil {
+		return err // ErrRoleNotFound if absent
+	}
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO role_bindings (id, username, role_name, created_at) VALUES (?, ?, ?, ?)`,
+		id, b.Username, b.RoleName, now.Format(time.RFC3339Nano))
+	if err != nil {
+		if isSQLiteUniqueViolation(err) {
+			return ErrBindingExists
+		}
+		return err
+	}
+	b.ID = id
+	b.CreatedAt = now
+	return nil
+}
+
+func scanBinding(scan func(...any) error) (*RoleBinding, error) {
+	var b RoleBinding
+	var createdAt string
+	if err := scan(&b.ID, &b.Username, &b.RoleName, &createdAt); err != nil {
+		return nil, err
+	}
+	var err error
+	if b.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+func (s *SQLiteStore) listBindingsWhere(ctx context.Context, where string, args ...any) ([]RoleBinding, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, username, role_name, created_at FROM role_bindings `+where+` ORDER BY created_at`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	bindings := make([]RoleBinding, 0)
+	for rows.Next() {
+		b, err := scanBinding(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, *b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return bindings, nil
+}
+
+func (s *SQLiteStore) ListBindings(ctx context.Context) ([]RoleBinding, error) {
+	return s.listBindingsWhere(ctx, "")
+}
+
+func (s *SQLiteStore) ListBindingsForUser(ctx context.Context, username string) ([]RoleBinding, error) {
+	return s.listBindingsWhere(ctx, "WHERE username = ?", username)
+}
+
+func (s *SQLiteStore) DeleteBinding(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM role_bindings WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrBindingNotFound
+	}
+	return nil
+}
+
 // Ensure interface compliance.
 var _ UserStore = (*SQLiteStore)(nil)
 var _ AuditStore = (*SQLiteStore)(nil)
+var _ RBACStore = (*SQLiteStore)(nil)

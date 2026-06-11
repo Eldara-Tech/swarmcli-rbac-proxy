@@ -392,6 +392,7 @@ func main() {
 
 	var userStore store.UserStore
 	var auditStore store.AuditStore
+	var rbacStore store.RBACStore
 	switch cfg.Store {
 	case "sqlite":
 		sq, err := store.NewSQLiteStore(context.Background(), cfg.DatabasePath)
@@ -402,11 +403,13 @@ func main() {
 		sq.SetTokenTTL(cfg.OnboardingTokenTTL)
 		userStore = sq
 		auditStore = sq
+		rbacStore = sq
 	case "memory":
 		ms := store.NewMemoryStore()
 		ms.SetTokenTTL(cfg.OnboardingTokenTTL)
 		userStore = ms
 		auditStore = ms
+		rbacStore = ms
 	case "postgres":
 		if cfg.DatabaseURL == "" {
 			l().Fatalw("missing required config", "error", "database_url is required when store=postgres")
@@ -419,6 +422,7 @@ func main() {
 		pg.SetTokenTTL(cfg.OnboardingTokenTTL)
 		userStore = pg
 		auditStore = pg
+		rbacStore = pg
 	default:
 		l().Fatalw("unknown store type", "store", cfg.Store)
 	}
@@ -457,6 +461,16 @@ func main() {
 		} else {
 			l().Infow("seed user created", "username", cfg.SeedUsername, "role", seedRole, "id", u.ID)
 		}
+	}
+
+	// Seed the built-in roles (idempotent; never clobbers admin edits) and
+	// migrate any users that predate RBAC into a role binding derived from
+	// their legacy User.Role (admin → admin, else → viewer).
+	if err := store.SeedDefaultRoles(context.Background(), rbacStore); err != nil {
+		l().Fatalw("seed default roles failed", "error", err)
+	}
+	if err := store.MigrateLegacyRoles(context.Background(), userStore, rbacStore); err != nil {
+		l().Fatalw("legacy role migration failed", "error", err)
 	}
 
 	var ca *certauth.CA
@@ -501,17 +515,27 @@ func main() {
 		l().Infow("resource guard enabled", "protected_stack", protectedStack)
 	}
 
+	// RBAC middleware: enforces per-role resource/verb authorization on the
+	// proxy data plane. It reuses the guard for stack-label resolution.
+	rbacMW := api.NewRBACMiddleware(rbacStore, auditStore, guard)
+
 	userHandler := api.NewUserHandler(userStore, ca, auditStore)
 	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL, auditStore)
 	meHandler := api.NewMeHandler()
+	roleHandler := api.NewRoleHandler(rbacStore, userStore, auditStore)
+	bindingHandler := api.NewBindingHandler(rbacStore, userStore, auditStore)
 
 	var proxyAuth func(http.Handler) http.Handler
+	var rbacWrap func(http.Handler) http.Handler
 	if cfg.TLSClientCA != "" {
 		proxyAuth = func(next http.Handler) http.Handler {
 			return api.RequireClientCert(userStore, next)
 		}
+		// RBAC can only be enforced when callers are identified by mTLS.
+		rbacWrap = rbacMW.Wrap
 	} else {
 		proxyAuth = func(next http.Handler) http.Handler { return next }
+		rbacWrap = func(next http.Handler) http.Handler { return next }
 	}
 
 	var agentManagerProxy http.Handler
@@ -575,14 +599,25 @@ func main() {
 
 	dockerProxy := guard.Wrap(newProxy(b))
 
-	// registerRoutes sets up the mux with the given auth wrapper for proxy
-	// routes. wrapExec applies exec access control — RequireAdminForExec on
-	// the external listener, no-op on the internal listener (where localhost
-	// exec is always allowed).
-	registerRoutes := func(mux *http.ServeMux, wrapProxy, wrapExec func(http.Handler) http.Handler) {
-		mux.Handle("/api/v1/users", api.RequireToken(cfg.AdminToken, userHandler))
-		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(cfg.AdminToken, http.HandlerFunc(userHandler.Delete)))
+	// registerRoutes sets up the mux with the given middleware wrappers for
+	// proxy routes. wrapProxy resolves identity (RequireClientCert externally,
+	// MarkInternalRequest internally). wrapRBAC enforces role-based access
+	// (external only; no-op internally and when mTLS is off). wrapExec applies
+	// the protected-stack exec/forward guard (no-op on the internal listener).
+	registerRoutes := func(mux *http.ServeMux, wrapProxy, wrapRBAC, wrapExec func(http.Handler) http.Handler) {
+		tok := cfg.AdminToken
+		mux.Handle("/api/v1/users", api.RequireToken(tok, userHandler))
+		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(tok, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
+		// RBAC management plane — admin-token protected, like user management.
+		mux.Handle("GET /api/v1/roles", api.RequireToken(tok, http.HandlerFunc(roleHandler.List)))
+		mux.Handle("POST /api/v1/roles", api.RequireToken(tok, http.HandlerFunc(roleHandler.Create)))
+		mux.Handle("GET /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Get)))
+		mux.Handle("PUT /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Update)))
+		mux.Handle("DELETE /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Delete)))
+		mux.Handle("GET /api/v1/bindings", api.RequireToken(tok, http.HandlerFunc(bindingHandler.List)))
+		mux.Handle("POST /api/v1/bindings", api.RequireToken(tok, http.HandlerFunc(bindingHandler.Create)))
+		mux.Handle("DELETE /api/v1/bindings/{id}", api.RequireToken(tok, http.HandlerFunc(bindingHandler.Delete)))
 		// Self-identity: cert-authenticated (wrapProxy = RequireClientCert on
 		// the external listener), so the caller's role is resolved from their
 		// mTLS CN. On the internal listener wrapProxy is MarkInternalRequest,
@@ -590,9 +625,9 @@ func main() {
 		// has no per-user identity and is not used for role discovery.
 		mux.Handle("GET /api/v1/me", wrapProxy(meHandler))
 		if agentManagerProxy != nil {
-			mux.Handle("/v1/", wrapProxy(wrapExec(agentManagerProxy)))
+			mux.Handle("/v1/", wrapProxy(wrapRBAC(wrapExec(agentManagerProxy))))
 		}
-		mux.Handle("/", wrapProxy(wrapExec(dockerProxy)))
+		mux.Handle("/", wrapProxy(wrapRBAC(wrapExec(dockerProxy))))
 	}
 
 	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)
@@ -603,8 +638,8 @@ func main() {
 	// Internal listener (plain TCP, no mTLS) — for admin access from localhost.
 	if cfg.InternalListen != "" {
 		internalMux := http.NewServeMux()
-		noExecGuard := func(next http.Handler) http.Handler { return next }
-		registerRoutes(internalMux, api.MarkInternalRequest, noExecGuard)
+		noWrap := func(next http.Handler) http.Handler { return next }
+		registerRoutes(internalMux, api.MarkInternalRequest, noWrap, noWrap)
 		go func() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
 			srv := &http.Server{
@@ -628,7 +663,7 @@ func main() {
 	if cfg.AgentManagerURL != "" && cfg.TLSClientCA == "" {
 		l().Warnw("exec guard active without mTLS: exec on protected stack will be blocked; non-protected exec may pass without identity; use PROXY_INTERNAL_LISTEN for local exec access")
 	}
-	registerRoutes(externalMux, proxyAuth, guard.ExecGuard)
+	registerRoutes(externalMux, proxyAuth, rbacWrap, guard.ExecGuard)
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)

@@ -105,6 +105,67 @@ Response (`404 Not Found`):
 {"message": "user not found"}
 ```
 
+## RBAC: roles and bindings
+
+The proxy authorizes every proxied Docker/agent request against the caller's
+**roles**. A role is a named set of permission rules (`{resources, verbs}` with
+`*` wildcards); a **binding** maps a user to a role. The built-in roles
+`viewer`, `operator`, and `admin` are seeded on startup. These management
+endpoints are admin-token protected like the user API.
+
+### List / inspect roles
+
+```bash
+curl -s http://localhost:2375/api/v1/roles -H "Authorization: Bearer <token>"
+curl -s http://localhost:2375/api/v1/roles/operator -H "Authorization: Bearer <token>"
+```
+
+A role (`200 OK`):
+
+```json
+{
+  "id": "…", "name": "operator", "builtin": true,
+  "rules": [
+    {"resources": ["stacks","services","nodes","networks","system","stack logs","volumes","configs"], "verbs": ["get","list"]},
+    {"resources": ["stacks","services"], "verbs": ["create","update"]},
+    {"resources": ["exec","port-forward"], "verbs": ["create"]}
+  ],
+  "created_at": "…", "updated_at": "…"
+}
+```
+
+### Create / update / delete a role
+
+```bash
+curl -s -X POST http://localhost:2375/api/v1/roles \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"name":"deployer","rules":[{"resources":["stacks"],"verbs":["get","list","create","update"]}]}'
+
+curl -s -X PUT http://localhost:2375/api/v1/roles/deployer \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"rules":[{"resources":["stacks","services"],"verbs":["*"]}]}'
+
+curl -s -X DELETE http://localhost:2375/api/v1/roles/deployer -H "Authorization: Bearer <token>"
+```
+
+Built-in roles cannot be deleted (`409`), a role still referenced by a binding
+cannot be deleted (`409`), and an update that would leave the cluster with no
+admin is refused (`409`).
+
+### List / create / delete bindings
+
+```bash
+curl -s http://localhost:2375/api/v1/bindings -H "Authorization: Bearer <token>"
+
+curl -s -X POST http://localhost:2375/api/v1/bindings \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"username":"alice","role_name":"operator"}'
+
+curl -s -X DELETE http://localhost:2375/api/v1/bindings/<binding-id> -H "Authorization: Bearer <token>"
+```
+
+Deleting the last binding that grants admin is refused (`409`).
+
 ## Onboard a user
 
 One-time endpoint that consumes a token and returns a Docker-context-compatible tar archive. No authentication required — the token itself is the credential.
@@ -153,3 +214,13 @@ All other paths are forwarded to the Docker daemon:
 ```bash
 curl -s http://localhost:2375/v1.47/containers/json | jq .
 ```
+
+On the external (mTLS) listener these requests are authorized by RBAC: the
+proxy maps each request to a `{resource, verb}` (e.g. `GET /services` →
+`services:list`, `POST /services/{id}/update` → `services:update`) and rejects
+it with `403` unless one of the caller's roles grants it. Stack-labeled
+mutations (resources carrying `com.docker.stack.namespace`) are additionally
+authorized under the `stacks` resource, so a role with `stacks:create` can
+deploy a full stack. Unmapped or raw operations (e.g. `POST /containers/create`)
+require the `admin` role. RBAC denials are audited as `rbac.denied`. The
+internal listener bypasses RBAC entirely.

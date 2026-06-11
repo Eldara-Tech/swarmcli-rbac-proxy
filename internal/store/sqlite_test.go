@@ -30,6 +30,10 @@ func TestSQLiteStore_AuditContract(t *testing.T) {
 	testAuditStoreContract(t, func() AuditStore { return newTestSQLiteStore(t) })
 }
 
+func TestSQLiteStore_RBACContract(t *testing.T) {
+	testRBACStoreContract(t, func() rbacTestStore { return newTestSQLiteStore(t) })
+}
+
 // TestSQLiteStore_NilIssuedAtExpires simulates an in-place upgrade where
 // a pre-TTL row carries a non-null onboard_token but NULL issued_at. It
 // must fail to consume with ErrTokenExpired once a positive TTL is set.

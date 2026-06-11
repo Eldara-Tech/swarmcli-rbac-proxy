@@ -58,6 +58,64 @@ The `/v1/exec` and `/v1/forward` endpoints on the external listener are both sta
 
 The internal listener (wired with `noExecGuard`) bypasses these checks entirely.
 
+## RBAC (roles & bindings)
+
+The external listener authorizes every proxied request against the caller's
+**roles** (`internal/api/rbac.go`), the primary authorization layer. The
+protected-stack guards below are an additional, narrower layer that composes
+with it (deny-wins).
+
+- **Model** (dynamic, Kubernetes-style, additive — no deny rules): a `Role` is a
+  named set of `PermissionRule{resources[], verbs[]}` (`*` wildcards allowed); a
+  `RoleBinding` maps a user → role. A user's effective permission is the union
+  of all bound roles' rules. **Default-deny.** Persisted in all three stores
+  (`internal/store/rbac.go`).
+- **Built-in roles** `viewer`/`operator`/`admin` are seeded idempotently on
+  startup (`SeedDefaultRoles`) and never overwritten if edited. Legacy users are
+  migrated on startup (`MigrateLegacyRoles`): `User.Role` admin→admin, else
+  →viewer. `User.Role` is retained as the source for the protected-stack
+  `isAdmin` gate (a separate axis from RBAC).
+- **Mapping**: `internal/api/rbacmap.go` maps each request to one
+  `{resource, verb}` (e.g. `GET /services`→`services:list`,
+  `POST /services/{id}/update`→`services:update`, `/v1/exec`→`exec:create`,
+  `GET /swarm`→`swarm:get`). Reads are authorized too. Unmapped/raw ops
+  (`POST /containers/create`) map to the `unmapped` sentinel → admin-only.
+- **Stacks via label**: there is no `/stacks` Docker endpoint — a stack deploy
+  is labeled `services`/`networks`/`configs`/`secrets` creates. A **mutating**
+  request whose target carries `com.docker.stack.namespace` (create: body;
+  update/delete: Docker back-query) is authorized under `stacks` OR the concrete
+  resource. So `operator` (with `stacks: create,update`) can deploy a full stack
+  incl. its networks/configs/secrets, but cannot create *standalone* infra
+  resources, delete stacks (no `stacks:delete`), enumerate secrets, or touch the
+  protected stack. Reads use the concrete resource only (no stacks-OR), so
+  `viewer`'s `secrets:—` is not bypassable via a stack label.
+- **Chain order** (external): `RequireClientCert` → `RBACMiddleware.Wrap` →
+  `ExecGuard` → `ResourceGuard.Wrap` → proxy. RBAC is a no-op on the internal
+  listener and when mTLS is off (no identity to authorize).
+- **Permission matrix** (verbs G=get L=list C=create U=update D=delete, *=all):
+
+  | resource | viewer | operator | admin |
+  |---|---|---|---|
+  | stacks | GL | GLCU | * |
+  | stack logs | GL | GL | * |
+  | services | GL | GLCU | * |
+  | nodes | GL | GL | * |
+  | networks | GL | GL | * |
+  | volumes | — | GL | * |
+  | configs | — | GL | * |
+  | secrets | — | — | * |
+  | exec/attach | — | C | * |
+  | port-forward | — | C | * |
+  | swarm | — | — | * |
+  | system (`_ping`/`version`/`info`/`events`) | GL | GL | GL |
+  | roles / bindings | — | — | * |
+  | containers (raw run) / unmapped | — | — | * |
+
+- **Management**: `/api/v1/roles` and `/api/v1/bindings` (admin-token protected,
+  `internal/api/roles.go`, `bindings.go`) and the `swcproxy role`/`binding` CLI.
+  Last-admin lockout is enforced (`ErrLastAdmin`): the last admin binding cannot
+  be deleted, and a role update that would remove the last admin is refused.
+
 ## Stack Resource Protection
 
 When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
@@ -130,10 +188,12 @@ swarm-rbac-proxy/
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
       store.go          — UserStore + AuditStore interfaces, User/AuditEntry types, AuditAction constants, sentinel errors
-      memory.go         — in-memory UserStore + AuditStore (dev/testing)
-      sqlite.go         — SQLite UserStore + AuditStore (modernc.org/sqlite, default, with migrations)
-      postgres.go       — PostgreSQL UserStore + AuditStore (pgx/v5, with migrations)
+      rbac.go           — RBACStore interface, Role/RoleBinding/PermissionRule types, resource/verb vocabulary, built-in roles, effective-permission resolver, seeding, legacy migration, last-admin lockout helpers
+      memory.go         — in-memory UserStore + AuditStore + RBACStore (dev/testing)
+      sqlite.go         — SQLite UserStore + AuditStore + RBACStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
+      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore (pgx/v5, with migrations; rules stored as JSONB)
       contract_test.go  — shared contract tests for all store implementations (user + audit)
+      rbac_contract_test.go — shared RBAC contract tests (roles, bindings, resolver, seeding, migration, lockout)
       memory_test.go    — memory store unit tests
       sqlite_test.go    — SQLite store unit tests (contract + WAL)
       postgres_test.go  — postgres integration tests (//go:build integration)
@@ -144,11 +204,17 @@ swarm-rbac-proxy/
       mtls_test.go      — mTLS middleware unit tests
       users.go          — UserHandler: POST/GET /api/v1/users, DELETE /api/v1/users/{username}
       users_test.go     — handler tests using MemoryStore
+      roles.go          — RoleHandler: CRUD /api/v1/roles (admin-token protected)
+      bindings.go       — BindingHandler: list/create/delete /api/v1/bindings (admin-token protected)
+      rbac.go           — RBACMiddleware: per-role resource/verb authorization on the data plane (default-deny, stacks-label OR)
+      rbac_test.go      — RBAC middleware matrix tests (viewer/operator/admin × resources/verbs)
+      rbacmap.go        — mapRequest: HTTP {method,path} → {resource,verb}; stripDockerVersion shared helper
+      rbacmap_test.go   — request-mapping table tests
       me.go             — MeHandler: GET /api/v1/me → caller's own {username, role} from mTLS cert
       me_test.go        — me handler tests (admin/user/no-user/method)
       onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
       onboard_test.go   — onboard handler tests
-      guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation; RequireAdminForExec: admin-only exec/attach
+      guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation; ExecGuard: admin-only exec/attach; resourceStackLabel/stackLabelFromBody label resolvers shared with RBAC
       guard_test.go     — guard middleware tests (path parsing, admin check, back-query, body inspection)
       volumeguard.go    — volume management policy: stack-scoped admin gate for /v1/volumes mutations, agent-manager back-query for ownership, success auditing
       volumeguard_test.go — volume guard tests (GET allowed, protected/non-protected mutation, fail-closed, audit)
@@ -177,6 +243,8 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 - `POST /api/v1/users` — Create user (`{"username":"alice","role":"admin"}` → 201 with user object; includes `certificate` bundle when `PROXY_TLS_CLIENT_CA_KEY` is set)
 - `GET /api/v1/users` — List all users (200, always returns array)
 - `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found)
+- `GET|POST /api/v1/roles`, `GET|PUT|DELETE /api/v1/roles/{name}` — RBAC role CRUD (admin-token protected). Built-in roles can't be deleted (409); in-use roles can't be deleted (409); updates that would remove the last admin are refused (409)
+- `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-token protected). Deleting the last admin binding is refused (409)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
 - `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
 - `/v1/*` — Forwarded to agent-manager (when `PROXY_AGENT_MANAGER_URL` is set; supports HTTP and WebSocket upgrade)
@@ -193,12 +261,19 @@ swcproxy user add <username> [--admin]    # Create user + onboarding token
 swcproxy user delete <username>           # Delete user
 swcproxy user regenerate-token <username> # New onboarding token
 swcproxy audit ls [--limit N]             # List audit log entries (default: 50)
+swcproxy role ls                          # List roles
+swcproxy role show <name>                 # Show a role's rules
+swcproxy binding ls                       # List role bindings
+swcproxy binding add <user> <role>        # Bind a user to a role
+swcproxy binding rm <id>                  # Remove a role binding (last-admin protected)
 swcproxy --help                           # Usage info
 ```
 
+`swcproxy user add` also creates a matching role binding (`--admin` → `admin`, else `viewer`) so the legacy role and RBAC binding stay in sync.
+
 ## Audit Log
 
-All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op). Auth events (mTLS success/failure) are logged via zap only, not persisted.
+All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), and the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted` (recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
 
 Each entry records: id, timestamp, actor (username/"cli"/"anonymous"), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
 
