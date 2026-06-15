@@ -40,6 +40,18 @@ func main() {
 			os.Exit(1)
 		}
 		runAuditCommand(os.Args[2], os.Args[3:])
+	case "role":
+		if len(os.Args) < 3 {
+			printRoleUsage()
+			os.Exit(1)
+		}
+		runRoleCommand(os.Args[2], os.Args[3:])
+	case "binding":
+		if len(os.Args) < 3 {
+			printBindingUsage()
+			os.Exit(1)
+		}
+		runBindingCommand(os.Args[2], os.Args[3:])
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -59,6 +71,11 @@ Usage:
   swcproxy user delete <username>          Delete user
   swcproxy user regenerate-token <username> Regenerate onboarding token
   swcproxy audit ls [--limit N]            List audit log entries (default: 50)
+  swcproxy role ls                         List roles
+  swcproxy role show <name>                Show a role's rules
+  swcproxy binding ls                      List role bindings
+  swcproxy binding add <user> <role>       Bind a user to a role
+  swcproxy binding rm <id>                 Remove a role binding
   swcproxy --help                          Show this help
 `)
 }
@@ -121,7 +138,7 @@ func runUserCommand(subcmd string, args []string) {
 	}
 }
 
-func openStore() (store.UserStore, store.AuditStore) {
+func openStore() (store.UserStore, store.RBACStore, store.AuditStore) {
 	cfg, err := config.Load(os.Getenv("PROXY_CONFIG"))
 	if err != nil {
 		fatal("load config: %v", err)
@@ -135,7 +152,7 @@ func openStore() (store.UserStore, store.AuditStore) {
 		if err != nil {
 			fatal("open sqlite: %v", err)
 		}
-		return s, s
+		return s, s, s
 	case "postgres":
 		if cfg.DatabaseURL == "" {
 			fatal("database_url is required for postgres store")
@@ -144,13 +161,13 @@ func openStore() (store.UserStore, store.AuditStore) {
 		if err != nil {
 			fatal("open postgres: %v", err)
 		}
-		return s, s
+		return s, s, s
 	case "memory":
 		fatal("swcproxy cannot use in-memory store (data not shared with proxy process)")
 	default:
 		fatal("unknown store type: %s", cfg.Store)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func getExternalURL() string {
@@ -181,7 +198,7 @@ func generateToken() string {
 }
 
 func cmdUserList() {
-	s, _ := openStore()
+	s, _, _ := openStore()
 	users, err := s.ListUsers(context.Background())
 	if err != nil {
 		fatal("list users: %v", err)
@@ -196,7 +213,7 @@ func cmdUserList() {
 }
 
 func cmdUserAdd(username string, admin bool) {
-	s, audit := openStore()
+	s, rbac, audit := openStore()
 	ctx := context.Background()
 
 	role := "user"
@@ -207,6 +224,19 @@ func cmdUserAdd(username string, admin bool) {
 	u := &store.User{Username: username, Role: role}
 	if err := s.CreateUser(ctx, u); err != nil {
 		fatal("create user: %v", err)
+	}
+
+	// Keep the RBAC binding in sync with the legacy role: admin → admin,
+	// otherwise → operator (matching MigrateLegacyRoles, so a freshly-added
+	// non-admin user has the same non-protected create/update/exec a migrated
+	// legacy user keeps). Best-effort (roles are seeded by the proxy at
+	// startup; if absent the binding is skipped and can be added later).
+	bindRole := store.RoleOperator
+	if admin {
+		bindRole = store.RoleAdmin
+	}
+	if err := rbac.CreateBinding(ctx, &store.RoleBinding{Username: username, RoleName: bindRole}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not bind %s to role %s: %v\n", username, bindRole, err)
 	}
 
 	token := generateToken()
@@ -230,7 +260,7 @@ func cmdUserAdd(username string, admin bool) {
 }
 
 func cmdUserDelete(username string) {
-	s, audit := openStore()
+	s, _, audit := openStore()
 	ctx := context.Background()
 	if err := s.DeleteUser(ctx, username); err != nil {
 		fatal("delete user: %v", err)
@@ -243,7 +273,7 @@ func cmdUserDelete(username string) {
 }
 
 func cmdUserRegenerateToken(username string) {
-	s, audit := openStore()
+	s, _, audit := openStore()
 	ctx := context.Background()
 
 	// Verify user exists.
@@ -299,7 +329,7 @@ func runAuditCommand(subcmd string, args []string) {
 }
 
 func cmdAuditList(limit int) {
-	_, audit := openStore()
+	_, _, audit := openStore()
 	entries, err := audit.ListAuditEntries(context.Background(), limit)
 	if err != nil {
 		fatal("list audit entries: %v", err)
@@ -313,6 +343,139 @@ func cmdAuditList(limit int) {
 			e.Actor, e.Action, e.Resource, e.Status, e.Detail)
 	}
 	_ = w.Flush()
+}
+
+func printRoleUsage() {
+	fmt.Fprintf(os.Stderr, `Usage:
+  swcproxy role ls            List roles
+  swcproxy role show <name>   Show a role's rules
+`)
+}
+
+func runRoleCommand(subcmd string, args []string) {
+	switch subcmd {
+	case "ls", "list":
+		cmdRoleList()
+	case "show", "get":
+		if len(args) < 1 || isHelpFlag(args[0]) {
+			printRoleUsage()
+			if len(args) < 1 {
+				os.Exit(1)
+			}
+			return
+		}
+		cmdRoleShow(args[0])
+	case "--help", "-h", "help":
+		printRoleUsage()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown role command: %s\n\n", subcmd)
+		printRoleUsage()
+		os.Exit(1)
+	}
+}
+
+func cmdRoleList() {
+	_, rbac, _ := openStore()
+	roles, err := rbac.ListRoles(context.Background())
+	if err != nil {
+		fatal("list roles: %v", err)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "NAME\tBUILTIN\tRULES")
+	for _, r := range roles {
+		_, _ = fmt.Fprintf(w, "%s\t%v\t%d\n", r.Name, r.Builtin, len(r.Rules))
+	}
+	_ = w.Flush()
+}
+
+func cmdRoleShow(name string) {
+	_, rbac, _ := openStore()
+	r, err := rbac.GetRole(context.Background(), name)
+	if err != nil {
+		fatal("get role: %v", err)
+	}
+	fmt.Printf("Role: %s (builtin: %v)\n", r.Name, r.Builtin)
+	for _, rule := range r.Rules {
+		fmt.Printf("  resources=%s verbs=%s\n",
+			strings.Join(rule.Resources, ","), strings.Join(rule.Verbs, ","))
+	}
+}
+
+func printBindingUsage() {
+	fmt.Fprintf(os.Stderr, `Usage:
+  swcproxy binding ls                List role bindings
+  swcproxy binding add <user> <role> Bind a user to a role
+  swcproxy binding rm <id>           Remove a role binding
+`)
+}
+
+func runBindingCommand(subcmd string, args []string) {
+	switch subcmd {
+	case "ls", "list":
+		cmdBindingList()
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: swcproxy binding add <user> <role>")
+			os.Exit(1)
+		}
+		cmdBindingAdd(args[0], args[1])
+	case "rm", "delete":
+		if len(args) < 1 {
+			fmt.Fprintln(os.Stderr, "usage: swcproxy binding rm <id>")
+			os.Exit(1)
+		}
+		cmdBindingRemove(args[0])
+	case "--help", "-h", "help":
+		printBindingUsage()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown binding command: %s\n\n", subcmd)
+		printBindingUsage()
+		os.Exit(1)
+	}
+}
+
+func cmdBindingList() {
+	_, rbac, _ := openStore()
+	bindings, err := rbac.ListBindings(context.Background())
+	if err != nil {
+		fatal("list bindings: %v", err)
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ID\tUSER\tROLE\tCREATED")
+	for _, b := range bindings {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", b.ID, b.Username, b.RoleName, b.CreatedAt.Format("2006-01-02 15:04"))
+	}
+	_ = w.Flush()
+}
+
+func cmdBindingAdd(username, roleName string) {
+	users, rbac, audit := openStore()
+	ctx := context.Background()
+	if _, err := users.GetUserByUsername(ctx, username); err != nil {
+		fatal("user lookup: %v", err)
+	}
+	b := &store.RoleBinding{Username: username, RoleName: roleName}
+	if err := rbac.CreateBinding(ctx, b); err != nil {
+		fatal("create binding: %v", err)
+	}
+	_ = audit.RecordAudit(ctx, &store.AuditEntry{
+		Actor: "cli", Action: store.AuditBindingCreated,
+		Resource: "binding:" + username + "/" + roleName, Status: "success",
+	})
+	fmt.Printf("Bound %s to role %s (id: %s)\n", username, roleName, b.ID)
+}
+
+func cmdBindingRemove(id string) {
+	users, rbac, audit := openStore()
+	ctx := context.Background()
+	if err := store.DeleteBindingChecked(ctx, users, rbac, id); err != nil {
+		fatal("remove binding: %v", err)
+	}
+	_ = audit.RecordAudit(ctx, &store.AuditEntry{
+		Actor: "cli", Action: store.AuditBindingDeleted,
+		Resource: "binding:" + id, Status: "success",
+	})
+	fmt.Printf("Binding removed: %s\n", id)
 }
 
 func fatal(format string, args ...any) {

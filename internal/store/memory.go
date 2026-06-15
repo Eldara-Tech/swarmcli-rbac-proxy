@@ -13,18 +13,25 @@ import (
 
 func lMemory() *proxylog.ProxyLogger { return proxylog.L().With("component", "store.memory") }
 
-// MemoryStore is an in-memory UserStore and AuditStore for development and testing.
+// MemoryStore is an in-memory UserStore, AuditStore, and RBACStore for
+// development and testing.
 type MemoryStore struct {
 	mu       sync.RWMutex
 	users    map[string]User
 	audit    []AuditEntry
-	tokenTTL time.Duration // 0 means disabled
+	roles    map[string]Role        // keyed by name
+	bindings map[string]RoleBinding // keyed by id
+	tokenTTL time.Duration          // 0 means disabled
 }
 
 // NewMemoryStore creates a new in-memory store.
 func NewMemoryStore() *MemoryStore {
 	lMemory().Infow("store initialized")
-	return &MemoryStore{users: make(map[string]User)}
+	return &MemoryStore{
+		users:    make(map[string]User),
+		roles:    make(map[string]Role),
+		bindings: make(map[string]RoleBinding),
+	}
 }
 
 // SetTokenTTL sets the onboarding-token TTL. A zero or negative duration
@@ -180,5 +187,140 @@ func (s *MemoryStore) ListAuditEntries(_ context.Context, limit int) ([]AuditEnt
 	return result, nil
 }
 
+func (s *MemoryStore) CreateRole(_ context.Context, r *Role) error {
+	if r.Name == "" {
+		return ErrRoleNameRequired
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.roles[r.Name]; ok {
+		return ErrRoleExists
+	}
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	r.ID = id
+	r.CreatedAt = now
+	r.UpdatedAt = now
+	s.roles[r.Name] = *r
+	return nil
+}
+
+func (s *MemoryStore) GetRole(_ context.Context, name string) (*Role, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.roles[name]
+	if !ok {
+		return nil, ErrRoleNotFound
+	}
+	cp := r
+	cp.Rules = append([]PermissionRule(nil), r.Rules...)
+	return &cp, nil
+}
+
+func (s *MemoryStore) ListRoles(_ context.Context) ([]Role, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Role, 0, len(s.roles))
+	for _, r := range s.roles {
+		cp := r
+		cp.Rules = append([]PermissionRule(nil), r.Rules...)
+		result = append(result, cp)
+	}
+	return result, nil
+}
+
+func (s *MemoryStore) UpdateRole(_ context.Context, r *Role) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.roles[r.Name]
+	if !ok {
+		return ErrRoleNotFound
+	}
+	existing.Rules = append([]PermissionRule(nil), r.Rules...)
+	existing.UpdatedAt = time.Now().UTC()
+	s.roles[r.Name] = existing
+	r.ID = existing.ID
+	r.Builtin = existing.Builtin
+	r.CreatedAt = existing.CreatedAt
+	r.UpdatedAt = existing.UpdatedAt
+	return nil
+}
+
+func (s *MemoryStore) DeleteRole(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.roles[name]
+	if !ok {
+		return ErrRoleNotFound
+	}
+	if r.Builtin {
+		return ErrRoleBuiltin
+	}
+	for _, b := range s.bindings {
+		if b.RoleName == name {
+			return ErrRoleInUse
+		}
+	}
+	delete(s.roles, name)
+	return nil
+}
+
+func (s *MemoryStore) CreateBinding(_ context.Context, b *RoleBinding) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.roles[b.RoleName]; !ok {
+		return ErrRoleNotFound
+	}
+	for _, existing := range s.bindings {
+		if existing.Username == b.Username && existing.RoleName == b.RoleName {
+			return ErrBindingExists
+		}
+	}
+	id, err := newUUID()
+	if err != nil {
+		return err
+	}
+	b.ID = id
+	b.CreatedAt = time.Now().UTC()
+	s.bindings[id] = *b
+	return nil
+}
+
+func (s *MemoryStore) ListBindings(_ context.Context) ([]RoleBinding, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]RoleBinding, 0, len(s.bindings))
+	for _, b := range s.bindings {
+		result = append(result, b)
+	}
+	return result, nil
+}
+
+func (s *MemoryStore) ListBindingsForUser(_ context.Context, username string) ([]RoleBinding, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]RoleBinding, 0)
+	for _, b := range s.bindings {
+		if b.Username == username {
+			result = append(result, b)
+		}
+	}
+	return result, nil
+}
+
+func (s *MemoryStore) DeleteBinding(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.bindings[id]; !ok {
+		return ErrBindingNotFound
+	}
+	delete(s.bindings, id)
+	return nil
+}
+
 // Ensure interface compliance.
 var _ AuditStore = (*MemoryStore)(nil)
+var _ RBACStore = (*MemoryStore)(nil)

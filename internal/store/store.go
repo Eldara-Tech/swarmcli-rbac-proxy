@@ -44,6 +44,15 @@ const (
 	AuditOnboardCompleted AuditAction = "onboard.completed"
 	AuditGuardBlocked     AuditAction = "guard.blocked"
 	AuditTokenRegenerated AuditAction = "token.regenerated"
+	// AuditRBACDenied marks a request rejected by the RBAC policy engine.
+	// Distinct from AuditGuardBlocked, which marks protected-stack denials.
+	AuditRBACDenied AuditAction = "rbac.denied"
+	// RBAC management mutations (recorded on success).
+	AuditRoleCreated    AuditAction = "role.created"
+	AuditRoleUpdated    AuditAction = "role.updated"
+	AuditRoleDeleted    AuditAction = "role.deleted"
+	AuditBindingCreated AuditAction = "binding.created"
+	AuditBindingDeleted AuditAction = "binding.deleted"
 	// Volume management mutations (recorded on success; denials use
 	// AuditGuardBlocked like every other guarded operation).
 	AuditVolumeCreated     AuditAction = "volume.created"

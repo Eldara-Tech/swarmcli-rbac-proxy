@@ -31,6 +31,12 @@ func newTestPostgresStore(t *testing.T) *PostgresStore {
 	if _, err := s.pool.Exec(ctx, "DELETE FROM audit_log"); err != nil {
 		t.Fatalf("truncate audit_log: %v", err)
 	}
+	if _, err := s.pool.Exec(ctx, "DELETE FROM role_bindings"); err != nil {
+		t.Fatalf("truncate role_bindings: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, "DELETE FROM roles"); err != nil {
+		t.Fatalf("truncate roles: %v", err)
+	}
 	t.Cleanup(func() { s.Close() })
 	return s
 }
@@ -41,6 +47,10 @@ func TestPostgresStore_Contract(t *testing.T) {
 
 func TestPostgresStore_AuditContract(t *testing.T) {
 	testAuditStoreContract(t, func() AuditStore { return newTestPostgresStore(t) })
+}
+
+func TestPostgresStore_RBACContract(t *testing.T) {
+	testRBACStoreContract(t, func() rbacTestStore { return newTestPostgresStore(t) })
 }
 
 // TestPostgresStore_NilIssuedAtExpires simulates an in-place upgrade

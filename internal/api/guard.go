@@ -47,9 +47,7 @@ func parseDockerPath(method, path string) *dockerRoute {
 	}
 
 	// Strip optional version prefix (e.g. "v1.47").
-	if len(parts) > 0 && len(parts[0]) > 1 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
-		parts = parts[1:]
-	}
+	parts = stripDockerVersion(parts)
 
 	if len(parts) == 0 {
 		return nil
@@ -199,10 +197,7 @@ func isExecPath(method, path string) bool {
 	}
 
 	// Docker exec/attach: /[vN.NN/]containers/{id}/exec or .../attach[/ws]
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(parts) > 0 && len(parts[0]) > 1 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
-		parts = parts[1:]
-	}
+	parts := stripDockerVersion(strings.Split(strings.TrimPrefix(path, "/"), "/"))
 	if len(parts) >= 3 && parts[0] == "containers" {
 		// POST .../exec, POST .../attach, GET .../attach/ws
 		if parts[2] == "exec" && method == http.MethodPost {
@@ -404,27 +399,41 @@ func (g *ResourceGuard) Wrap(next http.Handler) http.Handler {
 // isProtectedResource checks whether the Docker resource belongs to the
 // protected stack by querying the Docker API.
 func (g *ResourceGuard) isProtectedResource(ctx context.Context, resource, id string) (bool, error) {
-	if g.httpClient == nil {
-		return false, nil
+	ns, err := g.resourceStackLabel(ctx, resource, id)
+	if err != nil {
+		return false, err
+	}
+	return ns != "" && ns == g.stackName, nil
+}
+
+// resourceStackLabel returns the com.docker.stack.namespace label of a Docker
+// resource (the stack it belongs to), or "" if it carries none / is not found.
+// This is the general form behind isProtectedResource: the RBAC layer uses the
+// label to decide whether a mutation is governed by the "stacks" resource,
+// while the protected-stack guard compares it to its own stack name. A 5xx from
+// the daemon is surfaced as an error so callers can fail closed.
+func (g *ResourceGuard) resourceStackLabel(ctx context.Context, resource, id string) (string, error) {
+	if g == nil || g.httpClient == nil {
+		return "", nil
 	}
 
 	url := "http://docker/" + resource + "/" + id
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode >= 500 {
-			return false, fmt.Errorf("docker API returned %d", resp.StatusCode)
+			return "", fmt.Errorf("docker API returned %d", resp.StatusCode)
 		}
-		return false, nil // resource not found — not protected
+		return "", nil // resource not found — no label
 	}
 
 	// Networks and volumes have Labels at top level; services, secrets,
@@ -436,16 +445,13 @@ func (g *ResourceGuard) isProtectedResource(ctx context.Context, resource, id st
 		} `json:"Spec"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false, err
+		return "", err
 	}
 
-	if result.Spec.Labels[stackNamespaceLabel] == g.stackName {
-		return true, nil
+	if ns := result.Spec.Labels[stackNamespaceLabel]; ns != "" {
+		return ns, nil
 	}
-	if result.Labels[stackNamespaceLabel] == g.stackName {
-		return true, nil
-	}
-	return false, nil
+	return result.Labels[stackNamespaceLabel], nil
 }
 
 // readCreateBody reads the request body with a 2 MB cap and restores it so
@@ -471,8 +477,20 @@ func (g *ResourceGuard) readCreateBody(r *http.Request) ([]byte, error) {
 // bodyHasProtectedLabel checks whether a create-request payload carries the
 // protected stack's namespace label at top level or under Spec.
 func (g *ResourceGuard) bodyHasProtectedLabel(data []byte) (bool, error) {
+	ns, err := stackLabelFromBody(data)
+	if err != nil {
+		return false, err
+	}
+	return ns != "" && ns == g.stackName, nil
+}
+
+// stackLabelFromBody returns the com.docker.stack.namespace label carried by a
+// create-request payload (top level or under Spec), or "" if none. The RBAC
+// layer uses it to decide whether a create is governed by the "stacks"
+// resource; bodyHasProtectedLabel compares it to the protected stack name.
+func stackLabelFromBody(data []byte) (string, error) {
 	if len(data) == 0 {
-		return false, nil
+		return "", nil
 	}
 	var body struct {
 		Labels map[string]string `json:"Labels"`
@@ -481,15 +499,12 @@ func (g *ResourceGuard) bodyHasProtectedLabel(data []byte) (bool, error) {
 		} `json:"Spec"`
 	}
 	if err := json.Unmarshal(data, &body); err != nil {
-		return false, err
+		return "", err
 	}
-	if body.Labels[stackNamespaceLabel] == g.stackName {
-		return true, nil
+	if ns := body.Labels[stackNamespaceLabel]; ns != "" {
+		return ns, nil
 	}
-	if body.Spec.Labels[stackNamespaceLabel] == g.stackName {
-		return true, nil
-	}
-	return false, nil
+	return body.Spec.Labels[stackNamespaceLabel], nil
 }
 
 // bodyHasProtectedNetworkAttachment checks whether a service create/update
@@ -543,10 +558,7 @@ func (g *ResourceGuard) isProtectedExecTarget(ctx context.Context, path string, 
 	}
 
 	// Docker exec/attach: /[vN.NN/]containers/{id}/exec|attach[/ws]
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(parts) > 0 && len(parts[0]) > 1 && parts[0][0] == 'v' && parts[0][1] >= '0' && parts[0][1] <= '9' {
-		parts = parts[1:]
-	}
+	parts := stripDockerVersion(strings.Split(strings.TrimPrefix(path, "/"), "/"))
 	if len(parts) >= 3 && parts[0] == "containers" {
 		return g.isProtectedContainer(ctx, parts[1])
 	}
