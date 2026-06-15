@@ -73,7 +73,8 @@ with it (deny-wins).
 - **Built-in roles** `viewer`/`operator`/`admin` are seeded idempotently on
   startup (`SeedDefaultRoles`) and never overwritten if edited. Legacy users are
   migrated on startup (`MigrateLegacyRoles`): `User.Role` admin→admin, else
-  →viewer. `User.Role` is retained as the source for the protected-stack
+  →operator (operator, not viewer, so an upgraded non-admin keeps the
+  non-protected create/update/exec it had pre-RBAC). `User.Role` is retained as the source for the protected-stack
   `isAdmin` gate (a separate axis from RBAC).
 - **Mapping**: `internal/api/rbacmap.go` maps each request to one
   `{resource, verb}` (e.g. `GET /services`→`services:list`,
@@ -269,7 +270,7 @@ swcproxy binding rm <id>                  # Remove a role binding (last-admin pr
 swcproxy --help                           # Usage info
 ```
 
-`swcproxy user add` also creates a matching role binding (`--admin` → `admin`, else `viewer`) so the legacy role and RBAC binding stay in sync.
+`swcproxy user add` also creates a matching role binding (`--admin` → `admin`, else `operator`) so the legacy role and RBAC binding stay in sync.
 
 ## Audit Log
 

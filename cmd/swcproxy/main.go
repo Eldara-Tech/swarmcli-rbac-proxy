@@ -227,9 +227,11 @@ func cmdUserAdd(username string, admin bool) {
 	}
 
 	// Keep the RBAC binding in sync with the legacy role: admin → admin,
-	// otherwise → viewer. Best-effort (roles are seeded by the proxy at
+	// otherwise → operator (matching MigrateLegacyRoles, so a freshly-added
+	// non-admin user has the same non-protected create/update/exec a migrated
+	// legacy user keeps). Best-effort (roles are seeded by the proxy at
 	// startup; if absent the binding is skipped and can be added later).
-	bindRole := store.RoleViewer
+	bindRole := store.RoleOperator
 	if admin {
 		bindRole = store.RoleAdmin
 	}

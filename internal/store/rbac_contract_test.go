@@ -251,8 +251,8 @@ func testRBACStoreContract(t *testing.T, newStore func() rbacTestStore) {
 			t.Fatalf("admin user not bound to admin role: %+v", admBindings)
 		}
 		usrBindings, _ := s.ListBindingsForUser(ctx, "usr")
-		if len(usrBindings) != 1 || usrBindings[0].RoleName != RoleViewer {
-			t.Fatalf("user not bound to viewer role: %+v", usrBindings)
+		if len(usrBindings) != 1 || usrBindings[0].RoleName != RoleOperator {
+			t.Fatalf("user not bound to operator role: %+v", usrBindings)
 		}
 		// Idempotent: running again adds no bindings.
 		if err := MigrateLegacyRoles(ctx, s, s); err != nil {

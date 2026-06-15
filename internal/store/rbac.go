@@ -254,7 +254,10 @@ func SeedDefaultRoles(ctx context.Context, rs RBACStore) error {
 
 // MigrateLegacyRoles creates a role binding for every user that has none yet,
 // derived from the legacy User.Role field (admin → admin, anything else →
-// viewer). Idempotent: users that already have a binding are left untouched.
+// operator). operator (not viewer) is the non-admin default so an upgraded
+// legacy user keeps the non-protected create/update/exec they had under the
+// pre-RBAC model; viewer is a stricter, read-only tier an admin assigns
+// explicitly. Idempotent: users that already have a binding are left untouched.
 // User.Role is retained as the source for the protected-stack admin gate.
 func MigrateLegacyRoles(ctx context.Context, us UserStore, rs RBACStore) error {
 	users, err := us.ListUsers(ctx)
@@ -269,7 +272,7 @@ func MigrateLegacyRoles(ctx context.Context, us UserStore, rs RBACStore) error {
 		if len(existing) > 0 {
 			continue
 		}
-		roleName := RoleViewer
+		roleName := RoleOperator
 		if u.Role == RoleAdmin {
 			roleName = RoleAdmin
 		}

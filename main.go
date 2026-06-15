@@ -465,7 +465,7 @@ func main() {
 
 	// Seed the built-in roles (idempotent; never clobbers admin edits) and
 	// migrate any users that predate RBAC into a role binding derived from
-	// their legacy User.Role (admin → admin, else → viewer).
+	// their legacy User.Role (admin → admin, else → operator).
 	if err := store.SeedDefaultRoles(context.Background(), rbacStore); err != nil {
 		l().Fatalw("seed default roles failed", "error", err)
 	}
