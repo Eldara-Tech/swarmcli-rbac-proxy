@@ -162,6 +162,8 @@ func volumeAuditAction(method, path string) (store.AuditAction, string) {
 		return store.AuditVolumeFileDeleted, "delete file"
 	case method == http.MethodPost && strings.HasSuffix(path, "/files/rename"):
 		return store.AuditVolumeFileRenamed, "rename file"
+	case method == http.MethodPost && strings.HasSuffix(path, "/files/upload"):
+		return store.AuditVolumeFileUploaded, "upload file"
 	case method == http.MethodDelete:
 		return store.AuditVolumeDeleted, "delete volume"
 	}

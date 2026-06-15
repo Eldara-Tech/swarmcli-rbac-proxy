@@ -168,6 +168,60 @@ func TestVolumeGuard_FileDeleteProtected_Denied(t *testing.T) {
 	}
 }
 
+func TestVolumeGuard_FileUploadProtected_Denied(t *testing.T) {
+	g := newVolGuard(t, map[string]string{"infra-db": "swarmcli-infra"})
+	var reached bool
+	h := g.ExecGuard(okNext(&reached))
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/volumes/infra-db/files/upload?node_id=n1&path=/x&mode=file", strings.NewReader("payload"))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if reached || w.Code != http.StatusForbidden {
+		t.Fatalf("upload to protected volume must be 403, got reached=%v code=%d", reached, w.Code)
+	}
+}
+
+func TestVolumeGuard_FileUploadUnprotected_Allowed(t *testing.T) {
+	g := newVolGuard(t, map[string]string{"app-data": "user-app"})
+	var reached bool
+	h := g.ExecGuard(okNext(&reached))
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/volumes/app-data/files/upload?node_id=n1&path=/x&mode=file", strings.NewReader("payload"))
+	r = withUser(r, &store.User{Role: "user"})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if !reached {
+		t.Fatal("upload to a non-protected volume should pass for any authenticated user")
+	}
+}
+
+func TestVolumeGuard_FileUploadIsAudited(t *testing.T) {
+	mem := store.NewMemoryStore()
+	g := NewResourceGuard("swarmcli-infra", "", mem)
+	bq := volBackQuery(t, map[string]string{"app-data": "user-app"})
+	g.SetAgentManager(bq.Client(), bq.URL)
+
+	var reached bool
+	h := g.ExecGuard(okNext(&reached))
+	r := httptest.NewRequest(http.MethodPost, "/v1/volumes/app-data/files/upload?node_id=n1&path=/x&mode=file", strings.NewReader("payload"))
+	r = withUser(r, &store.User{Role: "user"})
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	if !reached {
+		t.Fatal("expected pass-through")
+	}
+	entries, err := mem.ListAuditEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Action != store.AuditVolumeFileUploaded || entries[0].Status != "success" {
+		t.Fatalf("expected one volume.file.uploaded success audit, got %+v", entries)
+	}
+}
+
 func TestVolumeGuard_SuccessIsAudited(t *testing.T) {
 	mem := store.NewMemoryStore()
 	g := NewResourceGuard("swarmcli-infra", "", mem)
