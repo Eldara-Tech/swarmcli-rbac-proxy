@@ -101,7 +101,8 @@ jq -e . "$WORK/redir.json" >/dev/null 2>&1 && echo "valid (unexpected!)" || echo
 ```
 
 Expected: `-o` file mode is `600`; the redirected file begins with a
-`{"level":"INFO",...store initialized...}` line and `jq` reports
+`store initialized` log line (console-formatted under `PROXY_ENV=dev`, a
+`{"level":"INFO",...}` JSON line in prod) and `jq` reports
 `INVALID JSON (expected — use -o)`.
 
 ### 2.3 The export is audited
@@ -374,16 +375,22 @@ export PROXY_DATABASE_URL='postgres://postgres:pass@localhost:5432/postgres?sslm
 swc restore -i "$WORK/backup.json"      # 3 users
 swc user ls
 swc backup -o "$WORK/pg-reexport.json"
-diff <(jq -S '.users' "$WORK/backup.json") \
-     <(jq -S '.users' "$WORK/pg-reexport.json") && echo "PORTABLE: USERS IDENTICAL"
+
+# Compare on stable identity fields (id/username/role/enabled/token). Do NOT
+# diff the whole object: Postgres timestamptz keeps microseconds while SQLite
+# keeps nanoseconds, so created_at/updated_at can differ in trailing digits
+# across backends even for the same instant — expected, not a data loss.
+proj='[.users[]|{id,username,role,enabled,tok:(.onboard_token|length>0)}]|sort_by(.username)'
+diff <(jq -S "$proj" "$WORK/backup.json") \
+     <(jq -S "$proj" "$WORK/pg-reexport.json") && echo "PORTABLE: USER IDENTITIES IDENTICAL"
 
 docker rm -f pgtest
 unset PROXY_STORE PROXY_DATABASE_URL
 ```
 
-Expected: `PORTABLE: USERS IDENTICAL`. (The integration test
-`TestPostgresStore_BackupContract` covers this in CI; this is the manual
-cross-backend confirmation.)
+Expected: `PORTABLE: USER IDENTITIES IDENTICAL`. (The integration test
+`TestPostgresStore_BackupContract` covers same-backend round-trips in CI; this
+is the manual cross-backend confirmation.)
 
 ---
 
@@ -397,7 +404,8 @@ The ultimate test is an onboarded user surviving a full rebuild. This mirrors
 2. `docker exec <proxy> swcproxy backup --include-ca -o /data/dr.json`.
 3. Tear the stack down, delete the volume and the `rbac_client_ca*` secrets
    (simulate disaster). Redeploy on an empty volume.
-4. `docker exec -i <proxy> swcproxy restore -i /data/dr.json --ca-out /data/ca`.
+4. `docker exec <proxy> mkdir -p /data/ca` (restore won't create `--ca-out`),
+   then `docker exec -i <proxy> swcproxy restore -i /data/dr.json --ca-out /data/ca`.
 5. Run the printed `docker secret create` + `docker stack deploy` commands.
 6. From the **original** user's machine: `docker context use <ctx> && docker ps`.
 
