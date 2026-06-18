@@ -10,10 +10,10 @@ Automated coverage lives in `internal/store/contract_test.go`
 (`testBackupStoreContract`) and `cmd/swcproxy/main_test.go` (flag parsing); the
 negative / edge-case checks are kept in an HTML comment at the end of this file.
 
-Conventions: `$` is your shell; shown output is **expected**. Human messages go
-to **stderr**. **Capture the artifact with `-o <file>`, not `> file`** — a
-`store initialized` log line lands on stdout ahead of the JSON, so a shell
-redirect produces invalid JSON; `-o` writes the file directly and is clean.
+Conventions: `$` is your shell; shown output is **expected**. Logs and human
+messages go to **stderr**; stdout carries only command output, so both
+`swcproxy backup > file.json` and `swcproxy backup | ...` are clean. `-o <file>`
+is a convenience that writes the artifact directly (mode `0600`).
 
 ## 1. Setup
 
@@ -119,9 +119,8 @@ jq '.ca.cert_pem[0:27], (.ca.key_pem|length>0)' "$WORK/dr.json"
 Restore the bundle into a fresh store, extracting the CA with `--ca-out`:
 
 ```bash
-mkdir -p "$WORK/caout"     # restore does NOT create --ca-out; it must exist
 export PROXY_DATABASE_PATH="$WORK/dr.db"
-swc restore -i "$WORK/dr.json" --ca-out "$WORK/caout"
+swc restore -i "$WORK/dr.json" --ca-out "$WORK/caout"   # --ca-out is created if absent
 stat -c '%a' "$WORK/caout/ca-cert.pem" "$WORK/caout/ca-key.pem"   # 600 600
 ```
 
@@ -144,8 +143,8 @@ The ultimate test is an onboarded user surviving a full rebuild. Mirrors
 2. `docker exec <proxy> swcproxy backup --include-ca -o /data/dr.json`.
 3. Tear the stack down, delete the volume and the `rbac_client_ca*` secrets
    (simulate disaster). Redeploy on an empty volume.
-4. `docker exec <proxy> mkdir -p /data/ca` (restore won't create `--ca-out`),
-   then `docker exec -i <proxy> swcproxy restore -i /data/dr.json --ca-out /data/ca`.
+4. `docker exec -i <proxy> swcproxy restore -i /data/dr.json --ca-out /data/ca`
+   (`--ca-out` is created if it doesn't exist).
 5. Run the printed `docker secret create` + `docker stack deploy` commands.
 6. From the **original** user's machine: `docker context use <ctx> && docker ps`.
 
@@ -197,18 +196,6 @@ setup (WORK, PROXY_* env, `swc` alias) and the artifacts produced above
 ($WORK/backup.json, $WORK/dr.json). All failure messages go to stderr with
 an `error: ` prefix and exit code 1.
 
---- Backup: stdout redirect corrupts the artifact (known issue) -------------
-The `store initialized` log line lands on stdout ahead of the JSON, so a shell
-redirect yields invalid JSON (reproduces in both PROXY_ENV=dev and prod). The
-repo's docs/backup-restore.md § "Routine backup" still shows the `>` form.
-Until the CLI routes logs to stderr (or silences info logs), always use -o.
-
-    swc backup > "$WORK/redir.json" 2>/dev/null
-    head -c 40 "$WORK/redir.json"; echo
-    jq -e . "$WORK/redir.json" >/dev/null 2>&1 \
-      && echo "valid (unexpected!)" || echo "INVALID JSON (expected — use -o)"
-    # dev: a console "... INFO ... store initialized" line; prod: a {"level":"INFO",...} line
-
 --- Restore: refuses a non-empty store without --force ----------------------
     export PROXY_DATABASE_PATH="$WORK/proxy.db"   # the populated store
     swc restore -i "$WORK/backup.json"; echo "exit=$?"
@@ -248,14 +235,6 @@ Until the CLI routes logs to stderr (or silences info logs), always use -o.
     rm -f "$WORK/dr.db"*; export PROXY_DATABASE_PATH="$WORK/dr.db"
     swc restore -i "$WORK/dr.json"; echo "exit=$?"
     # error: backup contains CA material: pass --ca-out <dir> to extract it   exit=1  (store still empty)
-
---- Restore: --ca-out directory must exist (non-atomic partial restore) -----
-If the dir is missing, the users/audit import still runs, then the CA write
-fails — DB imported, CA not extracted. Always `mkdir -p` the target first.
-    rm -f "$WORK/dr.db"*; export PROXY_DATABASE_PATH="$WORK/dr.db"
-    swc restore -i "$WORK/dr.json" --ca-out "$WORK/nope"; echo "exit=$?"
-    # Restored 3 users and N audit entries
-    # error: write .../nope/ca-cert.pem: ... no such file or directory   exit=1
 
 --- Restore: preflight warns on CA mismatch ---------------------------------
     openssl ecparam -name prime256v1 -genkey -noout -out "$WORK/ca2-key.pem"

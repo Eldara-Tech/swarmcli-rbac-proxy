@@ -149,7 +149,9 @@ func openStore() (store.UserStore, store.RBACStore, store.AuditStore) {
 	if err != nil {
 		fatal("load config: %v", err)
 	}
-	proxylog.Init(cfg.Env, cfg.LogLevel)
+	// Log to stderr: stdout is reserved for command output (e.g. the `backup`
+	// JSON artifact, which must stay valid when redirected or piped).
+	proxylog.InitTo(os.Stderr, cfg.Env, cfg.LogLevel)
 
 	ctx := context.Background()
 	switch cfg.Store {

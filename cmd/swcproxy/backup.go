@@ -290,6 +290,13 @@ func runRestoreCommand(args []string) {
 	if doc.CA != nil && o.caOut == "" {
 		fatal("backup contains CA material: pass --ca-out <dir> to extract it")
 	}
+	// Prepare the CA-out destination before mutating the store, so a bad path
+	// fails here rather than after the import leaves a half-restored DB.
+	if doc.CA != nil {
+		if err := os.MkdirAll(o.caOut, 0o700); err != nil {
+			fatal("create --ca-out dir %s: %v", o.caOut, err)
+		}
+	}
 
 	ctx := context.Background()
 	bs, audit := openBackupStore()

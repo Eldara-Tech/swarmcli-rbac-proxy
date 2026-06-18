@@ -239,11 +239,10 @@ func TestCLIBackup_ToFile_ValidAnd0600(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
+	// stdout is reserved for command output; with -o there is none (the artifact
+	// goes to the file and logs go to stderr).
 	if stdout != "" {
-		// stdout carries only the dev-mode store-init log line, never the JSON.
-		if !strings.Contains(stdout, "store initialized") {
-			t.Errorf("unexpected stdout: %q", stdout)
-		}
+		t.Errorf("expected empty stdout with -o, got %q", stdout)
 	}
 	if !strings.Contains(stderr, "Backed up 3 users") {
 		t.Errorf("missing summary on stderr: %q", stderr)
@@ -352,13 +351,10 @@ func TestCLIBackup_MemoryStoreRejected(t *testing.T) {
 	}
 }
 
-// TestCLIBackup_StdoutRedirectCorrupts_KnownIssue pins the current behaviour
-// that `swcproxy backup` (no -o) emits a "store initialized" log line on stdout
-// before the JSON, so a shell redirect yields an invalid-JSON artifact. The -o
-// path (TestCLIBackup_ToFile_ValidAnd0600) is the clean alternative. When the
-// CLI is fixed to route logs to stderr, stdout should become valid JSON and
-// this test should be flipped to assert that.
-func TestCLIBackup_StdoutRedirectCorrupts_KnownIssue(t *testing.T) {
+// TestCLIBackup_StdoutIsValidJSON verifies that `swcproxy backup` (no -o) writes
+// only the JSON artifact to stdout — logs go to stderr — so a shell redirect
+// (`swcproxy backup > file.json`) yields a valid backup.
+func TestCLIBackup_StdoutIsValidJSON(t *testing.T) {
 	db := dbPath(t)
 	seedUsers(t, db, "alice")
 
@@ -366,11 +362,22 @@ func TestCLIBackup_StdoutRedirectCorrupts_KnownIssue(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stdout, "store initialized") {
-		t.Errorf("expected store-init log line on stdout, got %.80q", stdout)
+	if !json.Valid([]byte(stdout)) {
+		t.Fatalf("stdout is not valid JSON:\n%.200q", stdout)
 	}
-	if json.Valid([]byte(stdout)) {
-		t.Errorf("KNOWN ISSUE RESOLVED: stdout is now valid JSON — flip this test to assert the happy path")
+	if strings.Contains(stdout, "store initialized") {
+		t.Errorf("log line leaked onto stdout: %.120q", stdout)
+	}
+	var doc backupDoc
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("unmarshal stdout: %v", err)
+	}
+	if doc.Schema != backupSchema || len(doc.Users) != 1 {
+		t.Errorf("unexpected doc: schema=%q users=%d", doc.Schema, len(doc.Users))
+	}
+	// The diagnostic line must still be emitted — on stderr.
+	if !strings.Contains(stderr, "store initialized") {
+		t.Errorf("expected store-init log on stderr, got %q", stderr)
 	}
 }
 
@@ -611,29 +618,30 @@ func TestCLIRestore_CABundle_PreflightMismatch(t *testing.T) {
 	}
 }
 
-// TestCLIRestore_CaOutDirMissing_PartialRestore pins the current non-atomic
-// behaviour: with a non-existent --ca-out directory, restore imports the
-// users/audit log and only then fails writing the CA, leaving the DB populated
-// but no CA extracted. A future fix should either pre-create the directory or
-// validate it before importing.
-func TestCLIRestore_CaOutDirMissing_PartialRestore(t *testing.T) {
+// TestCLIRestore_CaOutDirAutoCreated verifies that a non-existent --ca-out
+// directory is created (mode 0700) before the import, so a DR restore into a
+// fresh path succeeds atomically rather than leaving a half-restored DB.
+func TestCLIRestore_CaOutDirAutoCreated(t *testing.T) {
 	bundle, certPath, _ := makeDRBundle(t)
 	dstDB := dbPath(t)
 	seedUsers(t, dstDB)
 
 	env := baseEnv(dstDB)
 	env["PROXY_TLS_CLIENT_CA"] = certPath
-	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	missing := filepath.Join(t.TempDir(), "made", "by", "restore")
 
 	_, stderr, code := runCLI(t, env, "", "restore", "-i", bundle, "--ca-out", missing)
-	if code != 1 {
-		t.Fatalf("exit=%d, want 1; stderr=%q", code, stderr)
-	}
-	if !strings.Contains(stderr, "no such file or directory") {
-		t.Errorf("unexpected stderr: %q", stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
 	if n := storeUserCount(t, dstDB); n != 3 {
-		t.Errorf("KNOWN ISSUE CHANGED: expected partial restore (3 users imported), got %d", n)
+		t.Errorf("got %d users, want 3", n)
+	}
+	if got := mode(t, filepath.Join(missing, "ca-cert.pem")); got != 0o600 {
+		t.Errorf("ca-cert.pem mode = %o, want 600", got)
+	}
+	if got := mode(t, filepath.Join(missing, "ca-key.pem")); got != 0o600 {
+		t.Errorf("ca-key.pem mode = %o, want 600", got)
 	}
 }
 
