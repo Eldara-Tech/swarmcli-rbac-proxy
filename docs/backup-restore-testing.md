@@ -1,40 +1,21 @@
 # Manual test guide — `swcproxy backup` / `restore`
 
-A step-by-step QA checklist for the logical backup/restore feature
-(`cmd/swcproxy/backup.go`). It exercises every branch a reviewer can reach by
-hand: routine export, the `--include-ca` DR bundle, schema/version guards, the
-non-empty-store guard, verbatim round-trips, CA extraction, the CA-match
-preflight, and cross-backend portability.
+A happy-path walkthrough for manually verifying the logical backup/restore
+feature (`cmd/swcproxy/backup.go`): back up the user database (optionally with
+the client CA), restore it, and confirm an onboarded user survives. Runs
+against the default SQLite backend in a scratch directory — no proxy process,
+Swarm, or mTLS required (except the end-to-end rehearsal in § 5).
 
-The automated coverage lives in `internal/store/contract_test.go`
-(`testBackupStoreContract`) and `cmd/swcproxy/main_test.go` (flag parsing).
-This guide is the manual layer on top — run it before tagging a release that
-touches backup/restore, or when reviewing PR #107.
+Automated coverage lives in `internal/store/contract_test.go`
+(`testBackupStoreContract`) and `cmd/swcproxy/main_test.go` (flag parsing); the
+negative / edge-case checks are kept in an HTML comment at the end of this file.
 
-## 0. Conventions
+Conventions: `$` is your shell; shown output is **expected**. Human messages go
+to **stderr**. **Capture the artifact with `-o <file>`, not `> file`** — a
+`store initialized` log line lands on stdout ahead of the JSON, so a shell
+redirect produces invalid JSON; `-o` writes the file directly and is clean.
 
-- `$` is your shell. Output shown is **expected**; deviations are failures.
-- Human messages and fatal errors go to **stderr**, prefixed `error: ` on the
-  failure path. Exit code `0` = success, `1` = failure — check `echo $?`
-  whenever a step is expected to fail.
-- **Use `-o <file>` to capture the artifact, not `> file`.** `openStore()`
-  emits a `store initialized` INFO line on **stdout** before the JSON is
-  written, so `swcproxy backup > file.json` produces a file with a log line
-  prepended (invalid JSON). `-o` writes the file directly via `os.WriteFile`
-  and is always clean. See the Known issue below — this guide uses `-o`
-  throughout.
-
-> ### ⚠️ Known issue — stdout redirect corrupts the artifact
-> `swcproxy backup > backup.json` yields invalid JSON because the store's
-> `store initialized` INFO line lands on stdout before the JSON (reproduces in
-> both `PROXY_ENV=dev` and prod). Note `docs/backup-restore.md` § "Routine
-> backup" still shows the `>` form. Until the CLI routes logs to stderr (or
-> silences info-level logging), **always use `-o`.**
-
-## 1. Local setup (SQLite, no Docker/Swarm needed)
-
-Most cases run against the default SQLite backend in a scratch directory — no
-proxy process, Swarm, or mTLS required. `swcproxy` talks to the store directly.
+## 1. Setup
 
 ```bash
 cd swarmcli-rbac-proxy
@@ -52,97 +33,44 @@ swc user add alice --admin
 swc user add bob
 swc user add carol
 swc user ls          # confirm 3 users, alice=admin
-swc audit ls         # confirm user.created / cert.issued entries exist
 ```
 
-> Tip: to start over at any point, `rm -f "$PROXY_DATABASE_PATH"*` (the `*`
-> clears the WAL/SHM sidecars too) and re-seed.
-
----
-
-## 2. Routine backup (database only)
-
-### 2.1 Backup to a file (canonical artifact for later steps)
+## 2. Back up the database
 
 ```bash
 swc backup -o "$WORK/backup.json"
 ```
 
 Expected:
-- stderr: `Backed up 3 users and N audit entries to $WORK/backup.json`
-- stderr: the three-line "this backup does NOT contain the client CA" note.
-- `$WORK/backup.json` is valid JSON. Verify:
+- stderr: `Backed up 3 users and N audit entries to $WORK/backup.json`, then the
+  three-line "this backup does NOT contain the client CA" note.
+- the file is valid JSON, mode `0600`, and carries the onboarding-token columns
+  (`swcproxy user ls` / the API hide them):
 
 ```bash
+stat -c '%a' "$WORK/backup.json"   # 600
 jq '.schema, .version, (.users|length), (.ca==null)' "$WORK/backup.json"
 # "swarmcli-rbac-proxy/backup"
 # 1
 # 3
 # true
-```
-
-- Each user object carries `onboard_token` and `token_issued_at` (these are
-  exported even though `swcproxy user ls` / the API hide them):
-
-```bash
 jq '.users[0] | {username, role, has_token: (.onboard_token|length>0)}' "$WORK/backup.json"
 ```
 
-### 2.2 File mode is 0600, and confirm the stdout-redirect corruption
+The export is audited — `swc audit ls | grep backup.exported` shows a `cli`
+row with detail `users=3 audit=N ca=false`.
+
+## 3. Restore the database
 
 ```bash
-swc backup -o "$WORK/backup-o.json"
-stat -c '%a' "$WORK/backup-o.json"   # 600
-
-# Demonstrate the Known issue: a redirected backup is NOT valid JSON.
-swc backup > "$WORK/redir.json" 2>/dev/null
-head -c 40 "$WORK/redir.json"; echo
-jq -e . "$WORK/redir.json" >/dev/null 2>&1 && echo "valid (unexpected!)" || echo "INVALID JSON (expected — use -o)"
-```
-
-Expected: `-o` file mode is `600`; the redirected file begins with a
-`store initialized` log line (console-formatted under `PROXY_ENV=dev`, a
-`{"level":"INFO",...}` JSON line in prod) and `jq` reports
-`INVALID JSON (expected — use -o)`.
-
-### 2.3 The export is audited
-
-```bash
-swc audit ls | grep backup.exported
-```
-
-Expected: a `backup.exported` row, actor `cli`, detail like
-`users=3 audit=N ca=false`.
-
----
-
-## 3. Restore round-trip (verbatim)
-
-### 3.1 Guard: restore refuses a non-empty store
-
-```bash
-swc restore -i "$WORK/backup.json"; echo "exit=$?"
-```
-
-Expected: `error: store already has 3 users; pass --force to replace them`,
-`exit=1`, store untouched.
-
-### 3.2 Restore into a fresh store
-
-```bash
-export PROXY_DATABASE_PATH="$WORK/restored.db"
+export PROXY_DATABASE_PATH="$WORK/restored.db"   # a fresh, empty store
 swc restore -i "$WORK/backup.json"
-swc user ls
+swc user ls                                       # the same three users
 ```
 
-Expected: `Restored 3 users and N audit entries`, and `user ls` shows the same
-three users. The trailing stderr note explains the CA caveat.
-
-### 3.3 Verbatim check — IDs and timestamps preserved
-
-Re-export the restored store and diff the user set against the original. IDs,
-roles, timestamps and token state must be byte-identical (order is by
-`created_at`).
+Expected: `Restored 3 users and N audit entries`, and the trailing CA caveat.
+The import is **verbatim** — IDs, roles, timestamps and token state round-trip
+exactly. Confirm by re-exporting and diffing:
 
 ```bash
 swc backup -o "$WORK/reexport.json"
@@ -150,109 +78,37 @@ diff <(jq -S '.users' "$WORK/backup.json") \
      <(jq -S '.users' "$WORK/reexport.json") && echo "USERS IDENTICAL"
 ```
 
-Expected: `USERS IDENTICAL` (no diff). Do the same for `.audit` if desired.
+A backup can also be piped in (`swc restore < "$WORK/backup.json"`).
 
-### 3.4 `--force` replaces an existing store atomically
+To overwrite a store that already has users, pass `--force` (DELETE + import in
+one transaction):
 
 ```bash
-# restored.db currently has alice/bob/carol. Make a different backup:
-export PROXY_DATABASE_PATH="$WORK/other.db"
-swc user add dave --admin
-swc backup -o "$WORK/dave.json"
-
-# Force-restore dave.json over the 3-user store:
-export PROXY_DATABASE_PATH="$WORK/restored.db"
-swc restore -i "$WORK/dave.json" --force
-swc user ls          # only dave remains
+swc restore -i "$WORK/backup.json" --force      # replaces existing users + audit
 ```
 
-Expected: only `dave` present — the prior alice/bob/carol are gone (DELETE +
-import inside one transaction).
+`restore --force` is audited as a `backup.restored` row
+(`detail: ... force=true`).
 
-### 3.5 Restore is audited
+## 4. Back up and restore with the CA (DR bundle)
 
-```bash
-swc audit ls | grep backup.restored
-```
-
-Expected: `backup.restored` row, detail like `users=1 audit=M ca=false force=true`.
-
-### 3.6 stdin path
+The client CA lives in Docker secrets, **not** the database; `--include-ca`
+embeds the cert+key so a single file fully restores service. Supply a CA via the
+same env vars the proxy uses (here, a throwaway one):
 
 ```bash
-rm -f "$WORK/stdin.db"*; export PROXY_DATABASE_PATH="$WORK/stdin.db"
-swc restore < "$WORK/backup.json"
-swc user ls          # 3 users
-```
-
-Expected: piping on stdin works identically to `-i`. With no `-i` **and** a
-terminal stdin (no pipe), expect `error: no input: pipe a backup into stdin or
-pass -i <file>`.
-
----
-
-## 4. Schema / version guards
-
-Corrupt copies must be rejected **before** the store is touched.
-
-```bash
-# Wrong schema
-jq '.schema="evil"' "$WORK/backup.json" > "$WORK/bad-schema.json"
-rm -f "$WORK/g.db"*; export PROXY_DATABASE_PATH="$WORK/g.db"
-swc restore -i "$WORK/bad-schema.json"; echo "exit=$?"
-# error: unrecognised backup schema "evil" (want "swarmcli-rbac-proxy/backup")  exit=1
-
-# Wrong version
-jq '.version=99' "$WORK/backup.json" > "$WORK/bad-version.json"
-swc restore -i "$WORK/bad-version.json"; echo "exit=$?"
-# error: unsupported backup version 99 (want 1)  exit=1
-
-# Malformed JSON
-echo 'not json' > "$WORK/bad.json"
-swc restore -i "$WORK/bad.json"; echo "exit=$?"
-# error: parse backup: ...  exit=1
-```
-
-Expected for all three: non-zero exit, and `swc user ls` against `g.db` shows
-**0 users** (the guards fire before any write).
-
----
-
-## 5. DR bundle (`--include-ca`)
-
-The CA lives outside the database; `--include-ca` embeds it. We supply a
-throwaway CA via the same env vars the proxy uses.
-
-```bash
-# Generate a throwaway client CA (ECDSA, like certauth.GenerateCA).
 openssl ecparam -name prime256v1 -genkey -noout -out "$WORK/ca-key.pem"
 openssl req -x509 -new -key "$WORK/ca-key.pem" -days 3650 \
   -subj "/CN=swarmcli-test-ca" -out "$WORK/ca-cert.pem"
-
 export PROXY_TLS_CLIENT_CA="$WORK/ca-cert.pem"
 export PROXY_TLS_CLIENT_CA_KEY="$WORK/ca-key.pem"
-export PROXY_DATABASE_PATH="$WORK/proxy.db"   # back to the 3-user store
-```
+export PROXY_DATABASE_PATH="$WORK/proxy.db"      # the 3-user store
 
-### 5.1 Refuses to print the key to a terminal
-
-```bash
-swc backup --include-ca; echo "exit=$?"
-```
-
-Expected (when stdout is a TTY): `error: --include-ca writes the root signing
-key; redirect to a file or pipe, or use -o <file>`, `exit=1`. (Redirecting,
-e.g. `swc backup --include-ca > f.json`, is allowed — the TTY check only fires
-on an interactive stdout.)
-
-### 5.2 Produces a bundle with CA material + loud warning
-
-```bash
 swc backup --include-ca -o "$WORK/dr.json"
 ```
 
-Expected stderr: the two-line `WARNING: this backup embeds the client CA
-private key ...`, then `Backed up 3 users ...`. Verify the CA block:
+Expected: a two-line `WARNING: this backup embeds the client CA private key ...`
+on stderr, and a `.ca` block in the file:
 
 ```bash
 jq '.ca.cert_pem[0:27], (.ca.key_pem|length>0)' "$WORK/dr.json"
@@ -260,143 +116,27 @@ jq '.ca.cert_pem[0:27], (.ca.key_pem|length>0)' "$WORK/dr.json"
 # true
 ```
 
-### 5.3 `--include-ca` requires both CA env vars
+Restore the bundle into a fresh store, extracting the CA with `--ca-out`:
 
 ```bash
-( unset PROXY_TLS_CLIENT_CA_KEY; swc backup --include-ca -o /tmp/x.json ); echo "exit=$?"
-```
-
-Expected: `error: --include-ca requires PROXY_TLS_CLIENT_CA and
-PROXY_TLS_CLIENT_CA_KEY to be configured`, `exit=1`.
-
----
-
-## 6. Restoring a DR bundle
-
-### 6.1 Bundle with CA requires `--ca-out`
-
-```bash
-rm -f "$WORK/dr.db"*; export PROXY_DATABASE_PATH="$WORK/dr.db"
-swc restore -i "$WORK/dr.json"; echo "exit=$?"
-```
-
-Expected: `error: backup contains CA material: pass --ca-out <dir> to extract
-it`, `exit=1`, store still empty (fails fast before import).
-
-### 6.2 Extracts CA (mode 0600) and prints the secret-recreate runbook
-
-```bash
-mkdir -p "$WORK/caout"     # NOTE: restore does NOT create --ca-out; it must exist
+mkdir -p "$WORK/caout"     # restore does NOT create --ca-out; it must exist
+export PROXY_DATABASE_PATH="$WORK/dr.db"
 swc restore -i "$WORK/dr.json" --ca-out "$WORK/caout"
 stat -c '%a' "$WORK/caout/ca-cert.pem" "$WORK/caout/ca-key.pem"   # 600 600
 ```
 
-> Gotcha: `--ca-out <dir>` is **not** created by `restore`. If it is missing,
-> the users/audit import still runs, then the CA write fails with
-> `error: write .../ca-cert.pem: ... no such file or directory` and exit 1 —
-> i.e. a non-atomic partial restore (DB imported, CA not extracted). Always
-> `mkdir -p` the target first.
-
 Expected stderr:
 - `Restored 3 users and N audit entries`
 - `Client CA written to .../ca-cert.pem and .../ca-key.pem.`
-- the four `docker secret rm` / `docker secret create` / `docker stack deploy`
-  lines.
-- **Preflight match**: because `PROXY_TLS_CLIENT_CA` still points at the same
-  cert that was bundled, expect
-  `Preflight: the running deployment already uses this CA — user contexts are
-  unaffected.`
+- the `docker secret rm` / `docker secret create` / `docker stack deploy`
+  runbook lines.
+- a **preflight** line: because `PROXY_TLS_CLIENT_CA` still points at the
+  bundled cert, `Preflight: the running deployment already uses this CA — user
+  contexts are unaffected.`
 
-Confirm the extracted cert equals the configured one:
+## 5. End-to-end in a real Swarm (full DR rehearsal)
 
-```bash
-diff "$WORK/caout/ca-cert.pem" "$WORK/ca-cert.pem" && echo "CA MATCHES"
-```
-
-### 6.3 Preflight warns on CA mismatch
-
-Point the running config at a *different* CA, then restore the bundle again:
-
-```bash
-openssl ecparam -name prime256v1 -genkey -noout -out "$WORK/ca2-key.pem"
-openssl req -x509 -new -key "$WORK/ca2-key.pem" -days 3650 \
-  -subj "/CN=other-ca" -out "$WORK/ca2-cert.pem"
-export PROXY_TLS_CLIENT_CA="$WORK/ca2-cert.pem"
-
-mkdir -p "$WORK/caout2"
-rm -f "$WORK/dr2.db"*; export PROXY_DATABASE_PATH="$WORK/dr2.db"
-swc restore -i "$WORK/dr.json" --ca-out "$WORK/caout2"
-```
-
-Expected: the two-line `Preflight WARNING: the running deployment uses a
-DIFFERENT client CA. ... Existing user contexts will fail mTLS until the CA
-above is deployed.`
-
-Reset for later steps: `export PROXY_TLS_CLIENT_CA="$WORK/ca-cert.pem"`.
-
----
-
-## 7. Backend rejection & flag errors
-
-```bash
-# memory store is rejected (data wouldn't be shared with the proxy process)
-PROXY_STORE=memory swc backup; echo "exit=$?"
-# error: swcproxy cannot use in-memory store ...  exit=1
-
-# unknown flags
-swc backup --nope;  echo "exit=$?"   # error: unknown flag: --nope  + usage  exit=1
-swc restore --nope; echo "exit=$?"   # error: unknown flag: --nope  + usage  exit=1
-
-# missing flag argument
-swc backup -o;        echo "exit=$?" # error: -o requires a file path
-swc restore --ca-out; echo "exit=$?" # error: --ca-out requires a directory path
-
-# help
-swc backup --help     # prints backup usage, exit 0
-swc restore -h        # prints restore usage, exit 0
-```
-
----
-
-## 8. Cross-backend portability (optional — needs PostgreSQL)
-
-The logical export is portable between SQLite and PostgreSQL. Take a SQLite
-backup, restore it into Postgres, and diff.
-
-```bash
-# Start a throwaway Postgres
-docker run -d --rm --name pgtest -e POSTGRES_PASSWORD=pass -p 5432:5432 postgres:17
-sleep 3
-
-export PROXY_STORE=postgres
-export PROXY_DATABASE_URL='postgres://postgres:pass@localhost:5432/postgres?sslmode=disable'
-
-# Restore the SQLite-produced backup into Postgres
-swc restore -i "$WORK/backup.json"      # 3 users
-swc user ls
-swc backup -o "$WORK/pg-reexport.json"
-
-# Compare on stable identity fields (id/username/role/enabled/token). Do NOT
-# diff the whole object: Postgres timestamptz keeps microseconds while SQLite
-# keeps nanoseconds, so created_at/updated_at can differ in trailing digits
-# across backends even for the same instant — expected, not a data loss.
-proj='[.users[]|{id,username,role,enabled,tok:(.onboard_token|length>0)}]|sort_by(.username)'
-diff <(jq -S "$proj" "$WORK/backup.json") \
-     <(jq -S "$proj" "$WORK/pg-reexport.json") && echo "PORTABLE: USER IDENTITIES IDENTICAL"
-
-docker rm -f pgtest
-unset PROXY_STORE PROXY_DATABASE_URL
-```
-
-Expected: `PORTABLE: USER IDENTITIES IDENTICAL`. (The integration test
-`TestPostgresStore_BackupContract` covers same-backend round-trips in CI; this
-is the manual cross-backend confirmation.)
-
----
-
-## 9. End-to-end in a real Swarm (full DR rehearsal)
-
-The ultimate test is an onboarded user surviving a full rebuild. This mirrors
+The ultimate test is an onboarded user surviving a full rebuild. Mirrors
 `docs/backup-restore.md` § "Full cluster rebuild".
 
 1. Deploy the `rbac` stack with mTLS; onboard a user and save their
@@ -414,7 +154,32 @@ Pass criteria:
 - `403 unknown user` → the user record didn't restore.
 - TLS handshake failure → the deployed CA doesn't match the user's cert.
 
-## 10. Cleanup
+## 6. Cross-backend portability (optional — needs PostgreSQL)
+
+The logical export is portable between SQLite and PostgreSQL:
+
+```bash
+docker run -d --rm --name pgtest -e POSTGRES_PASSWORD=pass -p 5432:5432 postgres:17
+sleep 3
+export PROXY_STORE=postgres
+export PROXY_DATABASE_URL='postgres://postgres:pass@localhost:5432/postgres?sslmode=disable'
+
+swc restore -i "$WORK/backup.json"      # the SQLite backup, into Postgres
+swc user ls
+swc backup -o "$WORK/pg-reexport.json"
+
+# Compare on stable identity fields. Do NOT diff the whole object: Postgres
+# timestamptz keeps microseconds while SQLite keeps nanoseconds, so the
+# created_at/updated_at trailing digits can differ for the same instant.
+proj='[.users[]|{id,username,role,enabled,tok:(.onboard_token|length>0)}]|sort_by(.username)'
+diff <(jq -S "$proj" "$WORK/backup.json") \
+     <(jq -S "$proj" "$WORK/pg-reexport.json") && echo "PORTABLE: USER IDENTITIES IDENTICAL"
+
+docker rm -f pgtest
+unset PROXY_STORE PROXY_DATABASE_URL
+```
+
+## 7. Cleanup
 
 ```bash
 rm -rf "$WORK"
@@ -422,3 +187,95 @@ unset WORK PROXY_STORE PROXY_DATABASE_PATH PROXY_DATABASE_URL \
       PROXY_TLS_CLIENT_CA PROXY_TLS_CLIENT_CA_KEY PROXY_ENV
 unalias swc
 ```
+
+<!--
+========================================================================
+NEGATIVE / EDGE-CASE CHECKS (not part of the happy flow)
+
+Kept here for thorough QA / release sign-off. All commands assume the § 1
+setup (WORK, PROXY_* env, `swc` alias) and the artifacts produced above
+($WORK/backup.json, $WORK/dr.json). All failure messages go to stderr with
+an `error: ` prefix and exit code 1.
+
+--- Backup: stdout redirect corrupts the artifact (known issue) -------------
+The `store initialized` log line lands on stdout ahead of the JSON, so a shell
+redirect yields invalid JSON (reproduces in both PROXY_ENV=dev and prod). The
+repo's docs/backup-restore.md § "Routine backup" still shows the `>` form.
+Until the CLI routes logs to stderr (or silences info logs), always use -o.
+
+    swc backup > "$WORK/redir.json" 2>/dev/null
+    head -c 40 "$WORK/redir.json"; echo
+    jq -e . "$WORK/redir.json" >/dev/null 2>&1 \
+      && echo "valid (unexpected!)" || echo "INVALID JSON (expected — use -o)"
+    # dev: a console "... INFO ... store initialized" line; prod: a {"level":"INFO",...} line
+
+--- Restore: refuses a non-empty store without --force ----------------------
+    export PROXY_DATABASE_PATH="$WORK/proxy.db"   # the populated store
+    swc restore -i "$WORK/backup.json"; echo "exit=$?"
+    # error: store already has 3 users; pass --force to replace them   exit=1  (store untouched)
+
+--- Restore: no input on a terminal stdin ----------------------------------
+    swc restore        # no -i, stdin is a TTY
+    # error: no input: pipe a backup into stdin or pass -i <file>   exit=1
+
+--- Restore: schema / version / parse guards (fire BEFORE any write) --------
+    rm -f "$WORK/g.db"*; export PROXY_DATABASE_PATH="$WORK/g.db"
+
+    jq '.schema="evil"' "$WORK/backup.json" > "$WORK/bad-schema.json"
+    swc restore -i "$WORK/bad-schema.json"; echo "exit=$?"
+    # error: unrecognised backup schema "evil" (want "swarmcli-rbac-proxy/backup")   exit=1
+
+    jq '.version=99' "$WORK/backup.json" > "$WORK/bad-version.json"
+    swc restore -i "$WORK/bad-version.json"; echo "exit=$?"
+    # error: unsupported backup version 99 (want 1)   exit=1
+
+    echo 'not json' > "$WORK/bad.json"
+    swc restore -i "$WORK/bad.json"; echo "exit=$?"
+    # error: parse backup: ...   exit=1
+
+    swc user ls    # g.db still has 0 users — guards run before any write
+
+--- Backup --include-ca: refuses to print the key to a terminal -------------
+    swc backup --include-ca; echo "exit=$?"     # interactive stdout (no -o, no redirect)
+    # error: --include-ca writes the root signing key; redirect to a file or pipe, or use -o <file>   exit=1
+    # (redirecting, e.g. `swc backup --include-ca > f.json`, is allowed)
+
+--- Backup --include-ca: requires both CA env vars --------------------------
+    ( unset PROXY_TLS_CLIENT_CA_KEY; swc backup --include-ca -o /tmp/x.json ); echo "exit=$?"
+    # error: --include-ca requires PROXY_TLS_CLIENT_CA and PROXY_TLS_CLIENT_CA_KEY to be configured   exit=1
+
+--- Restore: a CA bundle requires --ca-out ----------------------------------
+    rm -f "$WORK/dr.db"*; export PROXY_DATABASE_PATH="$WORK/dr.db"
+    swc restore -i "$WORK/dr.json"; echo "exit=$?"
+    # error: backup contains CA material: pass --ca-out <dir> to extract it   exit=1  (store still empty)
+
+--- Restore: --ca-out directory must exist (non-atomic partial restore) -----
+If the dir is missing, the users/audit import still runs, then the CA write
+fails — DB imported, CA not extracted. Always `mkdir -p` the target first.
+    rm -f "$WORK/dr.db"*; export PROXY_DATABASE_PATH="$WORK/dr.db"
+    swc restore -i "$WORK/dr.json" --ca-out "$WORK/nope"; echo "exit=$?"
+    # Restored 3 users and N audit entries
+    # error: write .../nope/ca-cert.pem: ... no such file or directory   exit=1
+
+--- Restore: preflight warns on CA mismatch ---------------------------------
+    openssl ecparam -name prime256v1 -genkey -noout -out "$WORK/ca2-key.pem"
+    openssl req -x509 -new -key "$WORK/ca2-key.pem" -days 3650 \
+      -subj "/CN=other-ca" -out "$WORK/ca2-cert.pem"
+    export PROXY_TLS_CLIENT_CA="$WORK/ca2-cert.pem"
+    mkdir -p "$WORK/caout2"; rm -f "$WORK/dr2.db"*; export PROXY_DATABASE_PATH="$WORK/dr2.db"
+    swc restore -i "$WORK/dr.json" --ca-out "$WORK/caout2"
+    # Preflight WARNING: the running deployment uses a DIFFERENT client CA.
+    #          Existing user contexts will fail mTLS until the CA above is deployed.
+    export PROXY_TLS_CLIENT_CA="$WORK/ca-cert.pem"   # reset
+
+--- Backend rejection & flag errors -----------------------------------------
+    PROXY_STORE=memory swc backup; echo "exit=$?"
+    # error: swcproxy cannot use in-memory store (data not shared with proxy process)   exit=1
+    swc backup --nope;  echo "exit=$?"    # error: unknown flag: --nope   exit=1
+    swc restore --nope; echo "exit=$?"    # error: unknown flag: --nope   exit=1
+    swc backup -o;        echo "exit=$?"  # error: -o requires a file path   exit=1
+    swc restore --ca-out; echo "exit=$?"  # error: --ca-out requires a directory path   exit=1
+    swc backup --help     # prints usage, exit 0
+    swc restore -h        # prints usage, exit 0
+========================================================================
+-->
