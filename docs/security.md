@@ -76,12 +76,12 @@ permission table below.
 
 - 256-bit random value (`crypto/rand`, 32 bytes hex-encoded).
 - One-time use: consumed atomically in the store.
-- No expiration: valid until consumed or the user is deleted.
+- TTL expiry: tokens expire after a configurable lifetime (`PROXY_ONBOARDING_TOKEN_TTL`, default `24h`). Consuming an expired token returns `410 Gone` with `"token expired"`. Expiry cannot be disabled — the TTL must be strictly positive.
 - The token is the sole credential for the onboard endpoint — no mTLS required, allowing bootstrapping.
 
 ## Exec guard limitations
 
-The `RequireAdminForExec` middleware blocks non-admin users from exec/attach endpoints. Key constraints:
+The `ExecGuard` middleware blocks exec/attach on protected-stack containers. Key constraints:
 
 - **Fail-closed without mTLS**: when `PROXY_TLS_CLIENT_CA` is not set, the guard blocks all exec/attach on the external listener because no user can prove admin status. Use the internal listener (`PROXY_INTERNAL_LISTEN`) for exec access without mTLS. Bootstrap always configures mTLS.
 - **Identity is cert-based**: user identity comes from the client certificate CN, not from any in-app user selection. To test exec restrictions with a non-admin user, that user must have their own client certificate and Docker context (obtained via the onboarding flow).

@@ -108,9 +108,9 @@ with it (deny-wins).
   | exec/attach | — | C | * |
   | port-forward | — | C | * |
   | swarm | — | — | * |
-  | system (`_ping`/`version`/`info`/`events`) | GL | GL | GL |
+  | system (`_ping`/`version`/`info`) | GL | GL | GL |
   | roles / bindings | — | — | * |
-  | containers (raw run) / unmapped | — | — | * |
+  | containers (raw run) / unmapped (incl. `/events`) | — | — | * |
 
 - **Management**: `/api/v1/roles` and `/api/v1/bindings` (admin-token protected,
   `internal/api/roles.go`, `bindings.go`) and the `swcproxy role`/`binding` CLI.
