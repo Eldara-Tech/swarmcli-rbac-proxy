@@ -10,14 +10,14 @@ Multi-user access control for Docker Swarm. Sits between Docker CLI clients and 
 Docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix socket or TCP)
                             │
                             ├── Authenticates via client certificate (CN/SAN)
-                            ├── Authorizes by role (admin / user)
+                            ├── Authorizes by role (RBAC: roles & bindings)
                             └── Blocks mutations to infrastructure stack
 ```
 
 ## Features
 
 - **mTLS client certificates** -- each user gets a unique certificate; no shared credentials
-- **Two roles** -- `admin` and `user` with different permissions on protected resources
+- **Role-based access control** -- dynamic, Kubernetes-style roles and per-user bindings with default-deny; built-in `viewer`/`operator`/`admin` plus custom roles ([guide](docs/rbac.md))
 - **Infrastructure stack protection** -- auto-detects the proxy's own Swarm stack and blocks external users from creating or deleting its services, secrets, networks, and configs
 - **Exec/attach guard** -- non-admin users cannot exec into protected containers
 - **Automated certificate issuance** -- generates client certificates on user creation (no manual openssl)
@@ -109,18 +109,28 @@ Common commands:
 
 ```bash
 swcproxy user ls
-swcproxy user add alice
-swcproxy user add bob --admin
+swcproxy user add alice              # creates user + an `operator` binding
+swcproxy user add bob --admin        # creates user + an `admin` binding
 swcproxy user delete alice
 swcproxy user regenerate-token alice
+swcproxy role ls                     # list roles
+swcproxy role show operator          # show a role's resources/verbs
+swcproxy binding ls                  # list user→role bindings
+swcproxy binding add alice viewer    # bind a user to another role (additive)
+swcproxy binding rm <id>             # remove a binding (last-admin protected)
 swcproxy audit ls --limit 10
 ```
+
+Roles, bindings, and the built-in `viewer`/`operator`/`admin` permission matrix
+are covered in the [roles & permissions guide](docs/rbac.md). Custom roles are
+defined via the management API ([docs/api.md](docs/api.md#rbac-roles-and-bindings)).
 
 When a user is created, `swcproxy` prints the `curl` command to share with the user for one-command onboarding — see [the walkthrough](docs/getting-started.md#4-create-and-onboard-a-regular-user).
 
 ## Documentation
 
 - [Getting started](docs/getting-started.md) — end-to-end walkthrough: cert generation, mTLS bootstrap, user onboarding, audit log
+- [Roles & permissions](docs/rbac.md) — RBAC model, built-in roles, permission matrix, custom roles, upgrade notes
 - [Configuration reference](docs/configuration.md) — environment variables, JSON config, listener topology, stack protection
 - [API reference](docs/api.md) — management API endpoints with curl examples
 - [Security model](docs/security.md) — threat model, authentication layers, certificate lifecycle
