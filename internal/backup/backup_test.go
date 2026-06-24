@@ -209,18 +209,23 @@ func TestWriteToDirDoesNotOverwriteOnSameSecondCollision(t *testing.T) {
 
 func TestDefaultDir(t *testing.T) {
 	cases := []struct {
-		dbPath string
-		want   string
+		dbPath    string
+		backupDir string
+		want      string
 	}{
-		{"/data/proxy.db", "/data/backup"},
-		{"proxy.db", "backup"},
-		{"", "backup"},
-		{"/var/lib/swc/proxy.db", "/var/lib/swc/backup"},
+		{"/data/proxy.db", "", "/data/backup"},
+		{"proxy.db", "", "backup"},
+		{"", "", "backup"},
+		{"/var/lib/swc/proxy.db", "", "/var/lib/swc/backup"},
+		// PROXY_BACKUP_DIR overrides the DB-path derivation (e.g. postgres,
+		// where DatabasePath is meaningless and would otherwise yield ./backup).
+		{"proxy.db", "/mnt/backups", "/mnt/backups"},
+		{"", "/mnt/backups", "/mnt/backups"},
 	}
 	for _, tc := range cases {
-		got := DefaultDir(config.Config{DatabasePath: tc.dbPath})
+		got := DefaultDir(config.Config{DatabasePath: tc.dbPath, BackupDir: tc.backupDir})
 		if got != tc.want {
-			t.Errorf("DefaultDir(%q) = %q, want %q", tc.dbPath, got, tc.want)
+			t.Errorf("DefaultDir(dbPath=%q, backupDir=%q) = %q, want %q", tc.dbPath, tc.backupDir, got, tc.want)
 		}
 	}
 }

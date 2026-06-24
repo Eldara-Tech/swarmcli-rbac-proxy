@@ -112,10 +112,16 @@ func Marshal(doc *Doc) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// DefaultDir derives the default backup directory from the DB path so backups
-// land on the same persistent volume (e.g. /data/proxy.db → /data/backup). For
-// non-file backends (postgres) it falls back to ./backup.
+// DefaultDir derives the default backup directory. An explicit PROXY_BACKUP_DIR
+// (cfg.BackupDir) always wins; otherwise it is derived from the DB path so
+// backups land on the same persistent volume (e.g. /data/proxy.db →
+// /data/backup). For non-file backends (postgres) that derivation yields
+// ./backup (the proxy's working dir), so such deployments should set
+// PROXY_BACKUP_DIR to a persistent volume path.
 func DefaultDir(cfg config.Config) string {
+	if cfg.BackupDir != "" {
+		return cfg.BackupDir
+	}
 	dir := filepath.Dir(cfg.DatabasePath)
 	if dir == "" || cfg.DatabasePath == "" {
 		dir = "."

@@ -72,8 +72,12 @@ from the database path so it lands on the persistent `proxy-data` volume:
 /data/proxy.db  →  /data/backup/swc-proxy-backup-<YYYYMMDD-HHMMSS>.json
 ```
 
-and prints the path. So a bare `swcproxy backup` inside the container produces a
-durable file on the volume without you choosing a name. The filename is
+and prints the path. The directory is derived from the database path, so on a
+**PostgreSQL** backend (no database file) it falls back to `./backup` in the
+proxy's working directory — set `PROXY_BACKUP_DIR` to a persistent volume path
+there so the artifact survives container restarts. So a bare `swcproxy backup`
+inside the container produces a durable file on the volume without you choosing
+a name. The filename is
 timestamped to the second; if two backups land in the same second, the later
 one is written as `…-<HHMMSS>-1.json`, `…-2.json`, etc. — an existing file is
 never overwritten.
