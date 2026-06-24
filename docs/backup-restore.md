@@ -47,9 +47,17 @@ docker exec "$(docker ps -q -f name=rbac_proxy)" \
   swcproxy backup -o /data/proxy-backup.json
 ```
 
-The artifact contains users (including pending onboarding tokens) and the full
-audit log. It is low-sensitivity — usernames, roles, timestamps — so it is safe
-for ordinary backup storage. Schedule it like any other database dump.
+The artifact contains users, the full audit log, and the RBAC roles and
+bindings — everything needed to reproduce the original authorization state, not
+just the user rows. By default it is **low-sensitivity** — usernames, roles,
+timestamps — and safe for ordinary backup storage; schedule it like any other
+database dump.
+
+Pending **onboarding tokens are redacted by default**: a live token is a bearer
+credential (it mints a client cert for that user via `GET /api/v1/onboard/...`),
+so a routine backup omits them. Pass `--include-tokens` for full-fidelity DR
+that preserves in-flight onboards — the resulting file is then credential-
+sensitive and must be protected accordingly.
 
 It does **not** contain the CA; `backup` reminds you of this on stderr.
 
@@ -65,7 +73,10 @@ from the database path so it lands on the persistent `proxy-data` volume:
 ```
 
 and prints the path. So a bare `swcproxy backup` inside the container produces a
-durable file on the volume without you choosing a name.
+durable file on the volume without you choosing a name. The filename is
+timestamped to the second; if two backups land in the same second, the later
+one is written as `…-<HHMMSS>-1.json`, `…-2.json`, etc. — an existing file is
+never overwritten.
 
 ### Trigger over the internal listener
 
@@ -97,10 +108,11 @@ docker exec "$(docker ps -q -f name=rbac_proxy)" \
 > **Security warning.** The CA private key can mint a certificate for *any*
 > username, including admins. A `--include-ca` artifact is a crown-jewel
 > secret: store it in a vault / password manager, encrypt it at rest, and keep
-> it separate from routine database backups. The key never reaches an
-> interactive terminal: with no `-o`, a terminal writes a `0600` file to the
-> default backup directory rather than printing the JSON; a pipe/redirect
-> streams it as usual. The `/startbackup` HTTP trigger never includes the CA.
+> it separate from routine database backups. `--include-ca` requires a file
+> destination: with no `-o`, a terminal writes a `0600` file to the default
+> backup directory, and a piped/redirected stdout is **refused** (the command
+> exits non-zero) so the key is never streamed to a fd at the shell's umask.
+> The `/startbackup` HTTP trigger never includes the CA.
 
 The CA has a 10-year validity and effectively never changes, so a single
 `--include-ca` capture, refreshed only when you rotate the CA, is enough.
@@ -108,8 +120,13 @@ The CA has a 10-year validity and effectively never changes, so a single
 ## Restoring
 
 `restore` reads the JSON from stdin or `-i <file>`, validates the schema, and
-re-imports users and the audit log **verbatim** — preserving IDs, timestamps
-and token state.
+re-imports users, the audit log, and the RBAC roles and bindings **verbatim** —
+preserving IDs, timestamps and token state — in a single transaction across all
+tables, so a failed restore leaves the store untouched rather than half-applied.
+Because roles and bindings are carried, a restored user keeps the exact role
+they had (a `viewer` stays a `viewer`); without them the startup legacy
+migration would re-derive bindings from `User.Role` and silently promote
+non-admins to `operator`.
 
 ```bash
 docker exec -i "$(docker ps -q -f name=rbac_proxy)" \
@@ -117,7 +134,7 @@ docker exec -i "$(docker ps -q -f name=rbac_proxy)" \
 ```
 
 `restore` refuses to overwrite a non-empty store unless you pass `--force`,
-which atomically replaces the existing users and audit log.
+which atomically replaces the existing users, audit log, roles and bindings.
 
 ### Full cluster rebuild (database + CA bundle)
 

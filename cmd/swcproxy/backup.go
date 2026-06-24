@@ -19,8 +19,9 @@ import (
 )
 
 type backupOpts struct {
-	outFile   string
-	includeCA bool
+	outFile       string
+	includeCA     bool
+	includeTokens bool
 }
 
 type restoreOpts struct {
@@ -42,6 +43,8 @@ func parseBackupArgs(args []string) (backupOpts, error) {
 			o.outFile = args[i]
 		case "--include-ca":
 			o.includeCA = true
+		case "--include-tokens":
+			o.includeTokens = true
 		default:
 			return o, fmt.Errorf("unknown flag: %s", args[i])
 		}
@@ -77,15 +80,19 @@ func parseRestoreArgs(args []string) (restoreOpts, error) {
 
 func printBackupUsage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  swcproxy backup [-o <file>] [--include-ca]   Export users + audit log as JSON
+  swcproxy backup [-o <file>] [--include-ca] [--include-tokens]
+                     Export users + audit log + RBAC roles/bindings as JSON
 
   -o, --out <file>   Write to file (mode 0600). Without -o, an interactive
                      terminal writes a timestamped file under the default
                      backup dir (<db-dir>/backup, e.g. /data/backup); a piped
                      or redirected stdout streams the JSON instead.
-  --include-ca       Also embed the client CA cert+key (DR bundle).
-                     The CA can mint a cert for ANY user — store the
-                     resulting file like a private key.
+  --include-tokens   Also export pending onboarding tokens. These are bearer
+                     credentials (a live token mints a client cert), so they
+                     are redacted by default; opt in only for full-fidelity DR.
+  --include-ca       Also embed the client CA cert+key (DR bundle). Requires a
+                     file destination (-o or the default dir); the CA can mint a
+                     cert for ANY user — store the resulting file like a key.
 `)
 }
 
@@ -161,10 +168,18 @@ func runBackupCommand(args []string) {
 		os.Exit(1)
 	}
 
+	// Resolve the destination up front: --include-ca must never stream the CA
+	// private key onto a redirected/piped stdout (it would land at the shell's
+	// umask, not the 0600 the file paths guarantee).
+	mode := resolveBackupOutput(o.outFile, isTerminal(os.Stdout))
+	if o.includeCA && mode == outputStdout {
+		fatal("--include-ca requires a file destination (-o <file> or an interactive terminal); refusing to stream the CA private key to stdout")
+	}
+
 	ctx := context.Background()
 	bs, audit := openBackupStore()
 
-	doc, err := backup.Create(ctx, bs, version.String(), time.Now().UTC())
+	doc, err := backup.Create(ctx, bs, version.String(), time.Now().UTC(), o.includeTokens)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -191,7 +206,7 @@ func runBackupCommand(args []string) {
 	// to the default backup dir (so we never dump JSON — or a CA key — onto the
 	// tty), while a piped/redirected stdout still streams the artifact.
 	var dest string
-	switch resolveBackupOutput(o.outFile, isTerminal(os.Stdout)) {
+	switch mode {
 	case outputFile:
 		data, err := backup.Marshal(doc)
 		if err != nil {
@@ -221,10 +236,15 @@ func runBackupCommand(args []string) {
 	_ = audit.RecordAudit(ctx, &store.AuditEntry{
 		Actor: "cli", Action: store.AuditBackupExported,
 		Resource: "backup", Status: "success",
-		Detail: fmt.Sprintf("users=%d audit=%d ca=%v", len(doc.Users), len(doc.Audit), o.includeCA),
+		Detail: fmt.Sprintf("users=%d audit=%d roles=%d bindings=%d ca=%v tokens=%v",
+			len(doc.Users), len(doc.Audit), len(doc.Roles), len(doc.Bindings), o.includeCA, o.includeTokens),
 	})
 
-	fmt.Fprintf(os.Stderr, "Backed up %d users and %d audit entries to %s\n", len(doc.Users), len(doc.Audit), dest)
+	fmt.Fprintf(os.Stderr, "Backed up %d users, %d audit entries, %d roles and %d bindings to %s\n",
+		len(doc.Users), len(doc.Audit), len(doc.Roles), len(doc.Bindings), dest)
+	if !o.includeTokens {
+		fmt.Fprintln(os.Stderr, "Note: pending onboarding tokens were redacted (use --include-tokens for full-fidelity DR).")
+	}
 	if doc.CA == nil {
 		fmt.Fprintln(os.Stderr, "Note: this backup does NOT contain the client CA. On restore, the same")
 		fmt.Fprintln(os.Stderr, "      rbac_client_ca / rbac_client_ca_key secret must be in place, or every")
@@ -287,28 +307,29 @@ func runRestoreCommand(args []string) {
 	ctx := context.Background()
 	bs, audit := openBackupStore()
 
-	existing, err := bs.ExportUsers(ctx)
+	existing, err := bs.Export(ctx)
 	if err != nil {
 		fatal("inspect existing store: %v", err)
 	}
-	if len(existing) > 0 && !o.force {
-		fatal("store already has %d users; pass --force to replace them", len(existing))
+	if len(existing.Users) > 0 && !o.force {
+		fatal("store already has %d users; pass --force to replace them", len(existing.Users))
 	}
 
-	if err := bs.ImportUsers(ctx, backup.FromUsers(doc.Users), o.force); err != nil {
-		fatal("import users: %v", err)
-	}
-	if err := bs.ImportAuditEntries(ctx, doc.Audit, o.force); err != nil {
-		fatal("import audit log: %v", err)
+	// One transaction across users, audit, roles and bindings: a failure leaves
+	// the store untouched rather than half-restored.
+	if err := bs.Restore(ctx, backup.ToData(&doc), o.force); err != nil {
+		fatal("restore: %v", err)
 	}
 
 	_ = audit.RecordAudit(ctx, &store.AuditEntry{
 		Actor: "cli", Action: store.AuditBackupRestored,
 		Resource: "backup", Status: "success",
-		Detail: fmt.Sprintf("users=%d audit=%d ca=%v force=%v", len(doc.Users), len(doc.Audit), doc.CA != nil, o.force),
+		Detail: fmt.Sprintf("users=%d audit=%d roles=%d bindings=%d ca=%v force=%v",
+			len(doc.Users), len(doc.Audit), len(doc.Roles), len(doc.Bindings), doc.CA != nil, o.force),
 	})
 
-	fmt.Fprintf(os.Stderr, "Restored %d users and %d audit entries\n", len(doc.Users), len(doc.Audit))
+	fmt.Fprintf(os.Stderr, "Restored %d users, %d audit entries, %d roles and %d bindings\n",
+		len(doc.Users), len(doc.Audit), len(doc.Roles), len(doc.Bindings))
 
 	cfg := loadCfg()
 	if doc.CA != nil {

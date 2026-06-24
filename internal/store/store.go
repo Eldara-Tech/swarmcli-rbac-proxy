@@ -84,17 +84,31 @@ type AuditStore interface {
 	ListAuditEntries(ctx context.Context, limit int) ([]AuditEntry, error)
 }
 
-// BackupStore defines the persistence interface for logical backup and
-// restore. Export reads every row (no limit) including the onboarding-token
-// columns that ListUsers omits; Import writes rows verbatim, preserving IDs,
-// timestamps and token state so a restored deployment is indistinguishable
-// from the original. When replace is true the target table is cleared first,
-// atomically within the same transaction as the insert.
+// BackupData is the complete logical state captured by a backup: users (with
+// the onboarding-token columns ListUsers omits), the audit log, and the RBAC
+// roles and bindings. It is the unit Export produces and Restore consumes, so a
+// restore can reproduce the original authorization state — not just the user
+// rows. Custom roles and non-default bindings are included; without them a
+// restore would silently fall back to the legacy admin/operator migration.
+type BackupData struct {
+	Users    []User
+	Audit    []AuditEntry
+	Roles    []Role
+	Bindings []RoleBinding
+}
+
+// BackupStore defines the persistence interface for logical backup and restore.
+// Export reads every row (no limit), including the onboarding-token columns that
+// ListUsers omits. Restore writes the data back verbatim — preserving IDs,
+// timestamps and token state — within a single transaction spanning all tables;
+// when replace is true the target tables are cleared first in that same
+// transaction, so a failed restore leaves the store untouched. Restore is a
+// low-level import that deliberately bypasses the management-layer guards
+// (built-in/in-use role protection, last-admin lockout): it reproduces a prior
+// state rather than applying an administrative mutation.
 type BackupStore interface {
-	ExportUsers(ctx context.Context) ([]User, error)
-	ExportAuditEntries(ctx context.Context) ([]AuditEntry, error)
-	ImportUsers(ctx context.Context, users []User, replace bool) error
-	ImportAuditEntries(ctx context.Context, entries []AuditEntry, replace bool) error
+	Export(ctx context.Context) (BackupData, error)
+	Restore(ctx context.Context, data BackupData, replace bool) error
 }
 
 var (

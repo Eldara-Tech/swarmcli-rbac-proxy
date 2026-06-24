@@ -322,56 +322,115 @@ func (s *MemoryStore) DeleteBinding(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *MemoryStore) ExportUsers(_ context.Context) ([]User, error) {
+func (s *MemoryStore) Export(_ context.Context) (BackupData, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	result := make([]User, 0, len(s.users))
+	users := make([]User, 0, len(s.users))
 	for _, u := range s.users {
-		result = append(result, u)
+		users = append(users, u)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].CreatedAt.Before(result[j].CreatedAt)
-	})
-	return result, nil
-}
-
-func (s *MemoryStore) ExportAuditEntries(_ context.Context) ([]AuditEntry, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result := make([]AuditEntry, len(s.audit))
-	copy(result, s.audit)
-	return result, nil
-}
-
-func (s *MemoryStore) ImportUsers(_ context.Context, users []User, replace bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if replace {
-		s.users = make(map[string]User)
-	}
-	for i := range users {
-		u := users[i]
-		for _, existing := range s.users {
-			if existing.Username == u.Username {
-				return ErrUsernameExists
-			}
+	sort.Slice(users, func(i, j int) bool {
+		if users[i].CreatedAt.Equal(users[j].CreatedAt) {
+			return users[i].ID < users[j].ID
 		}
-		s.users[u.ID] = u
+		return users[i].CreatedAt.Before(users[j].CreatedAt)
+	})
+
+	audit := make([]AuditEntry, len(s.audit))
+	copy(audit, s.audit)
+	sort.Slice(audit, func(i, j int) bool {
+		if audit[i].Timestamp.Equal(audit[j].Timestamp) {
+			return audit[i].ID < audit[j].ID
+		}
+		return audit[i].Timestamp.Before(audit[j].Timestamp)
+	})
+
+	roles := make([]Role, 0, len(s.roles))
+	for _, r := range s.roles {
+		roles = append(roles, r)
 	}
-	return nil
+	sort.Slice(roles, func(i, j int) bool { return roles[i].Name < roles[j].Name })
+
+	bindings := make([]RoleBinding, 0, len(s.bindings))
+	for _, b := range s.bindings {
+		bindings = append(bindings, b)
+	}
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].CreatedAt.Equal(bindings[j].CreatedAt) {
+			return bindings[i].ID < bindings[j].ID
+		}
+		return bindings[i].CreatedAt.Before(bindings[j].CreatedAt)
+	})
+
+	return BackupData{Users: users, Audit: audit, Roles: roles, Bindings: bindings}, nil
 }
 
-func (s *MemoryStore) ImportAuditEntries(_ context.Context, entries []AuditEntry, replace bool) error {
+// Restore builds the target state in locals and swaps it in under a single
+// lock, so a uniqueness violation leaves the store untouched (matching the
+// transactional SQL backends).
+func (s *MemoryStore) Restore(_ context.Context, data BackupData, replace bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if replace {
-		s.audit = nil
+	users := make(map[string]User)
+	roles := make(map[string]Role)
+	bindings := make(map[string]RoleBinding)
+	var audit []AuditEntry
+	if !replace {
+		for id, u := range s.users {
+			users[id] = u
+		}
+		for n, r := range s.roles {
+			roles[n] = r
+		}
+		for id, b := range s.bindings {
+			bindings[id] = b
+		}
+		audit = append(audit, s.audit...)
 	}
-	s.audit = append(s.audit, entries...)
+
+	usernames := make(map[string]bool, len(users))
+	for _, u := range users {
+		usernames[u.Username] = true
+	}
+	for i := range data.Users {
+		u := data.Users[i]
+		if usernames[u.Username] {
+			return ErrUsernameExists
+		}
+		usernames[u.Username] = true
+		users[u.ID] = u
+	}
+
+	audit = append(audit, data.Audit...)
+
+	for i := range data.Roles {
+		r := data.Roles[i]
+		if _, ok := roles[r.Name]; ok {
+			return ErrRoleExists
+		}
+		roles[r.Name] = r
+	}
+
+	bindingKeys := make(map[string]bool, len(bindings))
+	for _, b := range bindings {
+		bindingKeys[b.Username+"\x00"+b.RoleName] = true
+	}
+	for i := range data.Bindings {
+		b := data.Bindings[i]
+		key := b.Username + "\x00" + b.RoleName
+		if bindingKeys[key] {
+			return ErrBindingExists
+		}
+		bindingKeys[key] = true
+		bindings[b.ID] = b
+	}
+
+	s.users = users
+	s.audit = audit
+	s.roles = roles
+	s.bindings = bindings
 	return nil
 }
 

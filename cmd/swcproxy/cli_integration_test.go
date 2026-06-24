@@ -126,6 +126,25 @@ func seedUsers(t *testing.T, path string, usernames ...string) {
 	s.Close()
 }
 
+// seedRoleBinding adds a custom role and binds username to it, exercising the
+// RBAC tables that a faithful backup must also carry.
+func seedRoleBinding(t *testing.T, path, roleName, username string) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.NewSQLiteStore(ctx, path)
+	if err != nil {
+		t.Fatalf("seed rbac: open store: %v", err)
+	}
+	defer s.Close()
+	if err := s.CreateRole(ctx, &store.Role{Name: roleName,
+		Rules: []store.PermissionRule{{Resources: []string{"services"}, Verbs: []string{"get", "list"}}}}); err != nil {
+		t.Fatalf("seed rbac: create role: %v", err)
+	}
+	if err := s.CreateBinding(ctx, &store.RoleBinding{Username: username, RoleName: roleName}); err != nil {
+		t.Fatalf("seed rbac: create binding: %v", err)
+	}
+}
+
 // storeUserCount opens the store read-only-ish and counts users.
 func storeUserCount(t *testing.T, path string) int {
 	t.Helper()
@@ -236,7 +255,7 @@ func TestCLIBackup_ToFile_ValidAnd0600(t *testing.T) {
 	seedUsers(t, db, "alice", "bob", "carol")
 	out := filepath.Join(t.TempDir(), "backup.json")
 
-	stdout, stderr, code := runCLI(t, baseEnv(db), "", "backup", "-o", out)
+	stdout, stderr, code := runCLI(t, baseEnv(db), "", "backup", "--include-tokens", "-o", out)
 	if code != 0 {
 		t.Fatalf("exit=%d stderr=%q", code, stderr)
 	}
@@ -262,7 +281,7 @@ func TestCLIBackup_ToFile_ValidAnd0600(t *testing.T) {
 	if doc.CA != nil {
 		t.Errorf("CA must be absent without --include-ca")
 	}
-	// bob (index 1) was given a token; it must survive the export.
+	// bob (index 1) was given a token; with --include-tokens it must survive.
 	var bob *backup.User
 	for i := range doc.Users {
 		if doc.Users[i].Username == "bob" {
@@ -274,6 +293,85 @@ func TestCLIBackup_ToFile_ValidAnd0600(t *testing.T) {
 	}
 	if !hasAudit(t, db, store.AuditBackupExported) {
 		t.Errorf("backup.exported not audited")
+	}
+}
+
+func TestCLIBackup_RedactsTokensByDefault(t *testing.T) {
+	db := dbPath(t)
+	seedUsers(t, db, "alice", "bob") // bob gets an onboarding token
+	out := filepath.Join(t.TempDir(), "backup.json")
+
+	_, stderr, code := runCLI(t, baseEnv(db), "", "backup", "-o", out)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "onboarding tokens were redacted") {
+		t.Errorf("missing redaction note on stderr: %q", stderr)
+	}
+	for _, u := range readBackup(t, out).Users {
+		if u.OnboardToken != "" || u.TokenIssuedAt != nil || u.TokenConsumedAt != nil {
+			t.Errorf("token columns not redacted for %s: %+v", u.Username, u)
+		}
+	}
+}
+
+func TestCLIBackup_IncludeCA_RefusesStdout(t *testing.T) {
+	db := dbPath(t)
+	seedUsers(t, db, "alice")
+
+	// No -o and a piped (non-tty) stdout resolves to the stdout-stream mode;
+	// --include-ca must refuse rather than leak the CA key at the shell umask.
+	stdout, stderr, code := runCLI(t, baseEnv(db), "", "backup", "--include-ca")
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1; stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "refusing to stream the CA private key") {
+		t.Errorf("unexpected stderr: %q", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("nothing must be written to stdout, got %q", stdout)
+	}
+}
+
+func TestCLIRestore_PreservesRolesAndBindings(t *testing.T) {
+	srcDB := dbPath(t)
+	seedUsers(t, srcDB, "alice", "bob")
+	seedRoleBinding(t, srcDB, "auditor", "bob")
+	file := filepath.Join(t.TempDir(), "a.json")
+	if _, stderr, code := runCLI(t, baseEnv(srcDB), "", "backup", "-o", file); code != 0 {
+		t.Fatalf("backup exit=%d stderr=%q", code, stderr)
+	}
+	if doc := readBackup(t, file); len(doc.Roles) == 0 || len(doc.Bindings) == 0 {
+		t.Fatalf("backup omitted RBAC state: roles=%d bindings=%d", len(doc.Roles), len(doc.Bindings))
+	}
+
+	dstDB := dbPath(t)
+	seedUsers(t, dstDB) // empty
+	if _, stderr, code := runCLI(t, baseEnv(dstDB), "", "restore", "-i", file); code != 0 {
+		t.Fatalf("restore exit=%d stderr=%q", code, stderr)
+	}
+
+	ctx := context.Background()
+	s, err := store.NewSQLiteStore(ctx, dstDB)
+	if err != nil {
+		t.Fatalf("open dst: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.GetRole(ctx, "auditor"); err != nil {
+		t.Errorf("custom role not restored: %v", err)
+	}
+	bindings, err := s.ListBindingsForUser(ctx, "bob")
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	var found bool
+	for _, b := range bindings {
+		if b.RoleName == "auditor" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("custom binding not restored for bob; got %+v", bindings)
 	}
 }
 
@@ -390,7 +488,7 @@ func TestCLIRestore_RoundTripVerbatim(t *testing.T) {
 	srcDB := dbPath(t)
 	seedUsers(t, srcDB, "alice", "bob", "carol")
 	fileA := filepath.Join(t.TempDir(), "a.json")
-	if _, stderr, code := runCLI(t, baseEnv(srcDB), "", "backup", "-o", fileA); code != 0 {
+	if _, stderr, code := runCLI(t, baseEnv(srcDB), "", "backup", "--include-tokens", "-o", fileA); code != 0 {
 		t.Fatalf("backup A exit=%d stderr=%q", code, stderr)
 	}
 
@@ -408,7 +506,7 @@ func TestCLIRestore_RoundTripVerbatim(t *testing.T) {
 	}
 
 	fileB := filepath.Join(t.TempDir(), "b.json")
-	if _, stderr, code := runCLI(t, baseEnv(dstDB), "", "backup", "-o", fileB); code != 0 {
+	if _, stderr, code := runCLI(t, baseEnv(dstDB), "", "backup", "--include-tokens", "-o", fileB); code != 0 {
 		t.Fatalf("backup B exit=%d stderr=%q", code, stderr)
 	}
 	a, b := readBackup(t, fileA), readBackup(t, fileB)

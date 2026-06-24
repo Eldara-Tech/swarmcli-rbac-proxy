@@ -80,7 +80,7 @@ Usage:
   swcproxy binding ls                      List role bindings
   swcproxy binding add <user> <role>       Bind a user to a role
   swcproxy binding rm <id>                 Remove a role binding
-  swcproxy backup [-o <file>] [--include-ca]  Export users + audit as JSON
+  swcproxy backup [-o <file>] [--include-ca] [--include-tokens]  Export users, audit + RBAC as JSON
   swcproxy restore [-i <file>] [--force]   Import a backup
   swcproxy --help                          Show this help
 `)

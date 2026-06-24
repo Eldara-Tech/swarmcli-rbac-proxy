@@ -290,6 +290,20 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 	<-done
 }
 
+// mountBackupRoute registers /startbackup on mux only for the internal
+// (loopback, no-auth) listener — the same trusted admin path used for stack
+// deploy/exec. It is deliberately absent from the external mTLS mux: the
+// endpoint is unauthenticated and writes a full DB dump, so it must never be
+// reachable from the public listener. It writes a DB-only backup (never the CA)
+// to the proxy-data volume and returns the artifact filename, so an operator
+// can trigger a backup with `curl 127.0.0.1:<port>/startbackup` from inside the
+// container without shelling into the swcproxy CLI.
+func mountBackupRoute(mux *http.ServeMux, internal bool, userStore store.UserStore, audit store.AuditStore, dir string) {
+	if internal {
+		mux.HandleFunc("/startbackup", newBackupHandler(userStore, audit, dir))
+	}
+}
+
 // newBackupHandler returns the /startbackup handler for the internal listener.
 // It writes a DB-only logical backup (never the CA — that stays an opt-in,
 // human-supervised CLI path) to dir and replies with the artifact filename. It
@@ -310,7 +324,9 @@ func newBackupHandler(userStore store.UserStore, audit store.AuditStore, dir str
 			return
 		}
 
-		doc, err := backup.Create(r.Context(), bs, version.String(), time.Now().UTC())
+		// includeTokens=false: the unauthenticated loopback trigger never embeds
+		// bearer onboarding tokens (nor the CA) — those stay opt-in CLI paths.
+		doc, err := backup.Create(r.Context(), bs, version.String(), time.Now().UTC(), false)
 		if err != nil {
 			l().Errorw("startbackup: export failed", "error", err)
 			writeBackupJSON(w, http.StatusInternalServerError, map[string]string{
@@ -330,7 +346,7 @@ func newBackupHandler(userStore store.UserStore, audit store.AuditStore, dir str
 		_ = audit.RecordAudit(r.Context(), &store.AuditEntry{
 			Actor: "internal", Action: store.AuditBackupExported,
 			Resource: "backup", Status: "success",
-			Detail:   fmt.Sprintf("users=%d audit=%d ca=false trigger=http", len(doc.Users), len(doc.Audit)),
+			Detail:   fmt.Sprintf("users=%d audit=%d roles=%d bindings=%d ca=false tokens=false trigger=http", len(doc.Users), len(doc.Audit), len(doc.Roles), len(doc.Bindings)),
 			SourceIP: requestIP(r),
 		})
 
@@ -677,15 +693,7 @@ func main() {
 	// the protected-stack exec/forward guard (no-op on the internal listener).
 	registerRoutes := func(mux *http.ServeMux, internal bool, wrapProxy, wrapRBAC, wrapExec func(http.Handler) http.Handler) {
 		tok := cfg.AdminToken
-		// /startbackup is exposed only on the internal (loopback, no-auth)
-		// listener — the same trusted admin path used for stack deploy/exec.
-		// It writes a DB-only backup (never the CA) to the proxy-data volume
-		// and returns the artifact filename, so an operator can trigger a
-		// backup with `curl 127.0.0.1:<port>/startbackup` from inside the
-		// container without shelling into the swcproxy CLI.
-		if internal {
-			mux.HandleFunc("/startbackup", newBackupHandler(userStore, auditStore, backup.DefaultDir(cfg)))
-		}
+		mountBackupRoute(mux, internal, userStore, auditStore, backup.DefaultDir(cfg))
 		mux.Handle("/api/v1/users", api.RequireToken(tok, userHandler))
 		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(tok, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)

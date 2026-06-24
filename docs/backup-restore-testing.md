@@ -42,23 +42,29 @@ swc backup -o "$WORK/backup.json"
 ```
 
 Expected:
-- stderr: `Backed up 3 users and N audit entries to $WORK/backup.json`, then the
+- stderr: `Backed up 3 users, N audit entries, R roles and B bindings to
+  $WORK/backup.json`, a "pending onboarding tokens were redacted" note, then the
   three-line "this backup does NOT contain the client CA" note.
-- the file is valid JSON, mode `0600`, and carries the onboarding-token columns
-  (`swcproxy user ls` / the API hide them):
+- the file is valid JSON, mode `0600`, carries the RBAC roles/bindings, and has
+  the onboarding-token columns **redacted** by default:
 
 ```bash
 stat -c '%a' "$WORK/backup.json"   # 600
-jq '.schema, .version, (.users|length), (.ca==null)' "$WORK/backup.json"
+jq '.schema, .version, (.users|length), (.roles|length), (.bindings|length), (.ca==null)' "$WORK/backup.json"
 # "swarmcli-rbac-proxy/backup"
 # 1
 # 3
+# R   (>= the three built-in roles)
+# B
 # true
 jq '.users[0] | {username, role, has_token: (.onboard_token|length>0)}' "$WORK/backup.json"
+# has_token is false — redacted. Re-run with --include-tokens to keep them:
+swc backup --include-tokens -o "$WORK/backup-tok.json"
+jq '[.users[].onboard_token|length>0]|any' "$WORK/backup-tok.json"   # true
 ```
 
 The export is audited — `swc audit ls | grep backup.exported` shows a `cli`
-row with detail `users=3 audit=N ca=false`.
+row with detail `users=3 audit=N roles=R bindings=B ca=false tokens=false`.
 
 ## 3. Restore the database
 
@@ -68,9 +74,11 @@ swc restore -i "$WORK/backup.json"
 swc user ls                                       # the same three users
 ```
 
-Expected: `Restored 3 users and N audit entries`, and the trailing CA caveat.
-The import is **verbatim** — IDs, roles, timestamps and token state round-trip
-exactly. Confirm by re-exporting and diffing:
+Expected: `Restored 3 users, N audit entries, R roles and B bindings`, and the
+trailing CA caveat. The import is **verbatim** — IDs, roles, timestamps, RBAC
+roles/bindings and (when present) token state round-trip exactly, in one
+transaction across all tables. Confirm by re-exporting and diffing (use matching
+token flags on both sides so the redaction is identical):
 
 ```bash
 swc backup -o "$WORK/reexport.json"
@@ -222,10 +230,12 @@ an `error: ` prefix and exit code 1.
 
     swc user ls    # g.db still has 0 users — guards run before any write
 
---- Backup --include-ca: refuses to print the key to a terminal -------------
-    swc backup --include-ca; echo "exit=$?"     # interactive stdout (no -o, no redirect)
-    # error: --include-ca writes the root signing key; redirect to a file or pipe, or use -o <file>   exit=1
-    # (redirecting, e.g. `swc backup --include-ca > f.json`, is allowed)
+--- Backup --include-ca: refuses to stream the key to a pipe/redirect --------
+    swc backup --include-ca > "$WORK/leak.json"; echo "exit=$?"   # redirected stdout
+    # error: --include-ca requires a file destination (-o <file> or an interactive
+    #        terminal); refusing to stream the CA private key to stdout   exit=1
+    # An interactive terminal (no -o, no redirect) instead writes a 0600 file to
+    # the default backup dir; `-o <file>` is always allowed.
 
 --- Backup --include-ca: requires both CA env vars --------------------------
     ( unset PROXY_TLS_CLIENT_CA_KEY; swc backup --include-ca -o /tmp/x.json ); echo "exit=$?"

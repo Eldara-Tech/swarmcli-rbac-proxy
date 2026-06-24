@@ -178,7 +178,7 @@ swarm-rbac-proxy/
       main_test.go      — CLI unit tests (flag parsing, helpers)
   internal/
     backup/
-      backup.go         — Logical backup artifact (Doc/User/CA schema, Create/Marshal/WriteToDir/DefaultDir/Filename), shared by the swcproxy CLI and the server's /startbackup handler
+      backup.go         — Logical backup artifact (Doc/User/CA schema incl. roles+bindings, Create with token-redaction, Marshal/ToData/WriteToDir [O_EXCL, no overwrite]/DefaultDir/Filename), shared by the swcproxy CLI and the server's /startbackup handler
       backup_test.go    — backup package unit tests (export, marshal, filename, dir perms, default dir)
     version/
       version.go        — Build-time version vars (Version/Commit/Date), shared by both binaries
@@ -193,7 +193,7 @@ swarm-rbac-proxy/
       logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
-      store.go          — UserStore + AuditStore + BackupStore interfaces, User/AuditEntry types, AuditAction constants, sentinel errors
+      store.go          — UserStore + AuditStore + BackupStore interfaces, User/AuditEntry/BackupData types, AuditAction constants, sentinel errors (BackupStore: Export → all tables incl. roles/bindings + token columns; Restore → verbatim, single transaction, replace clears all tables)
       rbac.go           — RBACStore interface, Role/RoleBinding/PermissionRule types, resource/verb vocabulary, built-in roles, effective-permission resolver, seeding, legacy migration, last-admin lockout helpers
       memory.go         — in-memory UserStore + AuditStore + RBACStore + BackupStore (dev/testing)
       sqlite.go         — SQLite UserStore + AuditStore + RBACStore + BackupStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
@@ -253,7 +253,7 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 - `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-token protected). Deleting the last admin binding is refused (409)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
 - `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
-- `GET|POST /startbackup` — **Internal listener only.** Triggers a database-only logical backup (never the CA), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`), and returns `{"result":"success","file":...,"path":...}`. Not registered on the external mux. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
+- `GET|POST /startbackup` — **Internal listener only.** Triggers a database-only logical backup (never the CA, onboarding tokens always redacted), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`; `-N` suffix on same-second collision), and returns `{"result":"success","file":...,"path":...}`. Registration is gated by `mountBackupRoute(mux, internal, …)` so it is absent from the external mux. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
 - `/v1/*` — Forwarded to agent-manager (when `PROXY_AGENT_MANAGER_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
 
@@ -273,8 +273,8 @@ swcproxy role show <name>                 # Show a role's rules
 swcproxy binding ls                       # List role bindings
 swcproxy binding add <user> <role>        # Bind a user to a role
 swcproxy binding rm <id>                  # Remove a role binding (last-admin protected)
-swcproxy backup [-o <file>] [--include-ca] # Logical JSON export of users + audit (optional CA bundle). Without -o: a terminal writes a timestamped file to <db-dir>/backup; a pipe streams JSON to stdout
-swcproxy restore [-i <file>] [--force] [--ca-out <dir>] # Import a backup verbatim
+swcproxy backup [-o <file>] [--include-ca] [--include-tokens] # Logical JSON export of users + audit + RBAC roles/bindings. Onboarding tokens redacted unless --include-tokens; optional CA bundle (--include-ca requires a file dest). Without -o: a terminal writes a timestamped file to <db-dir>/backup; a pipe streams JSON to stdout
+swcproxy restore [-i <file>] [--force] [--ca-out <dir>] # Import a backup verbatim (single transaction across all tables)
 swcproxy --help                           # Usage info
 ```
 

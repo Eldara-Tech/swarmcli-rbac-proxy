@@ -607,11 +607,31 @@ func (s *SQLiteStore) DeleteBinding(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *SQLiteStore) ExportUsers(ctx context.Context) ([]User, error) {
+func (s *SQLiteStore) Export(ctx context.Context) (BackupData, error) {
+	users, err := s.exportUsers(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	audit, err := s.exportAuditEntries(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	roles, err := s.ListRoles(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	bindings, err := s.ListBindings(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	return BackupData{Users: users, Audit: audit, Roles: roles, Bindings: bindings}, nil
+}
+
+func (s *SQLiteStore) exportUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, username, role, enabled, created_at, updated_at,
 		        onboard_token, token_issued_at, token_consumed_at
-		 FROM users ORDER BY created_at`)
+		 FROM users ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -645,13 +665,16 @@ func (s *SQLiteStore) ExportUsers(ctx context.Context) ([]User, error) {
 		}
 		users = append(users, u)
 	}
-	return users, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return users, nil
 }
 
-func (s *SQLiteStore) ExportAuditEntries(ctx context.Context) ([]AuditEntry, error) {
+func (s *SQLiteStore) exportAuditEntries(ctx context.Context) ([]AuditEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, timestamp, actor, action, resource, status, detail, source_ip
-		 FROM audit_log ORDER BY timestamp`)
+		 FROM audit_log ORDER BY timestamp, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -670,10 +693,13 @@ func (s *SQLiteStore) ExportAuditEntries(ctx context.Context) ([]AuditEntry, err
 		}
 		entries = append(entries, e)
 	}
-	return entries, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
-func (s *SQLiteStore) ImportUsers(ctx context.Context, users []User, replace bool) error {
+func (s *SQLiteStore) Restore(ctx context.Context, data BackupData, replace bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -681,12 +707,21 @@ func (s *SQLiteStore) ImportUsers(ctx context.Context, users []User, replace boo
 	defer func() { _ = tx.Rollback() }()
 
 	if replace {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM users`); err != nil {
-			return err
+		// Bindings reference roles/users by name; clear dependents first.
+		for _, q := range []string{
+			`DELETE FROM role_bindings`,
+			`DELETE FROM roles`,
+			`DELETE FROM audit_log`,
+			`DELETE FROM users`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
 		}
 	}
-	for i := range users {
-		u := &users[i]
+
+	for i := range data.Users {
+		u := &data.Users[i]
 		enabled := 0
 		if u.Enabled {
 			enabled = 1
@@ -705,29 +740,48 @@ func (s *SQLiteStore) ImportUsers(ctx context.Context, users []User, replace boo
 			return err
 		}
 	}
-	return tx.Commit()
-}
-
-func (s *SQLiteStore) ImportAuditEntries(ctx context.Context, entries []AuditEntry, replace bool) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if replace {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM audit_log`); err != nil {
-			return err
-		}
-	}
-	for i := range entries {
-		e := &entries[i]
+	for i := range data.Audit {
+		e := &data.Audit[i]
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO audit_log (id, timestamp, actor, action, resource, status, detail, source_ip)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			e.ID, e.Timestamp.UTC().Format(time.RFC3339Nano), e.Actor, string(e.Action),
 			e.Resource, e.Status, e.Detail, e.SourceIP,
 		); err != nil {
+			return err
+		}
+	}
+	for i := range data.Roles {
+		r := &data.Roles[i]
+		rulesJSON, err := json.Marshal(r.Rules)
+		if err != nil {
+			return err
+		}
+		builtin := 0
+		if r.Builtin {
+			builtin = 1
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO roles (id, name, rules, builtin, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			r.ID, r.Name, string(rulesJSON), builtin,
+			r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			if isSQLiteUniqueViolation(err) {
+				return ErrRoleExists
+			}
+			return err
+		}
+	}
+	for i := range data.Bindings {
+		b := &data.Bindings[i]
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO role_bindings (id, username, role_name, created_at) VALUES (?, ?, ?, ?)`,
+			b.ID, b.Username, b.RoleName, b.CreatedAt.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			if isSQLiteUniqueViolation(err) {
+				return ErrBindingExists
+			}
 			return err
 		}
 	}

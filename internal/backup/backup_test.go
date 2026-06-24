@@ -46,7 +46,7 @@ func TestCreateExportsUsersAndAuditWithoutCA(t *testing.T) {
 	ms := seededStore(t)
 	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
 
-	doc, err := Create(context.Background(), ms, "v9.9.9", now)
+	doc, err := Create(context.Background(), ms, "v9.9.9", now, true)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -71,6 +71,36 @@ func TestCreateExportsUsersAndAuditWithoutCA(t *testing.T) {
 	}
 	if alice == nil || alice.OnboardToken != "tok-alice" || alice.TokenIssuedAt == nil {
 		t.Errorf("alice token not exported: %+v", alice)
+	}
+}
+
+func TestCreateRedactsTokensByDefault(t *testing.T) {
+	ms := seededStore(t)
+	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+
+	doc, err := Create(context.Background(), ms, "v1", now, false)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, u := range doc.Users {
+		if u.OnboardToken != "" || u.TokenIssuedAt != nil || u.TokenConsumedAt != nil {
+			t.Errorf("token columns not redacted for %s: %+v", u.Username, u)
+		}
+	}
+
+	// includeTokens=true preserves them (alice has a token in the fixture).
+	withTokens, err := Create(context.Background(), ms, "v1", now, true)
+	if err != nil {
+		t.Fatalf("Create(includeTokens): %v", err)
+	}
+	var found bool
+	for _, u := range withTokens.Users {
+		if u.Username == "alice" && u.OnboardToken == "tok-alice" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("includeTokens=true did not preserve alice's onboarding token")
 	}
 }
 
@@ -108,7 +138,7 @@ func TestFilename(t *testing.T) {
 func TestWriteToDirCreatesFileWithSecurePerms(t *testing.T) {
 	ms := seededStore(t)
 	now := time.Date(2026, 6, 24, 14, 5, 9, 0, time.UTC)
-	doc, err := Create(context.Background(), ms, "v1", now)
+	doc, err := Create(context.Background(), ms, "v1", now, false)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -140,6 +170,39 @@ func TestWriteToDirCreatesFileWithSecurePerms(t *testing.T) {
 		}
 		if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
 			t.Errorf("dir mode = %o, want 700", fi.Mode().Perm())
+		}
+	}
+}
+
+func TestWriteToDirDoesNotOverwriteOnSameSecondCollision(t *testing.T) {
+	ms := seededStore(t)
+	now := time.Date(2026, 6, 24, 14, 5, 9, 0, time.UTC) // identical timestamp → same base name
+	doc, err := Create(context.Background(), ms, "v1", now, false)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dir := t.TempDir()
+
+	first, err := WriteToDir(dir, doc)
+	if err != nil {
+		t.Fatalf("WriteToDir(first): %v", err)
+	}
+	second, err := WriteToDir(dir, doc)
+	if err != nil {
+		t.Fatalf("WriteToDir(second): %v", err)
+	}
+	if first == second {
+		t.Fatalf("collision silently overwrote: both wrote %q", first)
+	}
+	if want := filepath.Join(dir, "swc-proxy-backup-20260624-140509.json"); first != want {
+		t.Errorf("first path = %q, want %q", first, want)
+	}
+	if want := filepath.Join(dir, "swc-proxy-backup-20260624-140509-1.json"); second != want {
+		t.Errorf("second path = %q, want %q", second, want)
+	}
+	for _, p := range []string{first, second} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected file %q to exist: %v", p, err)
 		}
 	}
 }
