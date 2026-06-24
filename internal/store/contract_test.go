@@ -720,10 +720,10 @@ func testBackupStoreContract(t *testing.T, newStore func() BackupStore) {
 					Actor: "cli", Action: AuditBackupExported, Resource: "backup", Status: "success"},
 			},
 			Roles: []Role{
-				{ID: "rrrrrrrr-0000-4000-8000-000000000001", Name: "viewer", Builtin: true,
+				{ID: "dddddddd-0000-4000-8000-000000000001", Name: "viewer", Builtin: true,
 					Rules:     []PermissionRule{{Resources: []string{"services"}, Verbs: []string{"get", "list"}}},
 					CreatedAt: base, UpdatedAt: base},
-				{ID: "rrrrrrrr-0000-4000-8000-000000000002", Name: "custom-deploy", Builtin: false,
+				{ID: "dddddddd-0000-4000-8000-000000000002", Name: "custom-deploy", Builtin: false,
 					Rules:     []PermissionRule{{Resources: []string{"stacks", "services"}, Verbs: []string{"*"}}},
 					CreatedAt: base.Add(time.Second), UpdatedAt: base.Add(time.Second)},
 			},
