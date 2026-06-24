@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"swarm-rbac-proxy/internal/api"
+	"swarm-rbac-proxy/internal/backup"
 	"swarm-rbac-proxy/internal/certauth"
 	"swarm-rbac-proxy/internal/config"
 	proxylog "swarm-rbac-proxy/internal/log"
@@ -286,6 +288,75 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 	}()
 	io.Copy(back, client)
 	<-done
+}
+
+// newBackupHandler returns the /startbackup handler for the internal listener.
+// It writes a DB-only logical backup (never the CA — that stays an opt-in,
+// human-supervised CLI path) to dir and replies with the artifact filename. It
+// accepts GET (so a bare `curl .../startbackup` works) and POST.
+func newBackupHandler(userStore store.UserStore, audit store.AuditStore, dir string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			writeBackupJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"result": "error", "error": "method not allowed; use GET or POST",
+			})
+			return
+		}
+		bs, ok := userStore.(store.BackupStore)
+		if !ok {
+			writeBackupJSON(w, http.StatusNotImplemented, map[string]string{
+				"result": "error", "error": "store backend does not support backup",
+			})
+			return
+		}
+
+		doc, err := backup.Create(r.Context(), bs, version.String(), time.Now().UTC())
+		if err != nil {
+			l().Errorw("startbackup: export failed", "error", err)
+			writeBackupJSON(w, http.StatusInternalServerError, map[string]string{
+				"result": "error", "error": err.Error(),
+			})
+			return
+		}
+		path, err := backup.WriteToDir(dir, doc)
+		if err != nil {
+			l().Errorw("startbackup: write failed", "error", err)
+			writeBackupJSON(w, http.StatusInternalServerError, map[string]string{
+				"result": "error", "error": err.Error(),
+			})
+			return
+		}
+
+		_ = audit.RecordAudit(r.Context(), &store.AuditEntry{
+			Actor: "internal", Action: store.AuditBackupExported,
+			Resource: "backup", Status: "success",
+			Detail:   fmt.Sprintf("users=%d audit=%d ca=false trigger=http", len(doc.Users), len(doc.Audit)),
+			SourceIP: requestIP(r),
+		})
+
+		l().Infow("backup written", "path", path, "users", len(doc.Users), "audit", len(doc.Audit))
+		writeBackupJSON(w, http.StatusOK, map[string]string{
+			"result": "success",
+			"file":   backup.Filename(doc.CreatedAt),
+			"path":   path,
+		})
+	}
+}
+
+// requestIP extracts the client IP from r.RemoteAddr, falling back to the raw
+// value when it has no port.
+func requestIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func writeBackupJSON(w http.ResponseWriter, status int, body map[string]string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // errInsecureListener is returned by checkExternalListenerAuth when the
@@ -604,8 +675,17 @@ func main() {
 	// MarkInternalRequest internally). wrapRBAC enforces role-based access
 	// (external only; no-op internally and when mTLS is off). wrapExec applies
 	// the protected-stack exec/forward guard (no-op on the internal listener).
-	registerRoutes := func(mux *http.ServeMux, wrapProxy, wrapRBAC, wrapExec func(http.Handler) http.Handler) {
+	registerRoutes := func(mux *http.ServeMux, internal bool, wrapProxy, wrapRBAC, wrapExec func(http.Handler) http.Handler) {
 		tok := cfg.AdminToken
+		// /startbackup is exposed only on the internal (loopback, no-auth)
+		// listener — the same trusted admin path used for stack deploy/exec.
+		// It writes a DB-only backup (never the CA) to the proxy-data volume
+		// and returns the artifact filename, so an operator can trigger a
+		// backup with `curl 127.0.0.1:<port>/startbackup` from inside the
+		// container without shelling into the swcproxy CLI.
+		if internal {
+			mux.HandleFunc("/startbackup", newBackupHandler(userStore, auditStore, backup.DefaultDir(cfg)))
+		}
 		mux.Handle("/api/v1/users", api.RequireToken(tok, userHandler))
 		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(tok, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
@@ -639,7 +719,7 @@ func main() {
 	if cfg.InternalListen != "" {
 		internalMux := http.NewServeMux()
 		noWrap := func(next http.Handler) http.Handler { return next }
-		registerRoutes(internalMux, api.MarkInternalRequest, noWrap, noWrap)
+		registerRoutes(internalMux, true, api.MarkInternalRequest, noWrap, noWrap)
 		go func() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
 			srv := &http.Server{
@@ -663,7 +743,7 @@ func main() {
 	if cfg.AgentManagerURL != "" && cfg.TLSClientCA == "" {
 		l().Warnw("exec guard active without mTLS: exec on protected stack will be blocked; non-protected exec may pass without identity; use PROXY_INTERNAL_LISTEN for local exec access")
 	}
-	registerRoutes(externalMux, proxyAuth, rbacWrap, guard.ExecGuard)
+	registerRoutes(externalMux, false, proxyAuth, rbacWrap, guard.ExecGuard)
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)

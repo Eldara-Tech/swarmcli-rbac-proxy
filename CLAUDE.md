@@ -164,7 +164,7 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag
+  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, internal-only /startbackup handler
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
   .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy
@@ -174,9 +174,12 @@ swarm-rbac-proxy/
   cmd/
     swcproxy/
       main.go           — Admin CLI: version, user ls/add/delete/regenerate-token, audit ls (direct store access)
-      backup.go         — Admin CLI: backup/restore (logical JSON export/import, optional CA bundle)
+      backup.go         — Admin CLI: backup/restore (delegates artifact assembly to internal/backup; optional CA bundle; default-location output resolution)
       main_test.go      — CLI unit tests (flag parsing, helpers)
   internal/
+    backup/
+      backup.go         — Logical backup artifact (Doc/User/CA schema, Create/Marshal/WriteToDir/DefaultDir/Filename), shared by the swcproxy CLI and the server's /startbackup handler
+      backup_test.go    — backup package unit tests (export, marshal, filename, dir perms, default dir)
     version/
       version.go        — Build-time version vars (Version/Commit/Date), shared by both binaries
       version_test.go   — version package tests
@@ -250,6 +253,7 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 - `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-token protected). Deleting the last admin binding is refused (409)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
 - `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
+- `GET|POST /startbackup` — **Internal listener only.** Triggers a database-only logical backup (never the CA), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`), and returns `{"result":"success","file":...,"path":...}`. Not registered on the external mux. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
 - `/v1/*` — Forwarded to agent-manager (when `PROXY_AGENT_MANAGER_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
 
@@ -269,7 +273,7 @@ swcproxy role show <name>                 # Show a role's rules
 swcproxy binding ls                       # List role bindings
 swcproxy binding add <user> <role>        # Bind a user to a role
 swcproxy binding rm <id>                  # Remove a role binding (last-admin protected)
-swcproxy backup [-o <file>] [--include-ca] # Logical JSON export of users + audit (optional CA bundle)
+swcproxy backup [-o <file>] [--include-ca] # Logical JSON export of users + audit (optional CA bundle). Without -o: a terminal writes a timestamped file to <db-dir>/backup; a pipe streams JSON to stdout
 swcproxy restore [-i <file>] [--force] [--ca-out <dir>] # Import a backup verbatim
 swcproxy --help                           # Usage info
 ```
@@ -285,7 +289,7 @@ does not preserve user connections, and the `--include-ca` DR bundle.
 
 All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, and the logical-backup actions `backup.exported`, `backup.restored` (all recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
 
-Each entry records: id, timestamp, actor (username/"cli"/"anonymous"), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
+Each entry records: id, timestamp, actor (username/"cli"/"internal"/"anonymous"; "internal" marks an action triggered via the internal listener, e.g. `/startbackup`), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
 
 The `AuditStore` interface (`internal/store/store.go`) is implemented by all three store backends. Recording is nil-safe — handlers pass `nil` in tests. Audit write failures are logged but never block requests.
 

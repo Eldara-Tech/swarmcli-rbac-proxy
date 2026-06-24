@@ -53,6 +53,37 @@ for ordinary backup storage. Schedule it like any other database dump.
 
 It does **not** contain the CA; `backup` reminds you of this on stderr.
 
+### Default location
+
+`backup` only streams JSON to stdout when stdout is **piped or redirected**
+(the `> file.json` form above). With no `-o` on an **interactive terminal** it
+instead writes a timestamped file to the default backup directory — derived
+from the database path so it lands on the persistent `proxy-data` volume:
+
+```
+/data/proxy.db  →  /data/backup/swc-proxy-backup-<YYYYMMDD-HHMMSS>.json
+```
+
+and prints the path. So a bare `swcproxy backup` inside the container produces a
+durable file on the volume without you choosing a name.
+
+### Trigger over the internal listener
+
+When `PROXY_INTERNAL_LISTEN` is set (e.g. `127.0.0.1:2375`), the proxy serves a
+`/startbackup` endpoint on that **loopback, no-auth** listener — the same
+trusted local admin path used for `docker stack deploy`. It writes a
+database-only backup to the default directory above and returns the filename:
+
+```bash
+curl 127.0.0.1:2375/startbackup
+{"result":"success","file":"swc-proxy-backup-20260624-070425.json","path":"/data/backup/swc-proxy-backup-20260624-070425.json"}
+```
+
+`GET` and `POST` are both accepted. The endpoint is **never** exposed on the
+external mTLS listener, and it **never** embeds the CA — `--include-ca` stays a
+deliberate, human-supervised CLI action (see below). Retrieve the saved file
+from the volume (`docker cp`, a bind mount, or your volume backup tooling).
+
 ## Disaster-recovery bundle (database + CA)
 
 `--include-ca` embeds the client CA cert **and private key** in the artifact so
@@ -66,8 +97,10 @@ docker exec "$(docker ps -q -f name=rbac_proxy)" \
 > **Security warning.** The CA private key can mint a certificate for *any*
 > username, including admins. A `--include-ca` artifact is a crown-jewel
 > secret: store it in a vault / password manager, encrypt it at rest, and keep
-> it separate from routine database backups. `swcproxy` refuses to write it to
-> an interactive terminal — redirect to a file or pipe, or use `-o`.
+> it separate from routine database backups. The key never reaches an
+> interactive terminal: with no `-o`, a terminal writes a `0600` file to the
+> default backup directory rather than printing the JSON; a pipe/redirect
+> streams it as usual. The `/startbackup` HTTP trigger never includes the CA.
 
 The CA has a 10-year validity and effectively never changes, so a single
 `--include-ca` capture, refreshed only when you rotate the CA, is enough.

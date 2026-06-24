@@ -35,6 +35,7 @@ import (
 	"testing"
 	"time"
 
+	"swarm-rbac-proxy/internal/backup"
 	"swarm-rbac-proxy/internal/store"
 )
 
@@ -162,13 +163,13 @@ func hasAudit(t *testing.T, path string, action store.AuditAction) bool {
 	return false
 }
 
-func readBackup(t *testing.T, path string) backupDoc {
+func readBackup(t *testing.T, path string) backup.Doc {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read backup %s: %v", path, err)
 	}
-	var doc backupDoc
+	var doc backup.Doc
 	if err := json.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("unmarshal backup %s: %v", path, err)
 	}
@@ -252,7 +253,7 @@ func TestCLIBackup_ToFile_ValidAnd0600(t *testing.T) {
 	}
 
 	doc := readBackup(t, out)
-	if doc.Schema != backupSchema || doc.Version != backupVersion {
+	if doc.Schema != backup.Schema || doc.Version != backup.Version {
 		t.Errorf("schema/version = %q/%d", doc.Schema, doc.Version)
 	}
 	if len(doc.Users) != 3 {
@@ -262,7 +263,7 @@ func TestCLIBackup_ToFile_ValidAnd0600(t *testing.T) {
 		t.Errorf("CA must be absent without --include-ca")
 	}
 	// bob (index 1) was given a token; it must survive the export.
-	var bob *backupUser
+	var bob *backup.User
 	for i := range doc.Users {
 		if doc.Users[i].Username == "bob" {
 			bob = &doc.Users[i]
@@ -368,11 +369,11 @@ func TestCLIBackup_StdoutIsValidJSON(t *testing.T) {
 	if strings.Contains(stdout, "store initialized") {
 		t.Errorf("log line leaked onto stdout: %.120q", stdout)
 	}
-	var doc backupDoc
+	var doc backup.Doc
 	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
 		t.Fatalf("unmarshal stdout: %v", err)
 	}
-	if doc.Schema != backupSchema || len(doc.Users) != 1 {
+	if doc.Schema != backup.Schema || len(doc.Users) != 1 {
 		t.Errorf("unexpected doc: schema=%q users=%d", doc.Schema, len(doc.Users))
 	}
 	// The diagnostic line must still be emitted — on stderr.

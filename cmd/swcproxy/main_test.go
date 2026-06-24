@@ -37,6 +37,27 @@ func TestParseBackupArgs(t *testing.T) {
 	}
 }
 
+func TestResolveBackupOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		outFile string
+		isTTY   bool
+		want    outputMode
+	}{
+		{"explicit -o wins over tty", "b.json", true, outputFile},
+		{"explicit -o wins over pipe", "b.json", false, outputFile},
+		{"tty, no -o → default dir", "", true, outputDefaultDir},
+		{"pipe, no -o → stdout", "", false, outputStdout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveBackupOutput(tt.outFile, tt.isTTY); got != tt.want {
+				t.Errorf("resolveBackupOutput(%q, %v) = %d, want %d", tt.outFile, tt.isTTY, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseRestoreArgs(t *testing.T) {
 	tests := []struct {
 		name      string

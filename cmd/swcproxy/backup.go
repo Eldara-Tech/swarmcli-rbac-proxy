@@ -12,46 +12,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"swarm-rbac-proxy/internal/backup"
 	"swarm-rbac-proxy/internal/config"
 	"swarm-rbac-proxy/internal/store"
 	"swarm-rbac-proxy/internal/version"
 )
-
-// backupSchema and backupVersion identify the artifact format. restore
-// refuses any document whose schema or version it does not recognise.
-const (
-	backupSchema  = "swarmcli-rbac-proxy/backup"
-	backupVersion = 1
-)
-
-// backupUser mirrors store.User but with explicit JSON tags for the
-// onboarding-token fields, which store.User marks json:"-".
-type backupUser struct {
-	ID              string     `json:"id"`
-	Username        string     `json:"username"`
-	Role            string     `json:"role"`
-	Enabled         bool       `json:"enabled"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	OnboardToken    string     `json:"onboard_token,omitempty"`
-	TokenIssuedAt   *time.Time `json:"token_issued_at,omitempty"`
-	TokenConsumedAt *time.Time `json:"token_consumed_at,omitempty"`
-}
-
-type backupCA struct {
-	CertPEM string `json:"cert_pem"`
-	KeyPEM  string `json:"key_pem"`
-}
-
-type backupDoc struct {
-	Schema       string             `json:"schema"`
-	Version      int                `json:"version"`
-	CreatedAt    time.Time          `json:"created_at"`
-	ProxyVersion string             `json:"proxy_version"`
-	Users        []backupUser       `json:"users"`
-	Audit        []store.AuditEntry `json:"audit"`
-	CA           *backupCA          `json:"ca,omitempty"`
-}
 
 type backupOpts struct {
 	outFile   string
@@ -114,11 +79,37 @@ func printBackupUsage() {
 	fmt.Fprintf(os.Stderr, `Usage:
   swcproxy backup [-o <file>] [--include-ca]   Export users + audit log as JSON
 
-  -o, --out <file>   Write to file (mode 0600) instead of stdout
+  -o, --out <file>   Write to file (mode 0600). Without -o, an interactive
+                     terminal writes a timestamped file under the default
+                     backup dir (<db-dir>/backup, e.g. /data/backup); a piped
+                     or redirected stdout streams the JSON instead.
   --include-ca       Also embed the client CA cert+key (DR bundle).
                      The CA can mint a cert for ANY user — store the
                      resulting file like a private key.
 `)
+}
+
+// outputMode selects where `swcproxy backup` writes when no explicit -o is set.
+type outputMode int
+
+const (
+	outputStdout outputMode = iota
+	outputFile
+	outputDefaultDir
+)
+
+// resolveBackupOutput decides the backup destination: an explicit -o always
+// wins; otherwise an interactive terminal writes to the default dir (avoiding a
+// JSON/CA dump on the tty) while a piped stdout streams the artifact.
+func resolveBackupOutput(outFile string, stdoutIsTTY bool) outputMode {
+	switch {
+	case outFile != "":
+		return outputFile
+	case stdoutIsTTY:
+		return outputDefaultDir
+	default:
+		return outputStdout
+	}
 }
 
 func printRestoreUsage() {
@@ -169,29 +160,13 @@ func runBackupCommand(args []string) {
 		printBackupUsage()
 		os.Exit(1)
 	}
-	if o.includeCA && o.outFile == "" && isTerminal(os.Stdout) {
-		fatal("--include-ca writes the root signing key; redirect to a file or pipe, or use -o <file>")
-	}
 
 	ctx := context.Background()
 	bs, audit := openBackupStore()
 
-	users, err := bs.ExportUsers(ctx)
+	doc, err := backup.Create(ctx, bs, version.String(), time.Now().UTC())
 	if err != nil {
-		fatal("export users: %v", err)
-	}
-	entries, err := bs.ExportAuditEntries(ctx)
-	if err != nil {
-		fatal("export audit log: %v", err)
-	}
-
-	doc := backupDoc{
-		Schema:       backupSchema,
-		Version:      backupVersion,
-		CreatedAt:    time.Now().UTC(),
-		ProxyVersion: version.String(),
-		Users:        toBackupUsers(users),
-		Audit:        entries,
+		fatal("%v", err)
 	}
 
 	if o.includeCA {
@@ -207,38 +182,49 @@ func runBackupCommand(args []string) {
 		if err != nil {
 			fatal("read client CA key: %v", err)
 		}
-		doc.CA = &backupCA{CertPEM: string(certPEM), KeyPEM: string(keyPEM)}
+		doc.CA = &backup.CA{CertPEM: string(certPEM), KeyPEM: string(keyPEM)}
 		fmt.Fprintln(os.Stderr, "WARNING: this backup embeds the client CA private key — it can mint a")
 		fmt.Fprintln(os.Stderr, "         certificate for ANY user, including admins. Protect it like a secret.")
 	}
 
-	data, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		fatal("marshal backup: %v", err)
-	}
-	data = append(data, '\n')
-
-	if o.outFile != "" {
+	// Destination: explicit -o wins; otherwise an interactive terminal writes
+	// to the default backup dir (so we never dump JSON — or a CA key — onto the
+	// tty), while a piped/redirected stdout still streams the artifact.
+	var dest string
+	switch resolveBackupOutput(o.outFile, isTerminal(os.Stdout)) {
+	case outputFile:
+		data, err := backup.Marshal(doc)
+		if err != nil {
+			fatal("%v", err)
+		}
 		if err := os.WriteFile(o.outFile, data, 0o600); err != nil {
 			fatal("write %s: %v", o.outFile, err)
 		}
-	} else {
+		dest = o.outFile
+	case outputDefaultDir:
+		path, err := backup.WriteToDir(backup.DefaultDir(loadCfg()), doc)
+		if err != nil {
+			fatal("%v", err)
+		}
+		dest = path
+	default: // outputStdout
+		data, err := backup.Marshal(doc)
+		if err != nil {
+			fatal("%v", err)
+		}
 		if _, err := os.Stdout.Write(data); err != nil {
 			fatal("write stdout: %v", err)
 		}
+		dest = "stdout"
 	}
 
 	_ = audit.RecordAudit(ctx, &store.AuditEntry{
 		Actor: "cli", Action: store.AuditBackupExported,
 		Resource: "backup", Status: "success",
-		Detail: fmt.Sprintf("users=%d audit=%d ca=%v", len(users), len(entries), o.includeCA),
+		Detail: fmt.Sprintf("users=%d audit=%d ca=%v", len(doc.Users), len(doc.Audit), o.includeCA),
 	})
 
-	dest := o.outFile
-	if dest == "" {
-		dest = "stdout"
-	}
-	fmt.Fprintf(os.Stderr, "Backed up %d users and %d audit entries to %s\n", len(users), len(entries), dest)
+	fmt.Fprintf(os.Stderr, "Backed up %d users and %d audit entries to %s\n", len(doc.Users), len(doc.Audit), dest)
 	if doc.CA == nil {
 		fmt.Fprintln(os.Stderr, "Note: this backup does NOT contain the client CA. On restore, the same")
 		fmt.Fprintln(os.Stderr, "      rbac_client_ca / rbac_client_ca_key secret must be in place, or every")
@@ -274,15 +260,15 @@ func runRestoreCommand(args []string) {
 		}
 	}
 
-	var doc backupDoc
+	var doc backup.Doc
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		fatal("parse backup: %v", err)
 	}
-	if doc.Schema != backupSchema {
-		fatal("unrecognised backup schema %q (want %q)", doc.Schema, backupSchema)
+	if doc.Schema != backup.Schema {
+		fatal("unrecognised backup schema %q (want %q)", doc.Schema, backup.Schema)
 	}
-	if doc.Version != backupVersion {
-		fatal("unsupported backup version %d (want %d)", doc.Version, backupVersion)
+	if doc.Version != backup.Version {
+		fatal("unsupported backup version %d (want %d)", doc.Version, backup.Version)
 	}
 	// Fail fast before touching the store: a DR bundle is useless without a
 	// destination for the CA, and re-running after a partial import would
@@ -309,7 +295,7 @@ func runRestoreCommand(args []string) {
 		fatal("store already has %d users; pass --force to replace them", len(existing))
 	}
 
-	if err := bs.ImportUsers(ctx, fromBackupUsers(doc.Users), o.force); err != nil {
+	if err := bs.ImportUsers(ctx, backup.FromUsers(doc.Users), o.force); err != nil {
 		fatal("import users: %v", err)
 	}
 	if err := bs.ImportAuditEntries(ctx, doc.Audit, o.force); err != nil {
@@ -356,30 +342,4 @@ func runRestoreCommand(args []string) {
 		fmt.Fprintln(os.Stderr, "working if the same rbac_client_ca / rbac_client_ca_key secret is in place;")
 		fmt.Fprintln(os.Stderr, "otherwise every user must be re-onboarded. See docs/backup-restore.md.")
 	}
-}
-
-func toBackupUsers(users []store.User) []backupUser {
-	out := make([]backupUser, len(users))
-	for i, u := range users {
-		out[i] = backupUser{
-			ID: u.ID, Username: u.Username, Role: u.Role, Enabled: u.Enabled,
-			CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
-			OnboardToken: u.OnboardToken, TokenIssuedAt: u.TokenIssuedAt,
-			TokenConsumedAt: u.TokenConsumedAt,
-		}
-	}
-	return out
-}
-
-func fromBackupUsers(users []backupUser) []store.User {
-	out := make([]store.User, len(users))
-	for i, u := range users {
-		out[i] = store.User{
-			ID: u.ID, Username: u.Username, Role: u.Role, Enabled: u.Enabled,
-			CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
-			OnboardToken: u.OnboardToken, TokenIssuedAt: u.TokenIssuedAt,
-			TokenConsumedAt: u.TokenConsumedAt,
-		}
-	}
-	return out
 }
