@@ -64,6 +64,9 @@ const (
 	// Logical backup/restore (recorded on success).
 	AuditBackupExported AuditAction = "backup.exported"
 	AuditBackupRestored AuditAction = "backup.restored"
+	// AuditDBMigrated marks a completed `swcproxy migrate` (sqlite → postgres);
+	// recorded on the destination store on success.
+	AuditDBMigrated AuditAction = "db.migrated"
 )
 
 // AuditEntry represents a single audit log entry.
