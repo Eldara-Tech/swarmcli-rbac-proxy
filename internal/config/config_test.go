@@ -302,6 +302,44 @@ func TestLoad_OnboardingTokenTTL(t *testing.T) {
 	})
 }
 
+func TestLoad_DatabaseConnectTimeout(t *testing.T) {
+	t.Run("unset uses default", func(t *testing.T) {
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DatabaseConnectTimeout != DefaultDatabaseConnectTimeout {
+			t.Errorf("DatabaseConnectTimeout = %s, want %s", cfg.DatabaseConnectTimeout, DefaultDatabaseConnectTimeout)
+		}
+	})
+	t.Run("valid duration parses", func(t *testing.T) {
+		t.Setenv("PROXY_DATABASE_CONNECT_TIMEOUT", "5s")
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DatabaseConnectTimeout != 5*time.Second {
+			t.Errorf("DatabaseConnectTimeout = %s, want 5s", cfg.DatabaseConnectTimeout)
+		}
+	})
+	t.Run("zero falls back to default", func(t *testing.T) {
+		t.Setenv("PROXY_DATABASE_CONNECT_TIMEOUT", "0")
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DatabaseConnectTimeout != DefaultDatabaseConnectTimeout {
+			t.Errorf("DatabaseConnectTimeout = %s, want %s (default)", cfg.DatabaseConnectTimeout, DefaultDatabaseConnectTimeout)
+		}
+	})
+	t.Run("invalid duration is rejected", func(t *testing.T) {
+		t.Setenv("PROXY_DATABASE_CONNECT_TIMEOUT", "not-a-duration")
+		if _, err := Load(""); err == nil {
+			t.Fatal("expected parse error")
+		}
+	})
+}
+
 func TestLoad_AdminTokenFile(t *testing.T) {
 	t.Run("reads token from file when env unset", func(t *testing.T) {
 		path := writeFile(t, "admin-token", "admin:abcdef0123456789\n")

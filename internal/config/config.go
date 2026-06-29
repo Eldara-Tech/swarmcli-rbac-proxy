@@ -17,6 +17,11 @@ import (
 // tokens in wikis, CI logs, or chat stop being usable after this window.
 const DefaultOnboardingTokenTTL = 24 * time.Hour
 
+// DefaultDatabaseConnectTimeout is how long the proxy waits (with backoff) for
+// PostgreSQL to become reachable at startup when PROXY_DATABASE_CONNECT_TIMEOUT
+// is unset.
+const DefaultDatabaseConnectTimeout = 30 * time.Second
+
 // Config holds all proxy configuration values.
 type Config struct {
 	Listen         string `json:"listen"`
@@ -66,6 +71,13 @@ type Config struct {
 	// Must be strictly positive after defaults are applied; Load returns
 	// an error on non-positive values.
 	OnboardingTokenTTL time.Duration `json:"onboarding_token_ttl"`
+
+	// DatabaseConnectTimeout bounds how long the proxy waits for PostgreSQL to
+	// become reachable at startup before giving up (the server retries with
+	// backoff so a stack deploy where postgres starts alongside the proxy does
+	// not crash-loop). Zero is interpreted as DefaultDatabaseConnectTimeout
+	// after Load. Applies to the server only; the CLI/migrate paths fail fast.
+	DatabaseConnectTimeout time.Duration `json:"database_connect_timeout"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -152,6 +164,14 @@ func Load(path string) (Config, error) {
 		cfg.OnboardingTokenTTL = d
 	}
 
+	if v := os.Getenv("PROXY_DATABASE_CONNECT_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("parse PROXY_DATABASE_CONNECT_TIMEOUT %q: %w", v, err)
+		}
+		cfg.DatabaseConnectTimeout = d
+	}
+
 	if cfg.Store == "" {
 		cfg.Store = "sqlite"
 	}
@@ -160,6 +180,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.OnboardingTokenTTL == 0 {
 		cfg.OnboardingTokenTTL = DefaultOnboardingTokenTTL
+	}
+	if cfg.DatabaseConnectTimeout == 0 {
+		cfg.DatabaseConnectTimeout = DefaultDatabaseConnectTimeout
 	}
 	if cfg.OnboardingTokenTTL < 0 {
 		return cfg, fmt.Errorf("onboarding_token_ttl must be a positive duration, got %s", cfg.OnboardingTokenTTL)

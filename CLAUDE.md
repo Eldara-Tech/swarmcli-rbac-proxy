@@ -43,7 +43,7 @@ When updating the Go version, keep these in sync:
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_BACKUP_DIR` (default-location backup dir for `swcproxy backup`/`/startbackup`; derived from the DB path when unset — set explicitly for postgres, which has no DB file), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_BACKUP_DIR` (default-location backup dir for `swcproxy backup`/`/startbackup`; derived from the DB path when unset — set explicitly for postgres, which has no DB file), `PROXY_DATABASE_CONNECT_TIMEOUT` (server-only startup wait for postgres to become reachable, default 30s; CLI/migrate fail fast), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
 
 ## Agent-manager Forwarding
 
@@ -175,7 +175,10 @@ swarm-rbac-proxy/
     swcproxy/
       main.go           — Admin CLI: version, user ls/add/delete/regenerate-token, audit ls (direct store access)
       backup.go         — Admin CLI: backup/restore (delegates artifact assembly to internal/backup; optional CA bundle; default-location output resolution)
+      migrate.go        — Admin CLI: `migrate` (SQLite → PostgreSQL logical copy via store Export→Restore; fail-fast on the dest; db.migrated audit)
       main_test.go      — CLI unit tests (flag parsing, helpers)
+      migrate_test.go   — `parseMigrateArgs` unit tests (no DB)
+      migrate_integration_test.go — `swcproxy migrate` e2e (//go:build integration; SQLite source → TEST_DATABASE_URL postgres dest)
   internal/
     backup/
       backup.go         — Logical backup artifact (Doc/User/CA schema incl. roles+bindings, Create with token-redaction, Marshal/ToData/WriteToDir [O_EXCL, no overwrite]/DefaultDir/Filename), shared by the swcproxy CLI and the server's /startbackup handler
@@ -197,12 +200,13 @@ swarm-rbac-proxy/
       rbac.go           — RBACStore interface, Role/RoleBinding/PermissionRule types, resource/verb vocabulary, built-in roles, effective-permission resolver, seeding, legacy migration, last-admin lockout helpers
       memory.go         — in-memory UserStore + AuditStore + RBACStore + BackupStore (dev/testing)
       sqlite.go         — SQLite UserStore + AuditStore + RBACStore + BackupStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
-      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore + BackupStore (pgx/v5, with migrations; rules stored as JSONB)
+      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore + BackupStore (pgx/v5, with migrations; rules stored as JSONB). NewPostgresStoreWithRetry adds startup connection-wait (server-only; CLI fails fast)
       contract_test.go  — shared contract tests for all store implementations (user + audit)
       rbac_contract_test.go — shared RBAC contract tests (roles, bindings, resolver, seeding, migration, lockout)
       memory_test.go    — memory store unit tests
       sqlite_test.go    — SQLite store unit tests (contract + WAL)
       postgres_test.go  — postgres integration tests (//go:build integration)
+      postgres_retry_test.go — NewPostgresStoreWithRetry fail-fast/timeout/cancel paths (no DB, fast suite)
     api/
       auth.go           — RequireToken middleware (bearer token validation)
       auth_test.go      — auth middleware tests
@@ -277,6 +281,7 @@ swcproxy binding add <user> <role>        # Bind a user to a role
 swcproxy binding rm <id>                  # Remove a role binding (last-admin protected)
 swcproxy backup [-o <file>] [--include-ca] [--include-tokens] # Logical JSON export of users + audit + RBAC roles/bindings. Onboarding tokens redacted unless --include-tokens; optional CA bundle (--include-ca requires a file dest). Without -o: a terminal writes a timestamped file to <db-dir>/backup; a pipe streams JSON to stdout
 swcproxy restore [-i <file>] [--force] [--ca-out <dir>] # Import a backup verbatim (single transaction across all tables)
+swcproxy migrate [--sqlite <path>] [--postgres <url>] [--force] # Copy a SQLite store into PostgreSQL (users+audit+roles+bindings, tokens verbatim, no intermediate file); refuses a non-empty dest without --force; audits db.migrated on the dest
 swcproxy --help                           # Usage info
 ```
 
@@ -289,7 +294,7 @@ does not preserve user connections, and the `--include-ca` DR bundle.
 
 ## Audit Log
 
-All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, and the logical-backup actions `backup.exported`, `backup.restored` (all recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
+All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, the logical-backup actions `backup.exported`, `backup.restored`, and `db.migrated` (a completed `swcproxy migrate`, recorded on the destination store) — all recorded on success. Auth events (mTLS success/failure) are logged via zap only, not persisted.
 
 Each entry records: id, timestamp, actor (username/"cli"/"internal"/"anonymous"; "internal" marks an action triggered via the internal listener, e.g. `/startbackup`), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
 

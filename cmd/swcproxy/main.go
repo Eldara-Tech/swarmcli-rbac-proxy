@@ -56,6 +56,8 @@ func main() {
 		runBackupCommand(os.Args[2:])
 	case "restore":
 		runRestoreCommand(os.Args[2:])
+	case "migrate":
+		runMigrateCommand(os.Args[2:])
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -82,6 +84,7 @@ Usage:
   swcproxy binding rm <id>                 Remove a role binding
   swcproxy backup [-o <file>] [--include-ca] [--include-tokens]  Export users, audit + RBAC as JSON
   swcproxy restore [-i <file>] [--force]   Import a backup
+  swcproxy migrate [--sqlite <path>] [--postgres <url>] [--force]  Copy SQLite store into PostgreSQL
   swcproxy --help                          Show this help
 `)
 }

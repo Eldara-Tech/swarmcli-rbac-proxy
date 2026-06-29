@@ -541,7 +541,7 @@ func main() {
 		if cfg.DatabaseURL == "" {
 			l().Fatalw("missing required config", "error", "database_url is required when store=postgres")
 		}
-		pg, err := store.NewPostgresStore(context.Background(), cfg.DatabaseURL)
+		pg, err := store.NewPostgresStoreWithRetry(context.Background(), cfg.DatabaseURL, cfg.DatabaseConnectTimeout)
 		if err != nil {
 			l().Fatalw("postgres store init failed", "error", err)
 		}

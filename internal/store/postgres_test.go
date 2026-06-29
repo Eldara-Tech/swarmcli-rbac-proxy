@@ -102,3 +102,18 @@ func TestPostgresStore_SchemaCreated(t *testing.T) {
 		t.Fatal("expected users table to exist")
 	}
 }
+
+// TestNewPostgresStoreWithRetry_Success covers the happy path of the
+// connection-wait wrapper against the real database (the fail/timeout paths run
+// without a DB in postgres_retry_test.go).
+func TestNewPostgresStoreWithRetry_Success(t *testing.T) {
+	dbURL := os.Getenv("TEST_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s, err := NewPostgresStoreWithRetry(context.Background(), dbURL, 30*time.Second)
+	if err != nil {
+		t.Fatalf("NewPostgresStoreWithRetry: %v", err)
+	}
+	s.Close()
+}

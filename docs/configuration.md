@@ -77,10 +77,11 @@ The proxy persists users, onboarding tokens, and the audit log in one of three b
 |---|---|---|
 | `PROXY_STORE` | `sqlite` | Backend: `sqlite`, `postgres`, or `memory` (dev only; data lost on restart). |
 | `PROXY_DATABASE_PATH` | `proxy.db` | SQLite file path (used when `PROXY_STORE=sqlite`). |
-| `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`), e.g. `postgres://user:pass@host:5432/db?sslmode=disable`. |
+| `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`). For production use a verified-TLS DSN, e.g. `postgres://user:pass@host:5432/db?sslmode=verify-full`; `sslmode=disable` is for local development only. |
+| `PROXY_DATABASE_CONNECT_TIMEOUT` | `30s` | How long the server waits (retrying with backoff) for PostgreSQL to become reachable at startup before failing. Lets a Swarm stack deploy where the proxy and database start together settle instead of crash-looping. A Go duration (e.g. `60s`, `2m`); `0`/unset uses the default. Server-only — `swcproxy` CLI commands (including `migrate`) fail fast. |
 | `PROXY_BACKUP_DIR` | _(derived)_ | Directory for default-location backups (`swcproxy backup` without `-o`, and `/startbackup`). Defaults to `<db-dir>/backup` (e.g. `/data/backup`). With `PROXY_STORE=postgres` there is no database file, so the default resolves to `./backup` in the proxy's working directory — set this to a persistent volume path (e.g. `/data/backup`) for Postgres deployments. |
 
-To back up and restore this data — and to understand why a database restore alone does **not** keep existing user contexts working — see [backup-restore.md](backup-restore.md).
+To back up and restore this data — and to understand why a database restore alone does **not** keep existing user contexts working — see [backup-restore.md](backup-restore.md). To move an existing SQLite deployment onto PostgreSQL, see [sqlite-to-postgres.md](sqlite-to-postgres.md).
 
 ### Integrations and observability
 
@@ -114,7 +115,8 @@ JSON keys use snake_case (matching the Go struct tags). Unknown keys are rejecte
   "docker_tls_key":    "/path/to/client-key.pem",
   "store":             "sqlite",
   "database_path":     "proxy.db",
-  "database_url":      "postgres://user:pass@host:5432/db",
+  "database_url":      "postgres://user:pass@host:5432/db?sslmode=verify-full",
+  "database_connect_timeout": "30s",
   "admin_token":       "my-secret-token",
   "seed_username":     "admin",
   "seed_role":         "admin",
@@ -259,6 +261,8 @@ services:
       PROXY_SEED_USERNAME: admin
       PROXY_SEED_ROLE: admin
       PROXY_STORE: postgres
+      # sslmode=disable is acceptable only on a private overlay; use
+      # sslmode=verify-full with a CA when the database is reachable off-host.
       PROXY_DATABASE_URL: "postgres://proxy:secret@db:5432/rbac?sslmode=disable"
       PROXY_EXTERNAL_URL: "https://localhost:2376"
       PROXY_INTERNAL_LISTEN: "127.0.0.1:2375"
@@ -278,4 +282,4 @@ volumes:
   pgdata:
 ```
 
-The proxy creates the `users` and `audit_log` tables automatically on first startup.
+The proxy creates the `users`, `audit_log`, `roles`, and `role_bindings` tables automatically on first startup. Swarm ignores `depends_on`, so the proxy may start before PostgreSQL is ready; it retries the connection for `PROXY_DATABASE_CONNECT_TIMEOUT` (default 30s) before giving up rather than crash-looping. To move an existing SQLite deployment onto this Postgres backend without losing users, roles, bindings, or audit history, see [sqlite-to-postgres.md](sqlite-to-postgres.md).
