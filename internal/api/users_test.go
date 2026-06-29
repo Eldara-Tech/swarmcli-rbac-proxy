@@ -5,22 +5,13 @@ package api
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
-	"swarm-rbac-proxy/internal/certauth"
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
 )
@@ -31,448 +22,523 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func newTestHandler() *UserHandler {
-	return NewUserHandler(store.NewMemoryStore(), nil, nil)
+const testExternalURL = "tcp://proxy.example:2376"
+
+// newSeededStore returns a MemoryStore with the built-in roles seeded — the
+// same precondition main.go establishes at startup (CreateUserWithBinding needs
+// the target role to exist).
+func newSeededStore(t *testing.T) *store.MemoryStore {
+	t.Helper()
+	s := store.NewMemoryStore()
+	if err := store.SeedDefaultRoles(context.Background(), s); err != nil {
+		t.Fatalf("seed roles: %v", err)
+	}
+	return s
 }
 
-func TestCreateUser(t *testing.T) {
-	h := newTestHandler()
+// newTestHandler returns a UserHandler over a freshly seeded store (used for
+// both user and RBAC persistence), plus that store for assertions.
+func newTestHandler(t *testing.T) (*UserHandler, *store.MemoryStore) {
+	t.Helper()
+	s := newSeededStore(t)
+	return NewUserHandler(s, s, nil, testExternalURL), s
+}
 
-	body := `{"username":"alice"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
+// testMux wires the handler to a mux so {username} path values resolve.
+func testMux(h *UserHandler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/api/v1/users", h)
+	mux.HandleFunc("POST /api/v1/users/{username}/regenerate-token", h.RegenerateToken)
+	mux.HandleFunc("PATCH /api/v1/users/{username}", h.Update)
+	mux.HandleFunc("DELETE /api/v1/users/{username}", h.Delete)
+	return mux
+}
 
-	h.ServeHTTP(w, req)
+// asUser injects an authenticated mTLS identity into the request context, so
+// the handler's self-action guards (actorFromRequest) see a caller.
+func asUser(req *http.Request, username string) *http.Request {
+	return req.WithContext(context.WithValue(req.Context(), ContextKeyUser, &store.User{Username: username}))
+}
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
+func seedAdmin(t *testing.T, s *store.MemoryStore, name string) {
+	t.Helper()
+	if _, err := store.CreateUserWithBinding(context.Background(), s, s, name, store.RoleAdmin); err != nil {
+		t.Fatalf("seed admin %s: %v", name, err)
 	}
+}
 
-	var u store.User
-	if err := json.NewDecoder(w.Body).Decode(&u); err != nil {
+func postJSON(mux http.Handler, path, body string, actor string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if actor != "" {
+		req = asUser(req, actor)
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+type createResp struct {
+	User         *store.User `json:"user"`
+	OnboardToken string      `json:"onboard_token"`
+	OnboardURL   string      `json:"onboard_url"`
+}
+
+func userBindings(t *testing.T, s *store.MemoryStore, username string) []string {
+	t.Helper()
+	bs, err := s.ListBindingsForUser(context.Background(), username)
+	if err != nil {
+		t.Fatalf("list bindings: %v", err)
+	}
+	roles := make([]string, 0, len(bs))
+	for _, b := range bs {
+		roles = append(roles, b.RoleName)
+	}
+	return roles
+}
+
+// --- create ---
+
+func TestCreateUser_DefaultRoleOperator(t *testing.T) {
+	h, s := newTestHandler(t)
+
+	w := postJSON(testMux(h), "/api/v1/users", `{"username":"alice"}`, "")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", w.Code, w.Body)
+	}
+	var resp createResp
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if u.Username != "alice" {
-		t.Errorf("username = %q, want %q", u.Username, "alice")
+	if resp.User == nil || resp.User.Username != "alice" {
+		t.Fatalf("user = %+v, want alice", resp.User)
 	}
-	if u.ID == "" {
-		t.Error("expected ID to be set")
+	if !resp.User.Enabled {
+		t.Error("expected enabled true")
 	}
-	if !u.Enabled {
-		t.Error("expected enabled to be true")
+	if resp.User.Role != store.RoleOperator {
+		t.Errorf("role = %q, want operator (default)", resp.User.Role)
+	}
+	if len(resp.OnboardToken) != 64 {
+		t.Errorf("onboard_token len = %d, want 64 hex chars", len(resp.OnboardToken))
+	}
+	if !strings.HasPrefix(resp.OnboardURL, "https://proxy.example:2376/api/v1/onboard/") {
+		t.Errorf("onboard_url = %q, want https onboard URL", resp.OnboardURL)
+	}
+	if got := userBindings(t, s, "alice"); len(got) != 1 || got[0] != store.RoleOperator {
+		t.Errorf("bindings = %v, want [operator]", got)
 	}
 }
 
-func TestCreateUser_DuplicateUsername(t *testing.T) {
-	h := newTestHandler()
+func TestCreateUser_AdminRoleBinds(t *testing.T) {
+	h, s := newTestHandler(t)
+	w := postJSON(testMux(h), "/api/v1/users", `{"username":"root","role":"admin"}`, "")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", w.Code)
+	}
+	if got := userBindings(t, s, "root"); len(got) != 1 || got[0] != store.RoleAdmin {
+		t.Errorf("bindings = %v, want [admin]", got)
+	}
+	isAdmin, err := store.UserIsAdmin(context.Background(), s, "root")
+	if err != nil || !isAdmin {
+		t.Errorf("UserIsAdmin = %v, %v; want true", isAdmin, err)
+	}
+}
 
-	for i, wantCode := range []int{http.StatusCreated, http.StatusConflict} {
-		body := `{"username":"bob"}`
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
+func TestCreateUser_InvalidRole(t *testing.T) {
+	h, _ := newTestHandler(t)
+	w := postJSON(testMux(h), "/api/v1/users", `{"username":"x","role":"superuser"}`, "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
 
-		h.ServeHTTP(w, req)
-
-		if w.Code != wantCode {
-			t.Fatalf("request %d: status = %d, want %d", i, w.Code, wantCode)
+func TestCreateUser_Duplicate(t *testing.T) {
+	h, _ := newTestHandler(t)
+	mux := testMux(h)
+	for i, want := range []int{http.StatusCreated, http.StatusConflict} {
+		w := postJSON(mux, "/api/v1/users", `{"username":"bob"}`, "")
+		if w.Code != want {
+			t.Fatalf("request %d: status = %d, want %d", i, w.Code, want)
 		}
 	}
 }
 
 func TestCreateUser_MissingUsername(t *testing.T) {
-	h := newTestHandler()
-
-	body := `{"username":""}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
+	h, _ := newTestHandler(t)
+	w := postJSON(testMux(h), "/api/v1/users", `{"username":""}`, "")
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
 
-func TestCreateUser_BadJSON(t *testing.T) {
-	h := newTestHandler()
+func TestCreateUser_BadJSONAndContentType(t *testing.T) {
+	h, _ := newTestHandler(t)
+	mux := testMux(h)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader("{invalid"))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
+	w := postJSON(mux, "/api/v1/users", "{invalid", "")
 	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		t.Errorf("bad json: status = %d, want 400", w.Code)
 	}
-}
-
-func TestCreateUser_WrongContentType(t *testing.T) {
-	h := newTestHandler()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(`{"username":"x"}`))
 	req.Header.Set("Content-Type", "text/plain")
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("wrong content-type: status = %d, want 400", rec.Code)
 	}
 }
 
-func TestListUsers_Empty(t *testing.T) {
-	h := newTestHandler()
+// --- list ---
+
+func TestListUsers(t *testing.T) {
+	h, _ := newTestHandler(t)
+	mux := testMux(h)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
 	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Fatalf("empty list: status %d body %q", w.Code, w.Body.String())
 	}
 
-	body := strings.TrimSpace(w.Body.String())
-	if body != "[]" {
-		t.Errorf("body = %q, want %q", body, "[]")
-	}
-}
-
-func TestListUsers_AfterCreate(t *testing.T) {
-	h := newTestHandler()
-
-	// Create a user first.
-	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(`{"username":"carol"}`))
-	createReq.Header.Set("Content-Type", "application/json")
-	h.ServeHTTP(httptest.NewRecorder(), createReq)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-
+	postJSON(mux, "/api/v1/users", `{"username":"carol"}`, "")
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
 	var users []store.User
 	if err := json.NewDecoder(w.Body).Decode(&users); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(users) != 1 {
-		t.Fatalf("got %d users, want 1", len(users))
-	}
-	if users[0].Username != "carol" {
-		t.Errorf("username = %q, want %q", users[0].Username, "carol")
+	if len(users) != 1 || users[0].Username != "carol" {
+		t.Fatalf("users = %+v, want [carol]", users)
 	}
 }
 
-// testCAForHandler creates a certauth.CA backed by a temporary self-signed CA.
-func testCAForHandler(t *testing.T) *certauth.CA {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Test CA"},
-		NotBefore:             time.Now().Add(-time.Minute),
-		NotAfter:              time.Now().Add(time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign,
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+// --- regenerate token ---
 
-	dir := t.TempDir()
-	certPath := dir + "/ca.pem"
-	keyPath := dir + "/ca-key.pem"
-	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		t.Fatal(err)
+func TestRegenerateToken(t *testing.T) {
+	h, _ := newTestHandler(t)
+	mux := testMux(h)
+
+	first := postJSON(mux, "/api/v1/users", `{"username":"dave"}`, "")
+	var created createResp
+	_ = json.NewDecoder(first.Body).Decode(&created)
+
+	w := postJSON(mux, "/api/v1/users/dave/regenerate-token", "", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	ca, err := certauth.LoadCA(certPath, keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ca
-}
-
-func TestCreateUser_WithCertificate(t *testing.T) {
-	ca := testCAForHandler(t)
-	h := NewUserHandler(store.NewMemoryStore(), ca, nil)
-
-	body := `{"username":"alice"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
-	}
-
-	var resp struct {
-		Username    string `json:"username"`
-		Certificate *struct {
-			CertPEM string `json:"cert_pem"`
-			KeyPEM  string `json:"key_pem"`
-			CAPEM   string `json:"ca_pem"`
-		} `json:"certificate"`
-	}
+	var resp createResp
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Certificate == nil {
-		t.Fatal("expected certificate in response")
+	if len(resp.OnboardToken) != 64 || resp.OnboardToken == created.OnboardToken {
+		t.Errorf("expected a fresh 64-char token, got %q (was %q)", resp.OnboardToken, created.OnboardToken)
 	}
-
-	// Verify cert CN matches username.
-	block, _ := pem.Decode([]byte(resp.Certificate.CertPEM))
-	if block == nil {
-		t.Fatal("no PEM block in cert_pem")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatalf("parse cert: %v", err)
-	}
-	if cert.Subject.CommonName != "alice" {
-		t.Errorf("CN = %q, want %q", cert.Subject.CommonName, "alice")
-	}
-
-	// Verify key is valid ECDSA P-256.
-	keyBlock, _ := pem.Decode([]byte(resp.Certificate.KeyPEM))
-	if keyBlock == nil {
-		t.Fatal("no PEM block in key_pem")
-	}
-	ecKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
-	if err != nil {
-		t.Fatalf("parse key: %v", err)
-	}
-	if ecKey.Curve != elliptic.P256() {
-		t.Errorf("curve = %v, want P-256", ecKey.Curve)
-	}
-
-	// Verify CA PEM is parseable.
-	caBlock, _ := pem.Decode([]byte(resp.Certificate.CAPEM))
-	if caBlock == nil {
-		t.Fatal("no PEM block in ca_pem")
+	if !strings.Contains(resp.OnboardURL, "/api/v1/onboard/") {
+		t.Errorf("onboard_url = %q", resp.OnboardURL)
 	}
 }
 
-func TestCreateUser_WithoutCA(t *testing.T) {
-	h := NewUserHandler(store.NewMemoryStore(), nil, nil)
-
-	body := `{"username":"bob"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
-	}
-
-	// Verify no certificate field in response.
-	raw := w.Body.String()
-	if strings.Contains(raw, "certificate") {
-		t.Errorf("response should not contain certificate field: %s", raw)
+func TestRegenerateToken_NotFound(t *testing.T) {
+	h, _ := newTestHandler(t)
+	w := postJSON(testMux(h), "/api/v1/users/ghost/regenerate-token", "", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
 	}
 }
 
-// --- Audit entry tests ---
+// --- delete ---
 
-func TestCreateUser_AuditEntry(t *testing.T) {
-	s := store.NewMemoryStore()
-	h := NewUserHandler(s, nil, s)
-
-	body := `{"username":"alice"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
+func deleteAs(mux http.Handler, username, actor string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/"+username, nil)
+	if actor != "" {
+		req = asUser(req, actor)
 	}
-
-	entries, err := s.ListAuditEntries(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListAuditEntries: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d audit entries, want 1", len(entries))
-	}
-	e := entries[0]
-	if e.Action != store.AuditUserCreated {
-		t.Errorf("Action = %q, want %q", e.Action, store.AuditUserCreated)
-	}
-	if e.Resource != "user:alice" {
-		t.Errorf("Resource = %q, want %q", e.Resource, "user:alice")
-	}
-	if e.Status != "success" {
-		t.Errorf("Status = %q, want %q", e.Status, "success")
-	}
-	if e.Detail != "role:user" {
-		t.Errorf("Detail = %q, want %q", e.Detail, "role:user")
-	}
-}
-
-func TestCreateUser_WithCert_AuditEntries(t *testing.T) {
-	s := store.NewMemoryStore()
-	ca := testCAForHandler(t)
-	h := NewUserHandler(s, ca, s)
-
-	body := `{"username":"bob","role":"admin"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusCreated)
-	}
-
-	entries, err := s.ListAuditEntries(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListAuditEntries: %v", err)
-	}
-	if len(entries) != 2 {
-		t.Fatalf("got %d audit entries, want 2", len(entries))
-	}
-	// Newest first: cert.issued, then user.created.
-	if entries[0].Action != store.AuditCertIssued {
-		t.Errorf("entries[0].Action = %q, want %q", entries[0].Action, store.AuditCertIssued)
-	}
-	if entries[1].Action != store.AuditUserCreated {
-		t.Errorf("entries[1].Action = %q, want %q", entries[1].Action, store.AuditUserCreated)
-	}
-	if entries[1].Detail != "role:admin" {
-		t.Errorf("entries[1].Detail = %q, want %q", entries[1].Detail, "role:admin")
-	}
-}
-
-func TestDeleteUser_AuditEntry(t *testing.T) {
-	s := store.NewMemoryStore()
-	h := NewUserHandler(s, nil, s)
-
-	// Create user directly in store.
-	if err := s.CreateUser(context.Background(), &store.User{Username: "todelete"}); err != nil {
-		t.Fatal(err)
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle("DELETE /api/v1/users/{username}", http.HandlerFunc(h.Delete))
-	req := httptest.NewRequest("DELETE", "/api/v1/users/todelete", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
+	return w
+}
 
+func TestDeleteUser_CascadesBindings(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin") // keeps an admin so lockout never trips
+	postJSON(mux, "/api/v1/users", `{"username":"erin"}`, "")
+
+	w := deleteAs(mux, "erin", "admin")
 	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+		t.Fatalf("status = %d, want 204 (body %s)", w.Code, w.Body)
 	}
-
-	entries, err := s.ListAuditEntries(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListAuditEntries: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d audit entries, want 1", len(entries))
-	}
-	if entries[0].Action != store.AuditUserDeleted {
-		t.Errorf("Action = %q, want %q", entries[0].Action, store.AuditUserDeleted)
-	}
-	if entries[0].Resource != "user:todelete" {
-		t.Errorf("Resource = %q, want %q", entries[0].Resource, "user:todelete")
+	if got := userBindings(t, s, "erin"); len(got) != 0 {
+		t.Errorf("bindings after delete = %v, want none (cascaded)", got)
 	}
 }
 
-func TestCreateUser_Failure_NoAudit(t *testing.T) {
-	s := store.NewMemoryStore()
-	h := NewUserHandler(s, nil, s)
-	ctx := context.Background()
+func TestDeleteUser_Self(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
 
-	// Duplicate: create first, then try again.
-	if err := s.CreateUser(ctx, &store.User{Username: "dup"}); err != nil {
-		t.Fatal(err)
+	w := deleteAs(mux, "admin", "admin")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (self-delete)", w.Code)
+	}
+}
+
+func TestDeleteUser_LastAdmin(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "onlyadmin")
+
+	// A different admin actor deletes the only admin → last-admin lockout.
+	w := deleteAs(mux, "onlyadmin", "someoneelse")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (last admin)", w.Code)
+	}
+}
+
+func TestDeleteUser_NotFound(t *testing.T) {
+	h, s := newTestHandler(t)
+	seedAdmin(t, s, "admin")
+	w := deleteAs(testMux(h), "nobody", "admin")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+// --- update: enable/disable ---
+
+func patchAs(mux http.Handler, username, body, actor string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/users/"+username, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if actor != "" {
+		req = asUser(req, actor)
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	return w
+}
+
+func TestUpdate_DisableThenEnable(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"frank"}`, "")
+
+	w := patchAs(mux, "frank", `{"enabled":false}`, "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("disable: status = %d, want 200 (body %s)", w.Code, w.Body)
+	}
+	u, _ := s.GetUserByUsername(context.Background(), "frank")
+	if u.Enabled {
+		t.Error("expected frank disabled")
 	}
 
-	for _, body := range []string{
-		`{"username":"dup"}`, // duplicate
-		`{"username":""}`,    // empty username
-		`{invalid`,           // bad JSON
-	} {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, req)
+	w = patchAs(mux, "frank", `{"enabled":true}`, "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("enable: status = %d, want 200", w.Code)
+	}
+	u, _ = s.GetUserByUsername(context.Background(), "frank")
+	if !u.Enabled {
+		t.Error("expected frank enabled")
+	}
+}
 
-		if w.Code < 400 {
-			t.Errorf("body %q: expected error status, got %d", body, w.Code)
+func TestUpdate_SelfDisable(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	w := patchAs(mux, "admin", `{"enabled":false}`, "admin")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (self-disable)", w.Code)
+	}
+}
+
+func TestUpdate_LastAdminDisable(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "onlyadmin")
+	w := patchAs(mux, "onlyadmin", `{"enabled":false}`, "someoneelse")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (last admin disable)", w.Code)
+	}
+}
+
+// --- update: role change ---
+
+func TestUpdate_RoleChange(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"grace","role":"operator"}`, "")
+
+	w := patchAs(mux, "grace", `{"role":"viewer"}`, "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body)
+	}
+	u, _ := s.GetUserByUsername(context.Background(), "grace")
+	if u.Role != store.RoleViewer {
+		t.Errorf("User.Role = %q, want viewer", u.Role)
+	}
+	if got := userBindings(t, s, "grace"); len(got) != 1 || got[0] != store.RoleViewer {
+		t.Errorf("bindings = %v, want [viewer] (replaced)", got)
+	}
+}
+
+func TestUpdate_RoleChange_InvalidRole(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"heidi"}`, "")
+	w := patchAs(mux, "heidi", `{"role":"wizard"}`, "admin")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (unknown role)", w.Code)
+	}
+}
+
+func TestUpdate_SelfRoleChange(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	w := patchAs(mux, "admin", `{"role":"operator"}`, "admin")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (self role change)", w.Code)
+	}
+}
+
+func TestUpdate_LastAdminDemote(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "onlyadmin")
+	w := patchAs(mux, "onlyadmin", `{"role":"operator"}`, "someoneelse")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (last admin demote)", w.Code)
+	}
+}
+
+func TestUpdate_NothingToUpdate(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"ivan"}`, "")
+	w := patchAs(mux, "ivan", `{}`, "admin")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (empty patch)", w.Code)
+	}
+}
+
+// --- audit ---
+
+func TestAudit_CreateAndDelete(t *testing.T) {
+	s := newSeededStore(t)
+	h := NewUserHandler(s, s, s, testExternalURL)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+
+	postJSON(mux, "/api/v1/users", `{"username":"judy"}`, "admin")
+	deleteAs(mux, "judy", "admin")
+
+	entries, err := s.ListAuditEntries(context.Background(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created, deleted bool
+	for _, e := range entries {
+		if e.Action == store.AuditUserCreated && e.Resource == "user:judy" {
+			created = true
+			if e.Detail != "role:operator" {
+				t.Errorf("create detail = %q, want role:operator", e.Detail)
+			}
+		}
+		if e.Action == store.AuditUserDeleted && e.Resource == "user:judy" && e.Status == "success" {
+			deleted = true
 		}
 	}
-
-	entries, err := s.ListAuditEntries(ctx, 10)
-	if err != nil {
-		t.Fatalf("ListAuditEntries: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("expected 0 audit entries on failures, got %d", len(entries))
-	}
-}
-
-func TestDeleteUser_NotFound_NoAudit(t *testing.T) {
-	s := store.NewMemoryStore()
-	h := NewUserHandler(s, nil, s)
-
-	mux := http.NewServeMux()
-	mux.Handle("DELETE /api/v1/users/{username}", http.HandlerFunc(h.Delete))
-	req := httptest.NewRequest("DELETE", "/api/v1/users/nobody", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
-	}
-
-	entries, err := s.ListAuditEntries(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListAuditEntries: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("expected 0 audit entries, got %d", len(entries))
+	if !created || !deleted {
+		t.Errorf("expected create+delete audit entries; created=%v deleted=%v", created, deleted)
 	}
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	h := newTestHandler()
-
-	for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodPatch} {
+	h, _ := newTestHandler(t)
+	for _, method := range []string{http.MethodPut, http.MethodHead} {
 		req := httptest.NewRequest(method, "/api/v1/users", nil)
 		w := httptest.NewRecorder()
-
 		h.ServeHTTP(w, req)
-
 		if w.Code != http.StatusMethodNotAllowed {
-			t.Errorf("%s: status = %d, want %d", method, w.Code, http.StatusMethodNotAllowed)
+			t.Errorf("%s: status = %d, want 405", method, w.Code)
 		}
+	}
+}
+
+// --- input validation ---
+
+func TestCreateUser_InvalidUsername(t *testing.T) {
+	h, _ := newTestHandler(t)
+	mux := testMux(h)
+	for _, name := range []string{"has space", "bad/slash", "-leadinghyphen", "with\nnewline"} {
+		body := `{"username":"` + name + `"}`
+		w := postJSON(mux, "/api/v1/users", body, "")
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("username %q: status = %d, want 400", name, w.Code)
+		}
+	}
+}
+
+func TestUpdate_InvalidRole(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"frank"}`, "")
+
+	w := patchAs(mux, "frank", `{"role":"superuser"}`, "admin")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (non-builtin role)", w.Code)
+	}
+	// User.Role must be unchanged after a rejected PATCH.
+	u, _ := s.GetUserByUsername(context.Background(), "frank")
+	if u.Role != store.RoleOperator {
+		t.Errorf("role = %q, want operator (unchanged)", u.Role)
+	}
+}
+
+func TestUpdate_RequiresContentType(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"frank"}`, "")
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/users/frank", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Content-Type", "text/plain")
+	req = asUser(req, "admin")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (wrong content-type)", w.Code)
+	}
+}
+
+func TestUpdate_RoleAndEnabledTogether(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"frank"}`, "")
+
+	w := patchAs(mux, "frank", `{"enabled":false,"role":"viewer"}`, "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body)
+	}
+	u, _ := s.GetUserByUsername(context.Background(), "frank")
+	if u.Enabled {
+		t.Error("expected frank disabled")
+	}
+	if u.Role != store.RoleViewer {
+		t.Errorf("role = %q, want viewer", u.Role)
+	}
+	if roles := userBindings(t, s, "frank"); len(roles) != 1 || roles[0] != store.RoleViewer {
+		t.Errorf("bindings = %v, want [viewer]", roles)
 	}
 }

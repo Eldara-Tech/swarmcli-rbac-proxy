@@ -229,22 +229,11 @@ func cmdUserAdd(username string, admin bool) {
 		role = "admin"
 	}
 
-	u := &store.User{Username: username, Role: role}
-	if err := s.CreateUser(ctx, u); err != nil {
+	// CreateUserWithBinding keeps the legacy User.Role and the RBAC binding in
+	// sync (admin → admin, otherwise → operator), the same helper the HTTP
+	// create handler uses so the two paths cannot drift.
+	if _, err := store.CreateUserWithBinding(ctx, s, rbac, username, role); err != nil {
 		fatal("create user: %v", err)
-	}
-
-	// Keep the RBAC binding in sync with the legacy role: admin → admin,
-	// otherwise → operator (matching MigrateLegacyRoles, so a freshly-added
-	// non-admin user has the same non-protected create/update/exec a migrated
-	// legacy user keeps). Best-effort (roles are seeded by the proxy at
-	// startup; if absent the binding is skipped and can be added later).
-	bindRole := store.RoleOperator
-	if admin {
-		bindRole = store.RoleAdmin
-	}
-	if err := rbac.CreateBinding(ctx, &store.RoleBinding{Username: username, RoleName: bindRole}); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not bind %s to role %s: %v\n", username, bindRole, err)
 	}
 
 	token := generateToken()
