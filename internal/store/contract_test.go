@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
@@ -542,6 +543,7 @@ func testAuditStoreContract(t *testing.T, newStore func() AuditStore) {
 		all := []AuditAction{
 			AuditUserCreated, AuditUserDeleted, AuditCertIssued,
 			AuditOnboardCompleted, AuditGuardBlocked, AuditTokenRegenerated,
+			AuditBackupExported, AuditBackupRestored,
 		}
 		for _, a := range all {
 			if err := s.RecordAudit(ctx, &AuditEntry{Actor: "test", Action: a, Resource: "x", Status: "success"}); err != nil {
@@ -650,6 +652,254 @@ func testAuditStoreContract(t *testing.T, newStore func() AuditStore) {
 		}
 		if len(entries) != 5 {
 			t.Fatalf("got %d entries, want 5", len(entries))
+		}
+	})
+}
+
+func eqTimePtr(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+func equalUser(a, b User) bool {
+	return a.ID == b.ID && a.Username == b.Username && a.Role == b.Role &&
+		a.Enabled == b.Enabled && a.CreatedAt.Equal(b.CreatedAt) &&
+		a.UpdatedAt.Equal(b.UpdatedAt) && a.OnboardToken == b.OnboardToken &&
+		eqTimePtr(a.TokenIssuedAt, b.TokenIssuedAt) &&
+		eqTimePtr(a.TokenConsumedAt, b.TokenConsumedAt)
+}
+
+func equalRole(a, b Role) bool {
+	if a.ID != b.ID || a.Name != b.Name || a.Builtin != b.Builtin ||
+		!a.CreatedAt.Equal(b.CreatedAt) || !a.UpdatedAt.Equal(b.UpdatedAt) ||
+		len(a.Rules) != len(b.Rules) {
+		return false
+	}
+	for i := range a.Rules {
+		if !slices.Equal(a.Rules[i].Resources, b.Rules[i].Resources) ||
+			!slices.Equal(a.Rules[i].Verbs, b.Rules[i].Verbs) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalBinding(a, b RoleBinding) bool {
+	return a.ID == b.ID && a.Username == b.Username &&
+		a.RoleName == b.RoleName && a.CreatedAt.Equal(b.CreatedAt)
+}
+
+// testBackupStoreContract exercises the full BackupStore contract. All three
+// store implementations must pass these tests. The fixtures use timestamps
+// truncated to microseconds so the round-trip is exact on every backend
+// (SQLite keeps nanoseconds, PostgreSQL timestamptz keeps microseconds).
+func testBackupStoreContract(t *testing.T, newStore func() BackupStore) {
+	t.Helper()
+
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	issued := base.Add(time.Minute)
+	consumed := base.Add(2 * time.Minute)
+	fixture := func() BackupData {
+		return BackupData{
+			Users: []User{
+				{ID: "11111111-1111-4111-8111-111111111111", Username: "alice", Role: "user",
+					Enabled: true, CreatedAt: base, UpdatedAt: base,
+					OnboardToken: "tok-alice", TokenIssuedAt: &issued},
+				{ID: "22222222-2222-4222-8222-222222222222", Username: "bob", Role: "admin",
+					Enabled: false, CreatedAt: base.Add(time.Second), UpdatedAt: consumed,
+					OnboardToken: "tok-bob", TokenIssuedAt: &issued, TokenConsumedAt: &consumed},
+				{ID: "33333333-3333-4333-8333-333333333333", Username: "carol", Role: "user",
+					Enabled: true, CreatedAt: base.Add(2 * time.Second), UpdatedAt: base.Add(2 * time.Second)},
+			},
+			Audit: []AuditEntry{
+				{ID: "aaaaaaaa-0000-4000-8000-000000000001", Timestamp: base, Actor: "cli",
+					Action: AuditUserCreated, Resource: "user:alice", Status: "success", Detail: "role:user"},
+				{ID: "aaaaaaaa-0000-4000-8000-000000000002", Timestamp: base.Add(time.Second),
+					Actor: "cli", Action: AuditBackupExported, Resource: "backup", Status: "success"},
+			},
+			Roles: []Role{
+				{ID: "dddddddd-0000-4000-8000-000000000001", Name: "viewer", Builtin: true,
+					Rules:     []PermissionRule{{Resources: []string{"services"}, Verbs: []string{"get", "list"}}},
+					CreatedAt: base, UpdatedAt: base},
+				{ID: "dddddddd-0000-4000-8000-000000000002", Name: "custom-deploy", Builtin: false,
+					Rules:     []PermissionRule{{Resources: []string{"stacks", "services"}, Verbs: []string{"*"}}},
+					CreatedAt: base.Add(time.Second), UpdatedAt: base.Add(time.Second)},
+			},
+			Bindings: []RoleBinding{
+				{ID: "cccccccc-0000-4000-8000-000000000001", Username: "alice", RoleName: "viewer", CreatedAt: base},
+				{ID: "cccccccc-0000-4000-8000-000000000002", Username: "bob", RoleName: "custom-deploy", CreatedAt: base.Add(time.Second)},
+			},
+		}
+	}
+
+	t.Run("EmptyExport", func(t *testing.T) {
+		ctx := context.Background()
+		data, err := newStore().Export(ctx)
+		if err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+		if data.Users == nil || data.Audit == nil || data.Roles == nil || data.Bindings == nil {
+			t.Fatalf("want non-nil empty slices, got %#v", data)
+		}
+		if len(data.Users)+len(data.Audit)+len(data.Roles)+len(data.Bindings) != 0 {
+			t.Fatalf("want all-empty, got %#v", data)
+		}
+	})
+
+	t.Run("RoundTripVerbatim", func(t *testing.T) {
+		ctx := context.Background()
+		src := newStore()
+		if err := src.Restore(ctx, fixture(), false); err != nil {
+			t.Fatalf("Restore(src): %v", err)
+		}
+		exported, err := src.Export(ctx)
+		if err != nil {
+			t.Fatalf("Export(src): %v", err)
+		}
+		// Re-import the exported artifact into a fresh store and re-export, so we
+		// prove Export's output is itself a valid Restore input (the CLI path).
+		dst := newStore()
+		if err := dst.Restore(ctx, exported, false); err != nil {
+			t.Fatalf("Restore(dst): %v", err)
+		}
+		got, err := dst.Export(ctx)
+		if err != nil {
+			t.Fatalf("Export(dst): %v", err)
+		}
+
+		want := fixture()
+		// Users and audit are order-sensitive (created_at,id / timestamp,id);
+		// roles and bindings are compared as sets, keyed by ID.
+		if len(got.Users) != len(want.Users) {
+			t.Fatalf("got %d users, want %d", len(got.Users), len(want.Users))
+		}
+		for i := range want.Users {
+			if !equalUser(got.Users[i], want.Users[i]) {
+				t.Errorf("user[%d] mismatch:\n got  %#v\n want %#v", i, got.Users[i], want.Users[i])
+			}
+		}
+		if len(got.Audit) != len(want.Audit) {
+			t.Fatalf("got %d audit, want %d", len(got.Audit), len(want.Audit))
+		}
+		for i := range want.Audit {
+			g, w := got.Audit[i], want.Audit[i]
+			if g.ID != w.ID || !g.Timestamp.Equal(w.Timestamp) || g.Actor != w.Actor ||
+				g.Action != w.Action || g.Resource != w.Resource || g.Status != w.Status ||
+				g.Detail != w.Detail || g.SourceIP != w.SourceIP {
+				t.Errorf("audit[%d] mismatch:\n got  %#v\n want %#v", i, g, w)
+			}
+		}
+		wantRoles := map[string]Role{}
+		for _, r := range want.Roles {
+			wantRoles[r.ID] = r
+		}
+		if len(got.Roles) != len(want.Roles) {
+			t.Fatalf("got %d roles, want %d", len(got.Roles), len(want.Roles))
+		}
+		for _, g := range got.Roles {
+			if w, ok := wantRoles[g.ID]; !ok || !equalRole(g, w) {
+				t.Errorf("role %q mismatch:\n got  %#v\n want %#v", g.ID, g, w)
+			}
+		}
+		wantBindings := map[string]RoleBinding{}
+		for _, b := range want.Bindings {
+			wantBindings[b.ID] = b
+		}
+		if len(got.Bindings) != len(want.Bindings) {
+			t.Fatalf("got %d bindings, want %d", len(got.Bindings), len(want.Bindings))
+		}
+		for _, g := range got.Bindings {
+			if w, ok := wantBindings[g.ID]; !ok || !equalBinding(g, w) {
+				t.Errorf("binding %q mismatch:\n got  %#v\n want %#v", g.ID, g, w)
+			}
+		}
+	})
+
+	t.Run("ExportOrdered", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		if err := s.Restore(ctx, fixture(), false); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		got, err := s.Export(ctx)
+		if err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+		for i := 0; i < len(got.Users)-1; i++ {
+			if got.Users[i].CreatedAt.After(got.Users[i+1].CreatedAt) {
+				t.Errorf("users not ordered ascending by created_at at %d", i)
+			}
+		}
+		for i := 0; i < len(got.Audit)-1; i++ {
+			if got.Audit[i].Timestamp.After(got.Audit[i+1].Timestamp) {
+				t.Errorf("audit not ordered ascending by timestamp at %d", i)
+			}
+		}
+	})
+
+	t.Run("DuplicateUsername", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		if err := s.Restore(ctx, BackupData{Users: fixture().Users[:1]}, false); err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		dup := BackupData{Users: []User{{ID: "99999999-9999-4999-8999-999999999999",
+			Username: "alice", Role: "user", Enabled: true, CreatedAt: base, UpdatedAt: base}}}
+		if err := s.Restore(ctx, dup, false); !errors.Is(err, ErrUsernameExists) {
+			t.Fatalf("want ErrUsernameExists, got %v", err)
+		}
+	})
+
+	t.Run("ReplaceClears", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		if err := s.Restore(ctx, fixture(), false); err != nil {
+			t.Fatalf("Restore(initial): %v", err)
+		}
+		repl := BackupData{Users: []User{{ID: "44444444-4444-4444-8444-444444444444",
+			Username: "dave", Role: "user", Enabled: true, CreatedAt: base, UpdatedAt: base}}}
+		if err := s.Restore(ctx, repl, true); err != nil {
+			t.Fatalf("Restore(replace): %v", err)
+		}
+		got, err := s.Export(ctx)
+		if err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+		if len(got.Users) != 1 || got.Users[0].Username != "dave" {
+			t.Fatalf("replace did not clear users; got %#v", got.Users)
+		}
+		if len(got.Audit) != 0 || len(got.Roles) != 0 || len(got.Bindings) != 0 {
+			t.Fatalf("replace did not clear all tables; audit=%d roles=%d bindings=%d",
+				len(got.Audit), len(got.Roles), len(got.Bindings))
+		}
+	})
+
+	t.Run("RestoreAtomicOnDuplicate", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		seed := BackupData{Users: fixture().Users[:1]} // alice
+		if err := s.Restore(ctx, seed, false); err != nil {
+			t.Fatalf("Restore(seed): %v", err)
+		}
+		// A replace whose own batch contains a duplicate username must fail and
+		// roll back the clear too — leaving the seeded data intact, not wiped.
+		bad := BackupData{Users: []User{
+			{ID: "44444444-4444-4444-8444-444444444444", Username: "dave", Role: "user",
+				Enabled: true, CreatedAt: base, UpdatedAt: base},
+			{ID: "55555555-5555-4555-8555-555555555555", Username: "dave", Role: "user",
+				Enabled: true, CreatedAt: base, UpdatedAt: base},
+		}}
+		if err := s.Restore(ctx, bad, true); !errors.Is(err, ErrUsernameExists) {
+			t.Fatalf("want ErrUsernameExists, got %v", err)
+		}
+		got, err := s.Export(ctx)
+		if err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+		if len(got.Users) != 1 || got.Users[0].Username != "alice" {
+			t.Fatalf("failed replace was not atomic; store=%#v", got.Users)
 		}
 	})
 }

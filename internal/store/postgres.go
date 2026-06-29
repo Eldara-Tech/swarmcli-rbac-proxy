@@ -501,7 +501,172 @@ func (s *PostgresStore) DeleteBinding(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *PostgresStore) Export(ctx context.Context) (BackupData, error) {
+	users, err := s.exportUsers(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	audit, err := s.exportAuditEntries(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	roles, err := s.ListRoles(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	bindings, err := s.ListBindings(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	return BackupData{Users: users, Audit: audit, Roles: roles, Bindings: bindings}, nil
+}
+
+func (s *PostgresStore) exportUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, username, role, enabled, created_at, updated_at,
+		        onboard_token, token_issued_at, token_consumed_at
+		 FROM users ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	users := make([]User, 0)
+	for rows.Next() {
+		var u User
+		var token *string
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &u.CreatedAt, &u.UpdatedAt,
+			&token, &u.TokenIssuedAt, &u.TokenConsumedAt); err != nil {
+			return nil, err
+		}
+		if token != nil {
+			u.OnboardToken = *token
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func (s *PostgresStore) exportAuditEntries(ctx context.Context) ([]AuditEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, timestamp, actor, action, resource, status, detail, source_ip
+		 FROM audit_log ORDER BY timestamp, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]AuditEntry, 0)
+	for rows.Next() {
+		var e AuditEntry
+		var action string
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Actor, &action, &e.Resource, &e.Status, &e.Detail, &e.SourceIP); err != nil {
+			return nil, err
+		}
+		e.Action = AuditAction(action)
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (s *PostgresStore) Restore(ctx context.Context, data BackupData, replace bool) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if replace {
+		// Bindings reference roles/users by name; clear dependents first.
+		for _, q := range []string{
+			`DELETE FROM role_bindings`,
+			`DELETE FROM roles`,
+			`DELETE FROM audit_log`,
+			`DELETE FROM users`,
+		} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+
+	for i := range data.Users {
+		u := &data.Users[i]
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO users (id, username, role, enabled, created_at, updated_at,
+			                    onboard_token, token_issued_at, token_consumed_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			u.ID, u.Username, u.Role, u.Enabled, u.CreatedAt, u.UpdatedAt,
+			pgNullStr(u.OnboardToken), u.TokenIssuedAt, u.TokenConsumedAt,
+		); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrUsernameExists
+			}
+			return err
+		}
+	}
+	for i := range data.Audit {
+		e := &data.Audit[i]
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO audit_log (id, timestamp, actor, action, resource, status, detail, source_ip)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			e.ID, e.Timestamp, e.Actor, string(e.Action),
+			e.Resource, e.Status, e.Detail, e.SourceIP,
+		); err != nil {
+			return err
+		}
+	}
+	for i := range data.Roles {
+		r := &data.Roles[i]
+		rulesJSON, err := json.Marshal(r.Rules)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO roles (id, name, rules, builtin, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			r.ID, r.Name, string(rulesJSON), r.Builtin, r.CreatedAt, r.UpdatedAt,
+		); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrRoleExists
+			}
+			return err
+		}
+	}
+	for i := range data.Bindings {
+		b := &data.Bindings[i]
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO role_bindings (id, username, role_name, created_at) VALUES ($1, $2, $3, $4)`,
+			b.ID, b.Username, b.RoleName, b.CreatedAt,
+		); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrBindingExists
+			}
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// pgNullStr maps an empty string to a SQL NULL.
+func pgNullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
 // Ensure interface compliance.
 var _ UserStore = (*PostgresStore)(nil)
 var _ AuditStore = (*PostgresStore)(nil)
 var _ RBACStore = (*PostgresStore)(nil)
+var _ BackupStore = (*PostgresStore)(nil)

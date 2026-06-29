@@ -54,6 +54,12 @@ type Config struct {
 	ExternalURL           string `json:"external_url"`
 	InternalListen        string `json:"internal_listen"`
 	ProtectedStack        string `json:"protected_stack"`
+	// BackupDir overrides where `swcproxy backup` (default-location mode) and
+	// the /startbackup endpoint write artifacts. When empty it is derived from
+	// DatabasePath (`<db-dir>/backup`) — but a non-file backend (postgres) has
+	// no meaningful DatabasePath, so set this to land backups on a persistent
+	// volume rather than the proxy's working directory.
+	BackupDir string `json:"backup_dir"`
 
 	// OnboardingTokenTTL is the expiry window for newly issued onboarding
 	// tokens. Zero is interpreted as DefaultOnboardingTokenTTL after Load.
@@ -93,6 +99,7 @@ var envOverrides = []struct {
 	{"PROXY_EXTERNAL_URL", func(c *Config) *string { return &c.ExternalURL }},
 	{"PROXY_INTERNAL_LISTEN", func(c *Config) *string { return &c.InternalListen }},
 	{"PROXY_PROTECTED_STACK", func(c *Config) *string { return &c.ProtectedStack }},
+	{"PROXY_BACKUP_DIR", func(c *Config) *string { return &c.BackupDir }},
 }
 
 // Load reads configuration from an optional JSON file, then applies

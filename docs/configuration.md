@@ -78,6 +78,9 @@ The proxy persists users, onboarding tokens, and the audit log in one of three b
 | `PROXY_STORE` | `sqlite` | Backend: `sqlite`, `postgres`, or `memory` (dev only; data lost on restart). |
 | `PROXY_DATABASE_PATH` | `proxy.db` | SQLite file path (used when `PROXY_STORE=sqlite`). |
 | `PROXY_DATABASE_URL` | _(none)_ | PostgreSQL connection string (required when `PROXY_STORE=postgres`), e.g. `postgres://user:pass@host:5432/db?sslmode=disable`. |
+| `PROXY_BACKUP_DIR` | _(derived)_ | Directory for default-location backups (`swcproxy backup` without `-o`, and `/startbackup`). Defaults to `<db-dir>/backup` (e.g. `/data/backup`). With `PROXY_STORE=postgres` there is no database file, so the default resolves to `./backup` in the proxy's working directory — set this to a persistent volume path (e.g. `/data/backup`) for Postgres deployments. |
+
+To back up and restore this data — and to understand why a database restore alone does **not** keep existing user contexts working — see [backup-restore.md](backup-restore.md).
 
 ### Integrations and observability
 

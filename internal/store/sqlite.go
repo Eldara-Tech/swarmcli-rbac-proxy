@@ -607,7 +607,217 @@ func (s *SQLiteStore) DeleteBinding(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *SQLiteStore) Export(ctx context.Context) (BackupData, error) {
+	users, err := s.exportUsers(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	audit, err := s.exportAuditEntries(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	roles, err := s.ListRoles(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	bindings, err := s.ListBindings(ctx)
+	if err != nil {
+		return BackupData{}, err
+	}
+	return BackupData{Users: users, Audit: audit, Roles: roles, Bindings: bindings}, nil
+}
+
+func (s *SQLiteStore) exportUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, username, role, enabled, created_at, updated_at,
+		        onboard_token, token_issued_at, token_consumed_at
+		 FROM users ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	users := make([]User, 0)
+	for rows.Next() {
+		var u User
+		var enabled int
+		var createdAt, updatedAt string
+		var token, issuedAt, consumedAt sql.NullString
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &enabled, &createdAt, &updatedAt,
+			&token, &issuedAt, &consumedAt); err != nil {
+			return nil, err
+		}
+		u.Enabled = enabled != 0
+		if u.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+			return nil, err
+		}
+		if u.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt); err != nil {
+			return nil, err
+		}
+		if token.Valid {
+			u.OnboardToken = token.String
+		}
+		if u.TokenIssuedAt, err = parseNullTime(issuedAt); err != nil {
+			return nil, err
+		}
+		if u.TokenConsumedAt, err = parseNullTime(consumedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func (s *SQLiteStore) exportAuditEntries(ctx context.Context) ([]AuditEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, timestamp, actor, action, resource, status, detail, source_ip
+		 FROM audit_log ORDER BY timestamp, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	entries := make([]AuditEntry, 0)
+	for rows.Next() {
+		var e AuditEntry
+		var ts, action string
+		if err := rows.Scan(&e.ID, &ts, &e.Actor, &action, &e.Resource, &e.Status, &e.Detail, &e.SourceIP); err != nil {
+			return nil, err
+		}
+		e.Action = AuditAction(action)
+		if e.Timestamp, err = time.Parse(time.RFC3339Nano, ts); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (s *SQLiteStore) Restore(ctx context.Context, data BackupData, replace bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if replace {
+		// Bindings reference roles/users by name; clear dependents first.
+		for _, q := range []string{
+			`DELETE FROM role_bindings`,
+			`DELETE FROM roles`,
+			`DELETE FROM audit_log`,
+			`DELETE FROM users`,
+		} {
+			if _, err := tx.ExecContext(ctx, q); err != nil {
+				return err
+			}
+		}
+	}
+
+	for i := range data.Users {
+		u := &data.Users[i]
+		enabled := 0
+		if u.Enabled {
+			enabled = 1
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO users (id, username, role, enabled, created_at, updated_at,
+			                    onboard_token, token_issued_at, token_consumed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			u.ID, u.Username, u.Role, enabled,
+			u.CreatedAt.UTC().Format(time.RFC3339Nano), u.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			nullStr(u.OnboardToken), nullTime(u.TokenIssuedAt), nullTime(u.TokenConsumedAt),
+		); err != nil {
+			if isSQLiteUniqueViolation(err) {
+				return ErrUsernameExists
+			}
+			return err
+		}
+	}
+	for i := range data.Audit {
+		e := &data.Audit[i]
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO audit_log (id, timestamp, actor, action, resource, status, detail, source_ip)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			e.ID, e.Timestamp.UTC().Format(time.RFC3339Nano), e.Actor, string(e.Action),
+			e.Resource, e.Status, e.Detail, e.SourceIP,
+		); err != nil {
+			return err
+		}
+	}
+	for i := range data.Roles {
+		r := &data.Roles[i]
+		rulesJSON, err := json.Marshal(r.Rules)
+		if err != nil {
+			return err
+		}
+		builtin := 0
+		if r.Builtin {
+			builtin = 1
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO roles (id, name, rules, builtin, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			r.ID, r.Name, string(rulesJSON), builtin,
+			r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			if isSQLiteUniqueViolation(err) {
+				return ErrRoleExists
+			}
+			return err
+		}
+	}
+	for i := range data.Bindings {
+		b := &data.Bindings[i]
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO role_bindings (id, username, role_name, created_at) VALUES (?, ?, ?, ?)`,
+			b.ID, b.Username, b.RoleName, b.CreatedAt.UTC().Format(time.RFC3339Nano),
+		); err != nil {
+			if isSQLiteUniqueViolation(err) {
+				return ErrBindingExists
+			}
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// parseNullTime parses a nullable RFC3339Nano timestamp column.
+func parseNullTime(v sql.NullString) (*time.Time, error) {
+	if !v.Valid {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, v.String)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// nullStr maps an empty string to a SQL NULL.
+func nullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nullTime maps a nil time pointer to a SQL NULL, else an RFC3339Nano string.
+func nullTime(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
 // Ensure interface compliance.
 var _ UserStore = (*SQLiteStore)(nil)
 var _ AuditStore = (*SQLiteStore)(nil)
 var _ RBACStore = (*SQLiteStore)(nil)
+var _ BackupStore = (*SQLiteStore)(nil)

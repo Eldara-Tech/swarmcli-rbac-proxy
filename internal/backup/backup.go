@@ -1,0 +1,213 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright © 2026 Eldara Tech
+
+// Package backup assembles and serialises the logical backup artifact shared
+// by the swcproxy CLI (`backup`/`restore`) and the proxy server's
+// /startbackup endpoint. It is a portable JSON export of users + audit log
+// (and, CLI-only, an optional CA bundle), independent of the storage backend.
+package backup
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"swarm-rbac-proxy/internal/config"
+	"swarm-rbac-proxy/internal/store"
+)
+
+// Schema and Version identify the artifact format. restore refuses any
+// document whose schema or version it does not recognise.
+const (
+	Schema  = "swarmcli-rbac-proxy/backup"
+	Version = 1
+)
+
+// User mirrors store.User but with explicit JSON tags for the
+// onboarding-token fields, which store.User marks json:"-".
+type User struct {
+	ID              string     `json:"id"`
+	Username        string     `json:"username"`
+	Role            string     `json:"role"`
+	Enabled         bool       `json:"enabled"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	OnboardToken    string     `json:"onboard_token,omitempty"`
+	TokenIssuedAt   *time.Time `json:"token_issued_at,omitempty"`
+	TokenConsumedAt *time.Time `json:"token_consumed_at,omitempty"`
+}
+
+// CA carries the client CA cert+key for one-file disaster recovery. It is only
+// ever populated by the CLI's opt-in --include-ca; the server endpoint never
+// embeds it.
+type CA struct {
+	CertPEM string `json:"cert_pem"`
+	KeyPEM  string `json:"key_pem"`
+}
+
+// Doc is the top-level backup artifact.
+type Doc struct {
+	Schema       string              `json:"schema"`
+	Version      int                 `json:"version"`
+	CreatedAt    time.Time           `json:"created_at"`
+	ProxyVersion string              `json:"proxy_version"`
+	Users        []User              `json:"users"`
+	Audit        []store.AuditEntry  `json:"audit"`
+	Roles        []store.Role        `json:"roles"`
+	Bindings     []store.RoleBinding `json:"bindings"`
+	CA           *CA                 `json:"ca,omitempty"`
+}
+
+// Create exports the full store state and assembles a CA-less backup document
+// stamped with createdAt and proxyVersion. Callers that want a DR bundle set
+// Doc.CA afterwards. When includeTokens is false the onboarding-token columns
+// are redacted: they are bearer credentials (a live token mints a client cert
+// for that user), so a routine backup omits them by default.
+func Create(ctx context.Context, bs store.BackupStore, proxyVersion string, createdAt time.Time, includeTokens bool) (*Doc, error) {
+	data, err := bs.Export(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("export store: %w", err)
+	}
+	users := ToUsers(data.Users)
+	if !includeTokens {
+		for i := range users {
+			users[i].OnboardToken = ""
+			users[i].TokenIssuedAt = nil
+			users[i].TokenConsumedAt = nil
+		}
+	}
+	return &Doc{
+		Schema:       Schema,
+		Version:      Version,
+		CreatedAt:    createdAt,
+		ProxyVersion: proxyVersion,
+		Users:        users,
+		Audit:        data.Audit,
+		Roles:        data.Roles,
+		Bindings:     data.Bindings,
+	}, nil
+}
+
+// ToData converts a parsed Doc back into the store-level BackupData consumed by
+// BackupStore.Restore.
+func ToData(doc *Doc) store.BackupData {
+	return store.BackupData{
+		Users:    FromUsers(doc.Users),
+		Audit:    doc.Audit,
+		Roles:    doc.Roles,
+		Bindings: doc.Bindings,
+	}
+}
+
+// Marshal renders the document as indented JSON with a trailing newline.
+func Marshal(doc *Doc) ([]byte, error) {
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal backup: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
+// DefaultDir derives the default backup directory. An explicit PROXY_BACKUP_DIR
+// (cfg.BackupDir) always wins; otherwise it is derived from the DB path so
+// backups land on the same persistent volume (e.g. /data/proxy.db →
+// /data/backup). For non-file backends (postgres) that derivation yields
+// ./backup (the proxy's working dir), so such deployments should set
+// PROXY_BACKUP_DIR to a persistent volume path.
+func DefaultDir(cfg config.Config) string {
+	if cfg.BackupDir != "" {
+		return cfg.BackupDir
+	}
+	dir := filepath.Dir(cfg.DatabasePath)
+	if dir == "" || cfg.DatabasePath == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "backup")
+}
+
+// Filename is the default basename for a backup written to a directory,
+// derived from the document's creation time (UTC).
+func Filename(t time.Time) string {
+	return fmt.Sprintf("swc-proxy-backup-%s.json", t.UTC().Format("20060102-150405"))
+}
+
+// WriteToDir marshals doc and writes it into dir (created 0700 if absent) under
+// the default Filename, mode 0600. It returns the full path written. The file
+// is created O_EXCL so a same-second collision (concurrent triggers, or a CLI
+// and /startbackup firing together) never silently overwrites an existing
+// backup; on collision it appends -1, -2, … (bounded).
+func WriteToDir(dir string, doc *Doc) (string, error) {
+	data, err := Marshal(doc)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create backup dir %s: %w", dir, err)
+	}
+	base := Filename(doc.CreatedAt)
+	for n := 0; n <= maxCollisionRetries; n++ {
+		name := base
+		if n > 0 {
+			name = suffixed(base, n)
+		}
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", fmt.Errorf("write %s: %w", path, err)
+		}
+		_, werr := f.Write(data)
+		cerr := f.Close()
+		if werr != nil {
+			return "", fmt.Errorf("write %s: %w", path, werr)
+		}
+		if cerr != nil {
+			return "", fmt.Errorf("write %s: %w", path, cerr)
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("write backup: %d files already exist for %s", maxCollisionRetries, base)
+}
+
+// maxCollisionRetries bounds the -N filename suffix search in WriteToDir.
+const maxCollisionRetries = 100
+
+// suffixed inserts -n before the extension: "x.json", 1 → "x-1.json".
+func suffixed(base string, n int) string {
+	ext := filepath.Ext(base)
+	return fmt.Sprintf("%s-%d%s", base[:len(base)-len(ext)], n, ext)
+}
+
+// ToUsers converts store users into their backup representation.
+func ToUsers(users []store.User) []User {
+	out := make([]User, len(users))
+	for i, u := range users {
+		out[i] = User{
+			ID: u.ID, Username: u.Username, Role: u.Role, Enabled: u.Enabled,
+			CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
+			OnboardToken: u.OnboardToken, TokenIssuedAt: u.TokenIssuedAt,
+			TokenConsumedAt: u.TokenConsumedAt,
+		}
+	}
+	return out
+}
+
+// FromUsers converts backup users back into store users.
+func FromUsers(users []User) []store.User {
+	out := make([]store.User, len(users))
+	for i, u := range users {
+		out[i] = store.User{
+			ID: u.ID, Username: u.Username, Role: u.Role, Enabled: u.Enabled,
+			CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt,
+			OnboardToken: u.OnboardToken, TokenIssuedAt: u.TokenIssuedAt,
+			TokenConsumedAt: u.TokenConsumedAt,
+		}
+	}
+	return out
+}

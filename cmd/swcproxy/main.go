@@ -52,6 +52,10 @@ func main() {
 			os.Exit(1)
 		}
 		runBindingCommand(os.Args[2], os.Args[3:])
+	case "backup":
+		runBackupCommand(os.Args[2:])
+	case "restore":
+		runRestoreCommand(os.Args[2:])
 	case "--help", "-h", "help":
 		printUsage()
 	default:
@@ -76,6 +80,8 @@ Usage:
   swcproxy binding ls                      List role bindings
   swcproxy binding add <user> <role>       Bind a user to a role
   swcproxy binding rm <id>                 Remove a role binding
+  swcproxy backup [-o <file>] [--include-ca] [--include-tokens]  Export users, audit + RBAC as JSON
+  swcproxy restore [-i <file>] [--force]   Import a backup
   swcproxy --help                          Show this help
 `)
 }
@@ -143,7 +149,9 @@ func openStore() (store.UserStore, store.RBACStore, store.AuditStore) {
 	if err != nil {
 		fatal("load config: %v", err)
 	}
-	proxylog.Init(cfg.Env, cfg.LogLevel)
+	// Log to stderr: stdout is reserved for command output (e.g. the `backup`
+	// JSON artifact, which must stay valid when redirected or piped).
+	proxylog.InitTo(os.Stderr, cfg.Env, cfg.LogLevel)
 
 	ctx := context.Background()
 	switch cfg.Store {

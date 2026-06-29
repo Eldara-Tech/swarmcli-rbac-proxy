@@ -43,7 +43,7 @@ When updating the Go version, keep these in sync:
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_BACKUP_DIR` (default-location backup dir for `swcproxy backup`/`/startbackup`; derived from the DB path when unset — set explicitly for postgres, which has no DB file), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
 
 ## Agent-manager Forwarding
 
@@ -164,7 +164,7 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag
+  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, internal-only /_swc/ control-plane (startbackup + version, branded 404) via mountControlPlane
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
   .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy
@@ -173,8 +173,13 @@ swarm-rbac-proxy/
   stack.yml             — Docker Swarm stack definition
   cmd/
     swcproxy/
-      main.go           — Admin CLI: version, user ls/add/delete/regenerate-token (direct store access)
+      main.go           — Admin CLI: version, user ls/add/delete/regenerate-token, audit ls (direct store access)
+      backup.go         — Admin CLI: backup/restore (delegates artifact assembly to internal/backup; optional CA bundle; default-location output resolution)
+      main_test.go      — CLI unit tests (flag parsing, helpers)
   internal/
+    backup/
+      backup.go         — Logical backup artifact (Doc/User/CA schema incl. roles+bindings, Create with token-redaction, Marshal/ToData/WriteToDir [O_EXCL, no overwrite]/DefaultDir/Filename), shared by the swcproxy CLI and the server's /startbackup handler
+      backup_test.go    — backup package unit tests (export, marshal, filename, dir perms, default dir)
     version/
       version.go        — Build-time version vars (Version/Commit/Date), shared by both binaries
       version_test.go   — version package tests
@@ -188,11 +193,11 @@ swarm-rbac-proxy/
       logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
       logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
     store/
-      store.go          — UserStore + AuditStore interfaces, User/AuditEntry types, AuditAction constants, sentinel errors
+      store.go          — UserStore + AuditStore + BackupStore interfaces, User/AuditEntry/BackupData types, AuditAction constants, sentinel errors (BackupStore: Export → all tables incl. roles/bindings + token columns; Restore → verbatim, single transaction, replace clears all tables)
       rbac.go           — RBACStore interface, Role/RoleBinding/PermissionRule types, resource/verb vocabulary, built-in roles, effective-permission resolver, seeding, legacy migration, last-admin lockout helpers
-      memory.go         — in-memory UserStore + AuditStore + RBACStore (dev/testing)
-      sqlite.go         — SQLite UserStore + AuditStore + RBACStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
-      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore (pgx/v5, with migrations; rules stored as JSONB)
+      memory.go         — in-memory UserStore + AuditStore + RBACStore + BackupStore (dev/testing)
+      sqlite.go         — SQLite UserStore + AuditStore + RBACStore + BackupStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
+      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore + BackupStore (pgx/v5, with migrations; rules stored as JSONB)
       contract_test.go  — shared contract tests for all store implementations (user + audit)
       rbac_contract_test.go — shared RBAC contract tests (roles, bindings, resolver, seeding, migration, lockout)
       memory_test.go    — memory store unit tests
@@ -248,6 +253,9 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 - `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-token protected). Deleting the last admin binding is refused (409)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
 - `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
+- `GET|POST /_swc/startbackup` (alias `/startbackup`) — **Internal listener only.** Triggers a database-only logical backup (never the CA, onboarding tokens always redacted), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`; `-N` suffix on same-second collision), and returns `{"result":"success","file":...,"path":...}`. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
+- `GET /_swc/version` — **Internal listener only.** Reports build identity `{"version","commit","date"}`. Its presence (200 vs a Docker-fall-through 404 on an older build) is the "is this binary current?" signal.
+- The whole `/_swc/` control-plane namespace is gated by `mountControlPlane(mux, internal, …)` so it is absent from the external mux; unknown `/_swc/*` paths get a branded JSON 404 instead of falling through to the Docker proxy (PR #107).
 - `/v1/*` — Forwarded to agent-manager (when `PROXY_AGENT_MANAGER_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
 
@@ -267,16 +275,23 @@ swcproxy role show <name>                 # Show a role's rules
 swcproxy binding ls                       # List role bindings
 swcproxy binding add <user> <role>        # Bind a user to a role
 swcproxy binding rm <id>                  # Remove a role binding (last-admin protected)
+swcproxy backup [-o <file>] [--include-ca] [--include-tokens] # Logical JSON export of users + audit + RBAC roles/bindings. Onboarding tokens redacted unless --include-tokens; optional CA bundle (--include-ca requires a file dest). Without -o: a terminal writes a timestamped file to <db-dir>/backup; a pipe streams JSON to stdout
+swcproxy restore [-i <file>] [--force] [--ca-out <dir>] # Import a backup verbatim (single transaction across all tables)
 swcproxy --help                           # Usage info
 ```
 
 `swcproxy user add` also creates a matching role binding (`--admin` → `admin`, else `operator`) so the legacy role and RBAC binding stay in sync.
 
+Backup/restore is a logical export (portable across sqlite/postgres), not a
+file copy. The client CA lives in Docker secrets, **not** the database — see
+[docs/backup-restore.md](docs/backup-restore.md) for why a DB restore alone
+does not preserve user connections, and the `--include-ca` DR bundle.
+
 ## Audit Log
 
-All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), and the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted` (recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
+All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, and the logical-backup actions `backup.exported`, `backup.restored` (all recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
 
-Each entry records: id, timestamp, actor (username/"cli"/"anonymous"), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
+Each entry records: id, timestamp, actor (username/"cli"/"internal"/"anonymous"; "internal" marks an action triggered via the internal listener, e.g. `/startbackup`), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
 
 The `AuditStore` interface (`internal/store/store.go`) is implemented by all three store backends. Recording is nil-safe — handlers pass `nil` in tests. Audit write failures are logged but never block requests.
 

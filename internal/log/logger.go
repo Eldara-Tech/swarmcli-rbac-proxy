@@ -4,6 +4,7 @@
 package proxylog
 
 import (
+	"io"
 	"os"
 	"strings"
 
@@ -41,12 +42,18 @@ func L() *ProxyLogger {
 	return logger
 }
 
-// Init initializes the global logger.
+// Init initializes the global logger, writing to stdout.
 //
 // mode selects the encoder: "dev" → console, anything else → JSON.
 // level selects the minimum log level: "debug", "info", "warn", "error".
 // Empty strings use defaults (prod mode, info level — or debug in dev mode).
 func Init(mode, level string) {
+	InitTo(os.Stdout, mode, level)
+}
+
+// InitTo is Init with an explicit destination. The swcproxy CLI uses stderr so
+// that command output on stdout (e.g. a `backup` JSON artifact) stays clean.
+func InitTo(w io.Writer, mode, level string) {
 	if raw != nil {
 		_ = raw.Sync()
 	}
@@ -54,7 +61,7 @@ func Init(mode, level string) {
 	mode = parseMode(mode)
 	atomicLevel = zap.NewAtomicLevelAt(parseLogLevel(level, mode))
 
-	writer := zapcore.AddSync(os.Stdout)
+	writer := zapcore.AddSync(w)
 
 	encoderCfg := zap.NewProductionEncoderConfig()
 	encoderCfg.TimeKey = "ts"
