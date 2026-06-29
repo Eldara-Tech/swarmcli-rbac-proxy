@@ -6,8 +6,19 @@ package store
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 )
+
+// adminMu serializes the last-admin lockout-sensitive mutations below
+// (Delete/SetUserEnabled/SetUserRole/DeleteBinding/UpdateRole *Checked). Each
+// reads the current admin set via computeAdmins and then mutates; without
+// serialization two concurrent management requests can each observe a surviving
+// admin and both proceed, racing the count to zero (a TOCTOU that defeats the
+// lockout guarantee). The proxy runs as a single replica against a single store
+// (see stack.yml), so a process-level lock fully closes the window; a
+// multi-replica deployment would instead need store-level row locking.
+var adminMu sync.Mutex
 
 // PermissionRule grants a set of verbs over a set of resources. A "*" entry in
 // either slice is a wildcard that matches everything in that dimension.
@@ -344,6 +355,8 @@ func computeAdmins(ctx context.Context, us UserStore, rs RBACStore, override *Ro
 // so would leave no user with admin. Use from handlers and the CLI instead of
 // the raw store method.
 func DeleteBindingChecked(ctx context.Context, us UserStore, rs RBACStore, id string) error {
+	adminMu.Lock()
+	defer adminMu.Unlock()
 	admins, err := computeAdmins(ctx, us, rs, nil, id)
 	if err != nil {
 		return err
@@ -357,6 +370,8 @@ func DeleteBindingChecked(ctx context.Context, us UserStore, rs RBACStore, id st
 // UpdateRoleChecked updates a role but refuses (ErrLastAdmin) when the new
 // rule set would leave no user with admin.
 func UpdateRoleChecked(ctx context.Context, us UserStore, rs RBACStore, r *Role) error {
+	adminMu.Lock()
+	defer adminMu.Unlock()
 	admins, err := computeAdmins(ctx, us, rs, r, "")
 	if err != nil {
 		return err
@@ -372,7 +387,10 @@ func UpdateRoleChecked(ctx context.Context, us UserStore, rs RBACStore, r *Role)
 // user/role/binding management plane — an mTLS-authenticated caller may manage
 // users iff this returns true. Kept consistent with the lockout definition
 // (rulesGrantAdmin) so "who may manage" and "who counts for lockout" never
-// diverge.
+// diverge. The Enabled axis that computeAdmins applies is already guaranteed
+// for callers here: RequireClientCert (internal/api/mtls.go) rejects a disabled
+// user's certificate upstream, so this predicate only ever runs for an enabled
+// identity.
 func UserIsAdmin(ctx context.Context, rs RBACStore, username string) (bool, error) {
 	eff, err := GetEffectivePermissions(ctx, rs, username)
 	if err != nil {
@@ -406,7 +424,11 @@ func CreateUserWithBinding(ctx context.Context, us UserStore, rs RBACStore, user
 	}
 	bind := &RoleBinding{Username: username, RoleName: bindingRoleForUserRole(role)}
 	if err := rs.CreateBinding(ctx, bind); err != nil && !errors.Is(err, ErrBindingExists) {
-		return u, err
+		// Roll back the user so a binding failure cannot strand a binding-less
+		// (default-deny) account that would also block recreation under the same
+		// name. Best-effort: a failed rollback is no worse than the prior state.
+		_ = us.DeleteUser(ctx, username)
+		return nil, err
 	}
 	return u, nil
 }
@@ -416,6 +438,8 @@ func CreateUserWithBinding(ctx context.Context, us UserStore, rs RBACStore, user
 // store DeleteUser in handlers/CLI so a user deletion can never orphan bindings
 // or strip the last admin (the bare store method does neither).
 func DeleteUserChecked(ctx context.Context, us UserStore, rs RBACStore, username string) error {
+	adminMu.Lock()
+	defer adminMu.Unlock()
 	admins, err := computeAdmins(ctx, us, rs, nil, "")
 	if err != nil {
 		return err
@@ -443,6 +467,8 @@ func DeleteUserChecked(ctx context.Context, us UserStore, rs RBACStore, username
 // cannot authenticate, so it must not be the last one standing). Enabling is
 // always allowed.
 func SetUserEnabledChecked(ctx context.Context, us UserStore, rs RBACStore, username string, enabled bool) error {
+	adminMu.Lock()
+	defer adminMu.Unlock()
 	if !enabled {
 		admins, err := computeAdmins(ctx, us, rs, nil, "")
 		if err != nil {
@@ -462,6 +488,8 @@ func SetUserEnabledChecked(ctx context.Context, us UserStore, rs RBACStore, user
 // leave no enabled admin, and (ErrRoleNotFound) when the target role does not
 // exist.
 func SetUserRoleChecked(ctx context.Context, us UserStore, rs RBACStore, username, role string) error {
+	adminMu.Lock()
+	defer adminMu.Unlock()
 	newRole, err := rs.GetRole(ctx, role)
 	if err != nil {
 		return err
@@ -484,6 +512,13 @@ func SetUserRoleChecked(ctx context.Context, us UserStore, rs RBACStore, usernam
 	if len(admins) == 0 {
 		return ErrLastAdmin
 	}
+	// Create the new binding before removing the old ones so a partial failure
+	// leaves the user with an extra binding (default-deny-safe) rather than a
+	// binding-less account — i.e. it errs toward retained access, never lockout.
+	// Idempotent if a binding to this role already exists.
+	if err := rs.CreateBinding(ctx, &RoleBinding{Username: username, RoleName: role}); err != nil && !errors.Is(err, ErrBindingExists) {
+		return err
+	}
 	if err := us.SetUserRole(ctx, username, role); err != nil {
 		return err
 	}
@@ -492,9 +527,12 @@ func SetUserRoleChecked(ctx context.Context, us UserStore, rs RBACStore, usernam
 		return err
 	}
 	for _, b := range existing {
+		if b.RoleName == role {
+			continue // keep the (new) target-role binding
+		}
 		if err := rs.DeleteBinding(ctx, b.ID); err != nil && !errors.Is(err, ErrBindingNotFound) {
 			return err
 		}
 	}
-	return rs.CreateBinding(ctx, &RoleBinding{Username: username, RoleName: role})
+	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 
 	proxylog "swarm-rbac-proxy/internal/log"
@@ -64,6 +65,10 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if !validUsername(req.Username) {
+		writeError(w, http.StatusBadRequest, "username must be 1-64 characters: letters, digits, '.', '_' or '-'")
+		return
+	}
 	role, ok := normalizeCreateRole(req.Role)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "role must be one of: admin, operator, viewer")
@@ -84,17 +89,20 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Audit creation before issuing the token: the user already exists, so the
+	// record must not be lost if token issuance then fails.
+	l().Infow("user created", "id", u.ID, "username", u.Username, "role", u.Role)
+	recordAudit(h.audit, r, store.AuditUserCreated, "user:"+u.Username, "success", "role:"+u.Role)
+
 	token, err := h.issueToken(r, u.Username)
 	if err != nil {
-		// The user exists but has no usable token; surface the failure so the
-		// caller can retry (regenerate-token) rather than silently stranding it.
+		// The user exists (and is audited above) but has no usable token; surface
+		// the failure so the caller can retry (regenerate-token) rather than
+		// silently stranding it.
 		l().Errorw("set onboard token failed", "error", err, "username", u.Username)
 		writeError(w, http.StatusInternalServerError, "user created but onboard token failed; regenerate it")
 		return
 	}
-
-	l().Infow("user created", "id", u.ID, "username", u.Username, "role", u.Role)
-	recordAudit(h.audit, r, store.AuditUserCreated, "user:"+u.Username, "success", "role:"+u.Role)
 
 	writeJSON(w, http.StatusCreated, onboardResponse{User: u, OnboardToken: token, OnboardURL: h.onboardURL(token)})
 }
@@ -179,6 +187,10 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
+	if r.Header.Get("Content-Type") != "application/json" {
+		writeError(w, http.StatusBadRequest, "Content-Type must be application/json")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 10<<10)
 	var req struct {
 		Enabled *bool   `json:"enabled,omitempty"`
@@ -190,6 +202,13 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Enabled == nil && req.Role == nil {
 		writeError(w, http.StatusBadRequest, "nothing to update: provide 'enabled' and/or 'role'")
+		return
+	}
+	// Validate the role against the built-ins here, like create does, so the
+	// management API cannot set User.Role to an arbitrary string that the
+	// protected-stack admin gate (User.Role == "admin") would then misread.
+	if req.Role != nil && !isBuiltinRole(*req.Role) {
+		writeError(w, http.StatusBadRequest, "role must be one of: admin, operator, viewer")
 		return
 	}
 	self := actorFromRequest(r) == username
@@ -283,19 +302,37 @@ type onboardResponse struct {
 	OnboardURL   string      `json:"onboard_url,omitempty"`
 }
 
+// isBuiltinRole reports whether role is exactly one of the three assignable
+// built-in roles (no empty-string defaulting, unlike normalizeCreateRole).
+func isBuiltinRole(role string) bool {
+	switch role {
+	case store.RoleAdmin, store.RoleOperator, store.RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
 // normalizeCreateRole validates the requested role for user creation. An empty
 // role defaults to operator (a sensible non-privileged default); otherwise it
 // must be one of the built-in role names.
 func normalizeCreateRole(role string) (string, bool) {
-	switch role {
-	case "":
+	if role == "" {
 		return store.RoleOperator, true
-	case store.RoleAdmin, store.RoleOperator, store.RoleViewer:
-		return role, true
-	default:
-		return "", false
 	}
+	if isBuiltinRole(role) {
+		return role, true
+	}
+	return "", false
 }
+
+// usernameRe constrains create usernames: 1-64 chars, starting alphanumeric,
+// then letters/digits/'.'/'_'/'-'. The username becomes the client cert CN and
+// appears in onboard URLs and audit records, so it is held to a conservative
+// shell/URL/log-safe charset.
+var usernameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func validUsername(s string) bool { return usernameRe.MatchString(s) }
 
 func generateOnboardToken() (string, error) {
 	b := make([]byte, 32)

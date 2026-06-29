@@ -473,3 +473,72 @@ func TestMethodNotAllowed(t *testing.T) {
 		}
 	}
 }
+
+// --- input validation ---
+
+func TestCreateUser_InvalidUsername(t *testing.T) {
+	h, _ := newTestHandler(t)
+	mux := testMux(h)
+	for _, name := range []string{"has space", "bad/slash", "-leadinghyphen", "with\nnewline"} {
+		body := `{"username":"` + name + `"}`
+		w := postJSON(mux, "/api/v1/users", body, "")
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("username %q: status = %d, want 400", name, w.Code)
+		}
+	}
+}
+
+func TestUpdate_InvalidRole(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"frank"}`, "")
+
+	w := patchAs(mux, "frank", `{"role":"superuser"}`, "admin")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (non-builtin role)", w.Code)
+	}
+	// User.Role must be unchanged after a rejected PATCH.
+	u, _ := s.GetUserByUsername(context.Background(), "frank")
+	if u.Role != store.RoleOperator {
+		t.Errorf("role = %q, want operator (unchanged)", u.Role)
+	}
+}
+
+func TestUpdate_RequiresContentType(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"frank"}`, "")
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/users/frank", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Content-Type", "text/plain")
+	req = asUser(req, "admin")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (wrong content-type)", w.Code)
+	}
+}
+
+func TestUpdate_RoleAndEnabledTogether(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"frank"}`, "")
+
+	w := patchAs(mux, "frank", `{"enabled":false,"role":"viewer"}`, "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body)
+	}
+	u, _ := s.GetUserByUsername(context.Background(), "frank")
+	if u.Enabled {
+		t.Error("expected frank disabled")
+	}
+	if u.Role != store.RoleViewer {
+		t.Errorf("role = %q, want viewer", u.Role)
+	}
+	if roles := userBindings(t, s, "frank"); len(roles) != 1 || roles[0] != store.RoleViewer {
+		t.Errorf("bindings = %v, want [viewer]", roles)
+	}
+}
