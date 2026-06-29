@@ -290,35 +290,75 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 	<-done
 }
 
-// mountBackupRoute registers /startbackup on mux only for the internal
-// (loopback, no-auth) listener — the same trusted admin path used for stack
-// deploy/exec. It is deliberately absent from the external mTLS mux: the
-// endpoint is unauthenticated and writes a full DB dump, so it must never be
-// reachable from the public listener. It writes a DB-only backup (never the CA)
-// to the proxy-data volume and returns the artifact filename, so an operator
-// can trigger a backup with `curl 127.0.0.1:<port>/startbackup` from inside the
-// container without shelling into the swcproxy CLI.
-func mountBackupRoute(mux *http.ServeMux, internal bool, userStore store.UserStore, audit store.AuditStore, dir string) {
-	if internal {
-		mux.HandleFunc("/startbackup", newBackupHandler(userStore, audit, dir))
+// mountControlPlane registers the proxy's control-plane routes under the
+// reserved /_swc/ namespace, and only on the internal (loopback, no-auth)
+// listener — the same trusted admin path used for stack deploy/exec. The whole
+// namespace is deliberately absent from the external mTLS mux: these endpoints
+// are unauthenticated.
+//
+// Real Docker API traffic never uses /_swc/, so the namespace owns a branded
+// 404 (handleControlNotFound) for any unknown control route instead of letting
+// it fall through to the catch-all Docker proxy. That fall-through is what made
+// a missing route indistinguishable from a genuine Docker 404 (PR #107): a
+// stale build returns the daemon's own 404 with no hint that the route is
+// simply absent. The endpoints:
+//
+//	GET   /_swc/version      build identity — its mere presence (200 here vs a
+//	                         Docker 404 on an older build) is the "is this a
+//	                         current build?" signal; fields add release detail.
+//	*     /_swc/startbackup  DB-only backup trigger (never the CA); writes to the
+//	                         proxy-data volume and returns the artifact filename.
+//	                         Also served at /startbackup for back-compat.
+//	*     /_swc/<unknown>    branded JSON 404, never proxied to Docker.
+func mountControlPlane(mux *http.ServeMux, internal bool, userStore store.UserStore, audit store.AuditStore, dir string) {
+	if !internal {
+		return
 	}
+	backupHandler := newBackupHandler(userStore, audit, dir)
+	mux.HandleFunc("/_swc/startbackup", backupHandler)
+	mux.HandleFunc("/startbackup", backupHandler) // back-compat alias (pre-/_swc/ docs & muscle memory)
+	mux.HandleFunc("GET /_swc/version", handleControlVersion)
+	mux.HandleFunc("/_swc/", handleControlNotFound) // reserved namespace never falls through to Docker
 }
 
-// newBackupHandler returns the /startbackup handler for the internal listener.
-// It writes a DB-only logical backup (never the CA — that stays an opt-in,
-// human-supervised CLI path) to dir and replies with the artifact filename. It
-// accepts GET (so a bare `curl .../startbackup` works) and POST.
+// handleControlVersion reports the proxy build identity on the internal
+// listener. Operators (and reviewers checking whether a feature is deployed)
+// hit this first: a 200 means the binary is current enough to carry the /_swc/
+// namespace, whereas a Docker 404 means a stale build that predates it.
+func handleControlVersion(w http.ResponseWriter, _ *http.Request) {
+	writeControlJSON(w, http.StatusOK, map[string]string{
+		"version": version.Version,
+		"commit":  version.Commit,
+		"date":    version.Date,
+	})
+}
+
+// handleControlNotFound answers any unregistered path under the reserved /_swc/
+// namespace with a branded JSON 404, so a typo or a route the running build
+// lacks is reported clearly instead of being forwarded to the Docker socket.
+func handleControlNotFound(w http.ResponseWriter, r *http.Request) {
+	writeControlJSON(w, http.StatusNotFound, map[string]string{
+		"result": "error",
+		"error":  "unknown control-plane route " + r.URL.Path + "; see GET /_swc/version",
+	})
+}
+
+// newBackupHandler returns the backup-trigger handler for the internal listener
+// (served at /_swc/startbackup and the /startbackup alias). It writes a DB-only
+// logical backup (never the CA — that stays an opt-in, human-supervised CLI
+// path) to dir and replies with the artifact filename. It accepts GET (so a
+// bare `curl .../_swc/startbackup` works) and POST.
 func newBackupHandler(userStore store.UserStore, audit store.AuditStore, dir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodPost {
-			writeBackupJSON(w, http.StatusMethodNotAllowed, map[string]string{
+			writeControlJSON(w, http.StatusMethodNotAllowed, map[string]string{
 				"result": "error", "error": "method not allowed; use GET or POST",
 			})
 			return
 		}
 		bs, ok := userStore.(store.BackupStore)
 		if !ok {
-			writeBackupJSON(w, http.StatusNotImplemented, map[string]string{
+			writeControlJSON(w, http.StatusNotImplemented, map[string]string{
 				"result": "error", "error": "store backend does not support backup",
 			})
 			return
@@ -329,7 +369,7 @@ func newBackupHandler(userStore store.UserStore, audit store.AuditStore, dir str
 		doc, err := backup.Create(r.Context(), bs, version.String(), time.Now().UTC(), false)
 		if err != nil {
 			l().Errorw("startbackup: export failed", "error", err)
-			writeBackupJSON(w, http.StatusInternalServerError, map[string]string{
+			writeControlJSON(w, http.StatusInternalServerError, map[string]string{
 				"result": "error", "error": err.Error(),
 			})
 			return
@@ -337,7 +377,7 @@ func newBackupHandler(userStore store.UserStore, audit store.AuditStore, dir str
 		path, err := backup.WriteToDir(dir, doc)
 		if err != nil {
 			l().Errorw("startbackup: write failed", "error", err)
-			writeBackupJSON(w, http.StatusInternalServerError, map[string]string{
+			writeControlJSON(w, http.StatusInternalServerError, map[string]string{
 				"result": "error", "error": err.Error(),
 			})
 			return
@@ -351,7 +391,7 @@ func newBackupHandler(userStore store.UserStore, audit store.AuditStore, dir str
 		})
 
 		l().Infow("backup written", "path", path, "users", len(doc.Users), "audit", len(doc.Audit))
-		writeBackupJSON(w, http.StatusOK, map[string]string{
+		writeControlJSON(w, http.StatusOK, map[string]string{
 			"result": "success",
 			"file":   backup.Filename(doc.CreatedAt),
 			"path":   path,
@@ -369,7 +409,7 @@ func requestIP(r *http.Request) string {
 	return host
 }
 
-func writeBackupJSON(w http.ResponseWriter, status int, body map[string]string) {
+func writeControlJSON(w http.ResponseWriter, status int, body map[string]string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
@@ -693,7 +733,7 @@ func main() {
 	// the protected-stack exec/forward guard (no-op on the internal listener).
 	registerRoutes := func(mux *http.ServeMux, internal bool, wrapProxy, wrapRBAC, wrapExec func(http.Handler) http.Handler) {
 		tok := cfg.AdminToken
-		mountBackupRoute(mux, internal, userStore, auditStore, backup.DefaultDir(cfg))
+		mountControlPlane(mux, internal, userStore, auditStore, backup.DefaultDir(cfg))
 		mux.Handle("/api/v1/users", api.RequireToken(tok, userHandler))
 		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(tok, http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)

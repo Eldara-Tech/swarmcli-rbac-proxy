@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"swarm-rbac-proxy/internal/backup"
 	"swarm-rbac-proxy/internal/store"
+	"swarm-rbac-proxy/internal/version"
 )
 
 func seedBackupStore(t *testing.T) *store.MemoryStore {
@@ -132,23 +134,117 @@ func TestBackupHandlerRedactsTokens(t *testing.T) {
 	}
 }
 
-// TestMountBackupRouteOnlyOnInternalListener locks in the security invariant
-// that /startbackup is registered on the internal mux but never the external
-// one (it is unauthenticated and dumps the full user DB).
-func TestMountBackupRouteOnlyOnInternalListener(t *testing.T) {
+// TestMountControlPlaneOnlyOnInternalListener locks in the security invariant
+// that the /_swc/ control-plane namespace (and the /startbackup back-compat
+// alias) is registered on the internal mux but never the external one — the
+// endpoints are unauthenticated and the backup trigger dumps the full user DB.
+func TestMountControlPlaneOnlyOnInternalListener(t *testing.T) {
 	ms := seedBackupStore(t)
 	dir := t.TempDir()
 
 	internalMux := http.NewServeMux()
-	mountBackupRoute(internalMux, true, ms, ms, dir)
-	if _, pattern := internalMux.Handler(httptest.NewRequest(http.MethodGet, "/startbackup", nil)); pattern != "/startbackup" {
-		t.Errorf("internal mux: /startbackup pattern = %q, want \"/startbackup\"", pattern)
+	mountControlPlane(internalMux, true, ms, ms, dir)
+	for _, tc := range []struct{ method, path, want string }{
+		{http.MethodPost, "/_swc/startbackup", "/_swc/startbackup"},
+		{http.MethodPost, "/startbackup", "/startbackup"},
+		{http.MethodGet, "/_swc/version", "GET /_swc/version"},
+		{http.MethodGet, "/_swc/anything-else", "/_swc/"},
+	} {
+		if _, pattern := internalMux.Handler(httptest.NewRequest(tc.method, tc.path, nil)); pattern != tc.want {
+			t.Errorf("internal mux: %s %s pattern = %q, want %q", tc.method, tc.path, pattern, tc.want)
+		}
 	}
 
 	externalMux := http.NewServeMux()
-	mountBackupRoute(externalMux, false, ms, ms, dir)
-	if _, pattern := externalMux.Handler(httptest.NewRequest(http.MethodGet, "/startbackup", nil)); pattern != "" {
-		t.Errorf("external mux must not register /startbackup, got pattern %q", pattern)
+	mountControlPlane(externalMux, false, ms, ms, dir)
+	for _, path := range []string{"/_swc/startbackup", "/startbackup", "/_swc/version", "/_swc/anything-else"} {
+		if _, pattern := externalMux.Handler(httptest.NewRequest(http.MethodGet, path, nil)); pattern != "" {
+			t.Errorf("external mux must not register %q, got pattern %q", path, pattern)
+		}
+	}
+}
+
+// TestControlVersionHandler verifies the build-identity endpoint reports the
+// version package's values — the signal an operator uses to tell whether a
+// build carries a given feature.
+func TestControlVersionHandler(t *testing.T) {
+	rec := httptest.NewRecorder()
+	handleControlVersion(rec, httptest.NewRequest(http.MethodGet, "/_swc/version", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["version"] != version.Version || resp["commit"] != version.Commit || resp["date"] != version.Date {
+		t.Errorf("version response = %v, want version=%q commit=%q date=%q",
+			resp, version.Version, version.Commit, version.Date)
+	}
+}
+
+// TestControlNotFoundHandler verifies an unknown control route gets a branded
+// JSON 404 naming the path, not a bare or daemon-shaped 404.
+func TestControlNotFoundHandler(t *testing.T) {
+	rec := httptest.NewRecorder()
+	handleControlNotFound(rec, httptest.NewRequest(http.MethodGet, "/_swc/bogus", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["result"] != "error" || !strings.Contains(resp["error"], "/_swc/bogus") {
+		t.Errorf("not-found response = %v, want error naming the path", resp)
+	}
+}
+
+// TestControlPlaneNamespacePreemptsCatchAll is the PR #107 regression: an
+// unknown path under /_swc/ must be answered by the namespace 404, never fall
+// through to the catch-all that forwards to the Docker socket (which is what
+// made a missing route look like a genuine Docker 404).
+func TestControlPlaneNamespacePreemptsCatchAll(t *testing.T) {
+	ms := seedBackupStore(t)
+	mux := http.NewServeMux()
+	mountControlPlane(mux, true, ms, ms, t.TempDir())
+	catchAllHit := false
+	mux.HandleFunc("/", func(http.ResponseWriter, *http.Request) { catchAllHit = true })
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/_swc/nope", nil))
+
+	if catchAllHit {
+		t.Error("/_swc/nope reached the catch-all (would be forwarded to Docker); the namespace must own it")
+	}
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestControlPlaneBackupAliasRoutes verifies both the canonical
+// /_swc/startbackup and the /startbackup alias dispatch to the backup handler
+// through the mux (precedence over the /_swc/ namespace 404).
+func TestControlPlaneBackupAliasRoutes(t *testing.T) {
+	for _, path := range []string{"/_swc/startbackup", "/startbackup"} {
+		t.Run(path, func(t *testing.T) {
+			ms := seedBackupStore(t)
+			mux := http.NewServeMux()
+			mountControlPlane(mux, true, ms, ms, filepath.Join(t.TempDir(), "backup"))
+
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want 200 (body %s)", path, rec.Code, rec.Body)
+			}
+			var resp map[string]string
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if resp["result"] != "success" {
+				t.Errorf("%s result = %q, want success", path, resp["result"])
+			}
+		})
 	}
 }
 

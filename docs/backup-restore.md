@@ -84,31 +84,46 @@ never overwritten.
 
 ### Trigger over the internal listener
 
-When `PROXY_INTERNAL_LISTEN` is set (e.g. `127.0.0.1:2375`), the proxy serves a
-`/startbackup` endpoint on that **loopback, no-auth** listener — the same
-trusted local admin path used for `docker stack deploy`. It writes a
-database-only backup to the default directory above and returns the filename:
+When `PROXY_INTERNAL_LISTEN` is set (e.g. `127.0.0.1:2375`), the proxy serves
+its control-plane endpoints under the reserved **`/_swc/`** namespace on that
+**loopback, no-auth** listener — the same trusted local admin path used for
+`docker stack deploy`. `/_swc/startbackup` writes a database-only backup to the
+default directory above and returns the filename:
 
 ```bash
-curl 127.0.0.1:2375/startbackup
+curl 127.0.0.1:2375/_swc/startbackup
 {"result":"success","file":"swc-proxy-backup-20260624-070425.json","path":"/data/backup/swc-proxy-backup-20260624-070425.json"}
 ```
 
-`GET` and `POST` are both accepted. The endpoint is **never** exposed on the
-external mTLS listener, and it **never** embeds the CA — `--include-ca` stays a
+`GET` and `POST` are both accepted. (`/startbackup` without the prefix still
+works as a back-compat alias.) The endpoint is **never** exposed on the external
+mTLS listener, and it **never** embeds the CA — `--include-ca` stays a
 deliberate, human-supervised CLI action (see below). Retrieve the saved file
 from the volume (`docker cp`, a bind mount, or your volume backup tooling).
 
-> **Troubleshooting — a `404` here means the running build predates this
-> feature.** The internal listener proxies any *unregistered* path straight to
-> the Docker socket, so when `/startbackup` is missing from the binary the
-> Docker daemon answers with its own `404 Not Found` — there is no other signal
-> that you are on an old image. If you get a `404`, rebuild and redeploy the
-> proxy, and on Swarm force the service to adopt the new image
+**Check the running build first.** `GET /_swc/version` reports the proxy's build
+identity, and its mere presence is the signal you need:
+
+```bash
+curl 127.0.0.1:2375/_swc/version
+{"version":"1.3.0","commit":"abc1234","date":"2026-06-29T…"}
+```
+
+A `200` here means the binary is current enough to carry the whole `/_swc/`
+namespace (so `/_swc/startbackup` is available too). The whole namespace returns
+a branded JSON `404` for an unknown control route, so it is never confused with
+a Docker response.
+
+> **Troubleshooting — a `404` on `/_swc/version` means the running build is
+> stale.** Older builds have no `/_swc/` namespace at all, so the internal
+> listener forwards the request to the Docker socket and the daemon answers with
+> its own `404 Not Found` — that fall-through is the only reason a control route
+> can return `404`. If you see it, rebuild and redeploy the proxy, and on Swarm
+> force the service to adopt the new image
 > (`docker service update --image <repo>:<tag> --force <stack>_rbac-proxy`) —
 > `docker stack deploy` will not re-pull a tag the node has already cached.
 > (A `400 Bad Request` on the *external* port, e.g. `2376`, is unrelated: that
-> is the mTLS listener rejecting plaintext HTTP. `/startbackup` is
+> is the mTLS listener rejecting plaintext HTTP. The `/_swc/` namespace is
 > internal-listener-only by design.)
 
 ## Disaster-recovery bundle (database + CA)
@@ -128,7 +143,7 @@ docker exec "$(docker ps -q -f name=rbac_proxy)" \
 > destination: with no `-o`, a terminal writes a `0600` file to the default
 > backup directory, and a piped/redirected stdout is **refused** (the command
 > exits non-zero) so the key is never streamed to a fd at the shell's umask.
-> The `/startbackup` HTTP trigger never includes the CA.
+> The `/_swc/startbackup` HTTP trigger never includes the CA.
 
 The CA has a 10-year validity and effectively never changes, so a single
 `--include-ca` capture, refreshed only when you rotate the CA, is enough.

@@ -164,7 +164,7 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, internal-only /startbackup handler
+  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, internal-only /_swc/ control-plane (startbackup + version, branded 404) via mountControlPlane
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
   .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy
@@ -253,7 +253,9 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 - `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-token protected). Deleting the last admin binding is refused (409)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
 - `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
-- `GET|POST /startbackup` — **Internal listener only.** Triggers a database-only logical backup (never the CA, onboarding tokens always redacted), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`; `-N` suffix on same-second collision), and returns `{"result":"success","file":...,"path":...}`. Registration is gated by `mountBackupRoute(mux, internal, …)` so it is absent from the external mux. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
+- `GET|POST /_swc/startbackup` (alias `/startbackup`) — **Internal listener only.** Triggers a database-only logical backup (never the CA, onboarding tokens always redacted), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`; `-N` suffix on same-second collision), and returns `{"result":"success","file":...,"path":...}`. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
+- `GET /_swc/version` — **Internal listener only.** Reports build identity `{"version","commit","date"}`. Its presence (200 vs a Docker-fall-through 404 on an older build) is the "is this binary current?" signal.
+- The whole `/_swc/` control-plane namespace is gated by `mountControlPlane(mux, internal, …)` so it is absent from the external mux; unknown `/_swc/*` paths get a branded JSON 404 instead of falling through to the Docker proxy (PR #107).
 - `/v1/*` — Forwarded to agent-manager (when `PROXY_AGENT_MANAGER_URL` is set; supports HTTP and WebSocket upgrade)
 - `/*` — Proxied to Docker daemon
 
