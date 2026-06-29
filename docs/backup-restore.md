@@ -99,6 +99,18 @@ external mTLS listener, and it **never** embeds the CA — `--include-ca` stays 
 deliberate, human-supervised CLI action (see below). Retrieve the saved file
 from the volume (`docker cp`, a bind mount, or your volume backup tooling).
 
+> **Troubleshooting — a `404` here means the running build predates this
+> feature.** The internal listener proxies any *unregistered* path straight to
+> the Docker socket, so when `/startbackup` is missing from the binary the
+> Docker daemon answers with its own `404 Not Found` — there is no other signal
+> that you are on an old image. If you get a `404`, rebuild and redeploy the
+> proxy, and on Swarm force the service to adopt the new image
+> (`docker service update --image <repo>:<tag> --force <stack>_rbac-proxy`) —
+> `docker stack deploy` will not re-pull a tag the node has already cached.
+> (A `400 Bad Request` on the *external* port, e.g. `2376`, is unrelated: that
+> is the mTLS listener rejecting plaintext HTTP. `/startbackup` is
+> internal-listener-only by design.)
+
 ## Disaster-recovery bundle (database + CA)
 
 `--include-ca` embeds the client CA cert **and private key** in the artifact so
