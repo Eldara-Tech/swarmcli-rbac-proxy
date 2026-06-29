@@ -646,7 +646,7 @@ func main() {
 	// proxy data plane. It reuses the guard for stack-label resolution.
 	rbacMW := api.NewRBACMiddleware(rbacStore, auditStore, guard)
 
-	userHandler := api.NewUserHandler(userStore, ca, auditStore)
+	userHandler := api.NewUserHandler(userStore, rbacStore, auditStore, cfg.ExternalURL)
 	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL, auditStore)
 	meHandler := api.NewMeHandler()
 	roleHandler := api.NewRoleHandler(rbacStore, userStore, auditStore)
@@ -731,21 +731,26 @@ func main() {
 	// MarkInternalRequest internally). wrapRBAC enforces role-based access
 	// (external only; no-op internally and when mTLS is off). wrapExec applies
 	// the protected-stack exec/forward guard (no-op on the internal listener).
-	registerRoutes := func(mux *http.ServeMux, internal bool, wrapProxy, wrapRBAC, wrapExec func(http.Handler) http.Handler) {
-		tok := cfg.AdminToken
+	registerRoutes := func(mux *http.ServeMux, internal bool, wrapProxy, wrapRBAC, wrapExec, wrapAdmin func(http.Handler) http.Handler) {
 		mountControlPlane(mux, internal, userStore, auditStore, backup.DefaultDir(cfg))
-		mux.Handle("/api/v1/users", api.RequireToken(tok, userHandler))
-		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(tok, http.HandlerFunc(userHandler.Delete)))
+		// Management plane (users / roles / bindings). wrapAdmin authorizes the
+		// caller: the admin bearer token OR (external listener) an mTLS-
+		// authenticated admin, so an admin can manage users from the TUI — which
+		// carries a client cert but no bearer token — while the bearer path keeps
+		// CLI/bootstrap/internal-listener access. See api.RequireAdminOrToken.
+		mux.Handle("/api/v1/users", wrapAdmin(userHandler))
+		mux.Handle("POST /api/v1/users/{username}/regenerate-token", wrapAdmin(http.HandlerFunc(userHandler.RegenerateToken)))
+		mux.Handle("PATCH /api/v1/users/{username}", wrapAdmin(http.HandlerFunc(userHandler.Update)))
+		mux.Handle("DELETE /api/v1/users/{username}", wrapAdmin(http.HandlerFunc(userHandler.Delete)))
 		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
-		// RBAC management plane — admin-token protected, like user management.
-		mux.Handle("GET /api/v1/roles", api.RequireToken(tok, http.HandlerFunc(roleHandler.List)))
-		mux.Handle("POST /api/v1/roles", api.RequireToken(tok, http.HandlerFunc(roleHandler.Create)))
-		mux.Handle("GET /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Get)))
-		mux.Handle("PUT /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Update)))
-		mux.Handle("DELETE /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Delete)))
-		mux.Handle("GET /api/v1/bindings", api.RequireToken(tok, http.HandlerFunc(bindingHandler.List)))
-		mux.Handle("POST /api/v1/bindings", api.RequireToken(tok, http.HandlerFunc(bindingHandler.Create)))
-		mux.Handle("DELETE /api/v1/bindings/{id}", api.RequireToken(tok, http.HandlerFunc(bindingHandler.Delete)))
+		mux.Handle("GET /api/v1/roles", wrapAdmin(http.HandlerFunc(roleHandler.List)))
+		mux.Handle("POST /api/v1/roles", wrapAdmin(http.HandlerFunc(roleHandler.Create)))
+		mux.Handle("GET /api/v1/roles/{name}", wrapAdmin(http.HandlerFunc(roleHandler.Get)))
+		mux.Handle("PUT /api/v1/roles/{name}", wrapAdmin(http.HandlerFunc(roleHandler.Update)))
+		mux.Handle("DELETE /api/v1/roles/{name}", wrapAdmin(http.HandlerFunc(roleHandler.Delete)))
+		mux.Handle("GET /api/v1/bindings", wrapAdmin(http.HandlerFunc(bindingHandler.List)))
+		mux.Handle("POST /api/v1/bindings", wrapAdmin(http.HandlerFunc(bindingHandler.Create)))
+		mux.Handle("DELETE /api/v1/bindings/{id}", wrapAdmin(http.HandlerFunc(bindingHandler.Delete)))
 		// Self-identity: cert-authenticated (wrapProxy = RequireClientCert on
 		// the external listener), so the caller's role is resolved from their
 		// mTLS CN. On the internal listener wrapProxy is MarkInternalRequest,
@@ -767,7 +772,10 @@ func main() {
 	if cfg.InternalListen != "" {
 		internalMux := http.NewServeMux()
 		noWrap := func(next http.Handler) http.Handler { return next }
-		registerRoutes(internalMux, true, api.MarkInternalRequest, noWrap, noWrap)
+		// Internal listener: trusted loopback. Management stays bearer-token
+		// protected exactly as before (no mTLS identity here for the admin path).
+		internalAdmin := func(next http.Handler) http.Handler { return api.RequireToken(cfg.AdminToken, next) }
+		registerRoutes(internalMux, true, api.MarkInternalRequest, noWrap, noWrap, internalAdmin)
 		go func() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
 			srv := &http.Server{
@@ -791,7 +799,13 @@ func main() {
 	if cfg.AgentManagerURL != "" && cfg.TLSClientCA == "" {
 		l().Warnw("exec guard active without mTLS: exec on protected stack will be blocked; non-protected exec may pass without identity; use PROXY_INTERNAL_LISTEN for local exec access")
 	}
-	registerRoutes(externalMux, false, proxyAuth, rbacWrap, guard.ExecGuard)
+	// External management auth: resolve identity (proxyAuth = RequireClientCert
+	// when mTLS is on) then admit the admin bearer token OR an mTLS-authenticated
+	// admin. Without mTLS, proxyAuth is a no-op and only the bearer token admits.
+	externalAdmin := func(next http.Handler) http.Handler {
+		return proxyAuth(api.RequireAdminOrToken(cfg.AdminToken, rbacStore, auditStore, next))
+	}
+	registerRoutes(externalMux, false, proxyAuth, rbacWrap, guard.ExecGuard, externalAdmin)
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)

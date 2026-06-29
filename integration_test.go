@@ -4,7 +4,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -558,7 +560,7 @@ func TestIntegration_FrontendMTLS_ManagementAPINotWrapped(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil, nil)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "")))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -712,9 +714,61 @@ func TestBuildBackendTLS_CAOnly(t *testing.T) {
 	}
 }
 
+// fetchOnboardCert redeems a one-time onboard token over the given base URL and
+// returns the issued client certificate, mirroring how a new user onboards: GET
+// /api/v1/onboard/{token} yields a Docker-context tar from which the cert+key
+// are extracted. caPool trusts the proxy's server cert (no client cert needed —
+// the token is the auth).
+func fetchOnboardCert(t *testing.T, baseURL, token string, caPool *x509.CertPool) tls.Certificate {
+	t.Helper()
+	c := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: caPool}}}
+	resp, err := c.Get(baseURL + "/api/v1/onboard/" + token)
+	if err != nil {
+		t.Fatalf("onboard: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("onboard: status = %d, body = %s", resp.StatusCode, body)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read onboard tar: %v", err)
+	}
+	var certPEM, keyPEM []byte
+	tr := tar.NewReader(bytes.NewReader(data))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read tar: %v", err)
+		}
+		b, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("read tar entry: %v", err)
+		}
+		switch hdr.Name {
+		case "tls/docker/cert.pem":
+			certPEM = b
+		case "tls/docker/key.pem":
+			keyPEM = b
+		}
+	}
+	if certPEM == nil || keyPEM == nil {
+		t.Fatal("onboard tar missing cert.pem/key.pem")
+	}
+	kp, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("parse onboard cert+key: %v", err)
+	}
+	return kp
+}
+
 // TestIntegration_CreateUserWithCert_ThenMTLSAccess verifies the full flow:
-// admin creates a user → API returns a cert bundle → the returned cert
-// authenticates successfully through the mTLS proxy.
+// admin creates a user → API returns a one-time onboard token → redeeming it
+// yields a cert that authenticates successfully through the mTLS proxy.
 func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
 	ca := newTestCA(t)
 	serverCert := ca.issueCert(t, serverTemplate())
@@ -746,8 +800,10 @@ func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
 
+	_ = store.SeedDefaultRoles(context.Background(), s)
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer, nil)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "tcp://proxy:2376")))
+	mux.Handle("GET /api/v1/onboard/{token}", api.NewOnboardHandler(s, issuer, "tcp://proxy:2376", nil))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -786,27 +842,21 @@ func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
 		t.Fatalf("create user: status = %d, body = %s", createResp.StatusCode, body)
 	}
 
-	// Parse the cert bundle from the response.
+	// Parse the onboard token from the response, then redeem it for a context
+	// tar (the private key is generated proxy-side at onboard, never in create).
 	var resp struct {
-		Username    string `json:"username"`
-		Certificate *struct {
-			CertPEM string `json:"cert_pem"`
-			KeyPEM  string `json:"key_pem"`
-			CAPEM   string `json:"ca_pem"`
-		} `json:"certificate"`
+		OnboardToken string `json:"onboard_token"`
 	}
 	if err := json.NewDecoder(createResp.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.Certificate == nil {
-		t.Fatal("expected certificate bundle in response")
+	if resp.OnboardToken == "" {
+		t.Fatal("expected onboard_token in response")
 	}
 
-	// Step 2: Use the returned cert to authenticate through the mTLS proxy.
-	aliceCert, err := tls.X509KeyPair([]byte(resp.Certificate.CertPEM), []byte(resp.Certificate.KeyPEM))
-	if err != nil {
-		t.Fatalf("parse returned cert+key: %v", err)
-	}
+	// Step 2: Redeem the onboard token, then use the issued cert to authenticate
+	// through the mTLS proxy.
+	aliceCert := fetchOnboardCert(t, "https://"+ln.Addr().String(), resp.OnboardToken, caPool)
 	aliceClient := &http.Client{Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{
 			RootCAs:      caPool,
@@ -1661,7 +1711,7 @@ func TestIntegration_FrontendMTLS_NoCertManagementAPIAllowed(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, nil, nil)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "")))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -1737,8 +1787,10 @@ func TestIntegration_ExecGuard_MTLS_OnboardedUserBlocked(t *testing.T) {
 	backendAddr := startTCPServer(t, dockerMock())
 	b := backend{network: "tcp", address: backendAddr}
 
+	_ = store.SeedDefaultRoles(context.Background(), s)
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, issuer, nil)))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "tcp://proxy:2376")))
+	mux.Handle("GET /api/v1/onboard/{token}", api.NewOnboardHandler(s, issuer, "tcp://proxy:2376", nil))
 	mux.Handle("/", api.RequireClientCert(s, g.ExecGuard(newProxy(b))))
 
 	tlsCfg := &tls.Config{
@@ -1766,7 +1818,7 @@ func TestIntegration_ExecGuard_MTLS_OnboardedUserBlocked(t *testing.T) {
 
 	createReq, _ := http.NewRequest(http.MethodPost,
 		"https://"+addr+"/api/v1/users",
-		strings.NewReader(`{"username":"bob","role":"user"}`))
+		strings.NewReader(`{"username":"bob","role":"operator"}`))
 	createReq.Header.Set("Content-Type", "application/json")
 	createReq.Header.Set("Authorization", "Bearer secret")
 	createResp, err := adminClient.Do(createReq)
@@ -1779,27 +1831,19 @@ func TestIntegration_ExecGuard_MTLS_OnboardedUserBlocked(t *testing.T) {
 		t.Fatalf("create user: status = %d, body = %s", createResp.StatusCode, body)
 	}
 
-	// Step 2: Parse the cert bundle from the response.
+	// Step 2: Parse the onboard token and redeem it for bob's context tar.
 	var certResp struct {
-		Username    string `json:"username"`
-		Certificate *struct {
-			CertPEM string `json:"cert_pem"`
-			KeyPEM  string `json:"key_pem"`
-			CAPEM   string `json:"ca_pem"`
-		} `json:"certificate"`
+		OnboardToken string `json:"onboard_token"`
 	}
 	if err := json.NewDecoder(createResp.Body).Decode(&certResp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if certResp.Certificate == nil {
-		t.Fatal("expected certificate bundle in response")
+	if certResp.OnboardToken == "" {
+		t.Fatal("expected onboard_token in response")
 	}
 
-	// Step 3: Build bob's HTTP client with the returned cert.
-	bobCert, err := tls.X509KeyPair([]byte(certResp.Certificate.CertPEM), []byte(certResp.Certificate.KeyPEM))
-	if err != nil {
-		t.Fatalf("parse returned cert+key: %v", err)
-	}
+	// Step 3: Build bob's HTTP client with the onboarded cert.
+	bobCert := fetchOnboardCert(t, "https://"+addr, certResp.OnboardToken, caPool)
 	bobClient := &http.Client{Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{
 			RootCAs:      caPool,

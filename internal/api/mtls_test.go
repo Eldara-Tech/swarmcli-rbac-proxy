@@ -30,8 +30,10 @@ func (m *mockUserStore) GetUserByUsername(_ context.Context, username string) (*
 	}
 	return nil, store.ErrUserNotFound
 }
-func (m *mockUserStore) DeleteUser(_ context.Context, _ string) error         { return nil }
-func (m *mockUserStore) SetOnboardToken(_ context.Context, _, _ string) error { return nil }
+func (m *mockUserStore) DeleteUser(_ context.Context, _ string) error             { return nil }
+func (m *mockUserStore) SetUserEnabled(_ context.Context, _ string, _ bool) error { return nil }
+func (m *mockUserStore) SetUserRole(_ context.Context, _ string, _ string) error  { return nil }
+func (m *mockUserStore) SetOnboardToken(_ context.Context, _, _ string) error     { return nil }
 func (m *mockUserStore) ConsumeOnboardToken(_ context.Context, _ string) (*store.User, error) {
 	return nil, store.ErrTokenNotFound
 }

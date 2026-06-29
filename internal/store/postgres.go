@@ -214,6 +214,34 @@ func (s *PostgresStore) DeleteUser(ctx context.Context, username string) error {
 	return nil
 }
 
+func (s *PostgresStore) SetUserEnabled(ctx context.Context, username string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET enabled = $1, updated_at = $2 WHERE username = $3`,
+		enabled, time.Now().UTC(), username,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetUserRole(ctx context.Context, username string, role string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET role = $1, updated_at = $2 WHERE username = $3`,
+		role, time.Now().UTC(), username,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 func (s *PostgresStore) SetOnboardToken(ctx context.Context, username string, token string) error {
 	now := time.Now().UTC()
 	tag, err := s.pool.Exec(ctx,

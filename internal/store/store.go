@@ -30,6 +30,8 @@ type UserStore interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	DeleteUser(ctx context.Context, username string) error
+	SetUserEnabled(ctx context.Context, username string, enabled bool) error
+	SetUserRole(ctx context.Context, username string, role string) error
 	SetOnboardToken(ctx context.Context, username string, token string) error
 	ConsumeOnboardToken(ctx context.Context, token string) (*User, error)
 }
@@ -39,6 +41,7 @@ type AuditAction string
 
 const (
 	AuditUserCreated      AuditAction = "user.created"
+	AuditUserUpdated      AuditAction = "user.updated"
 	AuditUserDeleted      AuditAction = "user.deleted"
 	AuditCertIssued       AuditAction = "cert.issued"
 	AuditOnboardCompleted AuditAction = "onboard.completed"

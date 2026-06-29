@@ -292,4 +292,87 @@ func testRBACStoreContract(t *testing.T, newStore func() rbacTestStore) {
 			t.Fatalf("got %v, want ErrLastAdmin", err)
 		}
 	})
+
+	t.Run("CreateUserWithBinding_SyncsRole", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		if _, err := CreateUserWithBinding(ctx, s, s, "alice", RoleAdmin); err != nil {
+			t.Fatalf("CreateUserWithBinding: %v", err)
+		}
+		bindings, _ := s.ListBindingsForUser(ctx, "alice")
+		if len(bindings) != 1 || bindings[0].RoleName != RoleAdmin {
+			t.Fatalf("bindings = %+v, want [admin]", bindings)
+		}
+		isAdmin, err := UserIsAdmin(ctx, s, "alice")
+		if err != nil || !isAdmin {
+			t.Fatalf("UserIsAdmin = %v, %v; want true", isAdmin, err)
+		}
+		// A non-admin (legacy "user") binds to operator.
+		if _, err := CreateUserWithBinding(ctx, s, s, "bob", "user"); err != nil {
+			t.Fatal(err)
+		}
+		bb, _ := s.ListBindingsForUser(ctx, "bob")
+		if len(bb) != 1 || bb[0].RoleName != RoleOperator {
+			t.Fatalf("bob bindings = %+v, want [operator]", bb)
+		}
+	})
+
+	t.Run("DeleteUserChecked_CascadesAndGuardsLastAdmin", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		_, _ = CreateUserWithBinding(ctx, s, s, "root", RoleAdmin)
+		// Deleting the only admin is refused.
+		if err := DeleteUserChecked(ctx, s, s, "root"); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("got %v, want ErrLastAdmin", err)
+		}
+		// A non-admin deletes cleanly and its binding is cascaded.
+		_, _ = CreateUserWithBinding(ctx, s, s, "carol", RoleOperator)
+		if err := DeleteUserChecked(ctx, s, s, "carol"); err != nil {
+			t.Fatalf("delete carol: %v", err)
+		}
+		if bs, _ := s.ListBindingsForUser(ctx, "carol"); len(bs) != 0 {
+			t.Fatalf("carol bindings after delete = %+v, want none", bs)
+		}
+	})
+
+	t.Run("SetUserEnabledChecked_GuardsLastAdmin", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		_, _ = CreateUserWithBinding(ctx, s, s, "root", RoleAdmin)
+		if err := SetUserEnabledChecked(ctx, s, s, "root", false); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("got %v, want ErrLastAdmin", err)
+		}
+		// Second admin present: disabling the first is allowed.
+		_, _ = CreateUserWithBinding(ctx, s, s, "root2", RoleAdmin)
+		if err := SetUserEnabledChecked(ctx, s, s, "root", false); err != nil {
+			t.Fatalf("disable with second admin: %v", err)
+		}
+	})
+
+	t.Run("SetUserRoleChecked_SyncsAndGuardsLastAdmin", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		_, _ = CreateUserWithBinding(ctx, s, s, "root", RoleAdmin)
+		// Demoting the only admin is refused.
+		if err := SetUserRoleChecked(ctx, s, s, "root", RoleOperator); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("got %v, want ErrLastAdmin", err)
+		}
+		// Promote an operator to admin: User.Role and the binding both update.
+		_, _ = CreateUserWithBinding(ctx, s, s, "dave", RoleOperator)
+		if err := SetUserRoleChecked(ctx, s, s, "dave", RoleAdmin); err != nil {
+			t.Fatalf("promote dave: %v", err)
+		}
+		u, _ := s.GetUserByUsername(ctx, "dave")
+		if u.Role != RoleAdmin {
+			t.Errorf("User.Role = %q, want admin", u.Role)
+		}
+		bs, _ := s.ListBindingsForUser(ctx, "dave")
+		if len(bs) != 1 || bs[0].RoleName != RoleAdmin {
+			t.Errorf("dave bindings = %+v, want [admin]", bs)
+		}
+		// Unknown role is rejected.
+		if err := SetUserRoleChecked(ctx, s, s, "dave", "wizard"); !errors.Is(err, ErrRoleNotFound) {
+			t.Fatalf("got %v, want ErrRoleNotFound", err)
+		}
+	})
 }

@@ -43,7 +43,7 @@ When updating the Go version, keep these in sync:
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_BACKUP_DIR` (default-location backup dir for `swcproxy backup`/`/startbackup`; derived from the DB path when unset — set explicitly for postgres, which has no DB file), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables issuing client certs when a user redeems their onboard token at `GET /api/v1/onboard/{token}`), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_BACKUP_DIR` (default-location backup dir for `swcproxy backup`/`/startbackup`; derived from the DB path when unset — set explicitly for postgres, which has no DB file), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
 
 ## Agent-manager Forwarding
 
@@ -112,10 +112,24 @@ with it (deny-wins).
   | roles / bindings | — | — | * |
   | containers (raw run) / unmapped (incl. `/events`) | — | — | * |
 
-- **Management**: `/api/v1/roles` and `/api/v1/bindings` (admin-token protected,
-  `internal/api/roles.go`, `bindings.go`) and the `swcproxy role`/`binding` CLI.
-  Last-admin lockout is enforced (`ErrLastAdmin`): the last admin binding cannot
-  be deleted, and a role update that would remove the last admin is refused.
+- **Management**: `/api/v1/users`, `/api/v1/roles` and `/api/v1/bindings`
+  (`internal/api/users.go`, `roles.go`, `bindings.go`) and the `swcproxy
+  user`/`role`/`binding` CLI. **Authorization** (`RequireAdminOrToken`,
+  `internal/api/adminauth.go`): the admin bearer token (`PROXY_ADMIN_TOKEN`) OR,
+  on the external listener, an **mTLS-authenticated admin** — a caller whose
+  effective permissions grant `*`/`*` (`store.UserIsAdmin`). The mTLS path is
+  what lets an admin manage users from the TUI (which carries a client cert but
+  no bearer token); the bearer path keeps CLI/bootstrap/internal-listener access.
+  The internal (loopback) listener stays bearer-only. The admin predicate is the
+  same one the lockout logic uses, so "who may manage" and "who counts as admin"
+  never diverge — and a future migration to a first-class `users` RBAC resource
+  only changes that predicate, not the wire contract.
+- **Last-admin lockout** is enforced (`ErrLastAdmin`) across every path that
+  could remove admin: the last admin binding cannot be deleted, a role update
+  that would remove the last admin is refused, and (new) deleting / disabling /
+  demoting the last admin user is refused. A user delete cascades the user's
+  bindings (`DeleteUserChecked`), and a user cannot delete/disable/demote
+  **themselves** (the issue #230 restriction).
 
 ## Stack Resource Protection
 
@@ -206,9 +220,11 @@ swarm-rbac-proxy/
     api/
       auth.go           — RequireToken middleware (bearer token validation)
       auth_test.go      — auth middleware tests
+      adminauth.go      — RequireAdminOrToken: management-plane authz (admin bearer token OR mTLS-authenticated admin); lets an admin manage users from the TUI, which has a client cert but no bearer token
+      adminauth_test.go — admin-auth middleware tests (bearer / mTLS-admin / non-admin / no-identity)
       mtls.go           — RequireClientCert middleware (mTLS client cert → user lookup)
       mtls_test.go      — mTLS middleware unit tests
-      users.go          — UserHandler: POST/GET /api/v1/users, DELETE /api/v1/users/{username}
+      users.go          — UserHandler: GET/POST /api/v1/users, DELETE/PATCH /api/v1/users/{username}, POST .../regenerate-token (create binds a role + returns a one-time onboard token; delete/disable/demote guard self + last-admin)
       users_test.go     — handler tests using MemoryStore
       roles.go          — RoleHandler: CRUD /api/v1/roles (admin-token protected)
       bindings.go       — BindingHandler: list/create/delete /api/v1/bindings (admin-token protected)
@@ -246,11 +262,13 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 
 ## API Endpoints
 
-- `POST /api/v1/users` — Create user (`{"username":"alice","role":"admin"}` → 201 with user object; includes `certificate` bundle when `PROXY_TLS_CLIENT_CA_KEY` is set)
+- `POST /api/v1/users` — Create user (`{"username":"alice","role":"operator"}`; role ∈ {admin, operator, viewer}, default operator) → 201 `{"user":{…},"onboard_token":"<hex>","onboard_url":"<external>/api/v1/onboard/<token>"}`. Also creates the matching RBAC binding (admin→admin, operator→operator, viewer→viewer) so the legacy `User.Role` and the RBAC binding stay in sync. The private key is **not** returned — it is generated on the user's machine when they redeem the token at the onboard endpoint.
 - `GET /api/v1/users` — List all users (200, always returns array)
-- `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found)
-- `GET|POST /api/v1/roles`, `GET|PUT|DELETE /api/v1/roles/{name}` — RBAC role CRUD (admin-token protected). Built-in roles can't be deleted (409); in-use roles can't be deleted (409); updates that would remove the last admin are refused (409)
-- `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-token protected). Deleting the last admin binding is refused (409)
+- `PATCH /api/v1/users/{username}` — Update user (`{"enabled":false}` and/or `{"role":"viewer"}`) → 200 with the updated user. Refuses self-disable / self-role-change (409) and any change that would remove the last admin (409); a role change replaces the user's bindings and updates `User.Role` atomically.
+- `POST /api/v1/users/{username}/regenerate-token` — Issue a fresh one-time onboard token → 200 `{"onboard_token":…,"onboard_url":…}` (404 if user not found)
+- `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found). Refuses to delete the caller themselves (409) or the last admin (409), and cascades the user's role bindings.
+- `GET|POST /api/v1/roles`, `GET|PUT|DELETE /api/v1/roles/{name}` — RBAC role CRUD (admin-authorized: bearer token OR mTLS admin). Built-in roles can't be deleted (409); in-use roles can't be deleted (409); updates that would remove the last admin are refused (409)
+- `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-authorized). Deleting the last admin binding is refused (409)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
 - `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
 - `GET|POST /_swc/startbackup` (alias `/startbackup`) — **Internal listener only.** Triggers a database-only logical backup (never the CA, onboarding tokens always redacted), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`; `-N` suffix on same-second collision), and returns `{"result":"success","file":...,"path":...}`. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
@@ -289,7 +307,7 @@ does not preserve user connections, and the `--include-ca` DR bundle.
 
 ## Audit Log
 
-All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, and the logical-backup actions `backup.exported`, `backup.restored` (all recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
+All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.updated` (enable/disable/role change), `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, and the logical-backup actions `backup.exported`, `backup.restored` (all recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
 
 Each entry records: id, timestamp, actor (username/"cli"/"internal"/"anonymous"; "internal" marks an action triggered via the internal listener, e.g. `/startbackup`), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
 

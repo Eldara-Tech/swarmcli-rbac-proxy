@@ -366,3 +366,135 @@ func UpdateRoleChecked(ctx context.Context, us UserStore, rs RBACStore, r *Role)
 	}
 	return rs.UpdateRole(ctx, r)
 }
+
+// UserIsAdmin reports whether the user's effective permissions confer full
+// admin (the *,* wildcard). This is the authorization predicate for the
+// user/role/binding management plane — an mTLS-authenticated caller may manage
+// users iff this returns true. Kept consistent with the lockout definition
+// (rulesGrantAdmin) so "who may manage" and "who counts for lockout" never
+// diverge.
+func UserIsAdmin(ctx context.Context, rs RBACStore, username string) (bool, error) {
+	eff, err := GetEffectivePermissions(ctx, rs, username)
+	if err != nil {
+		return false, err
+	}
+	return rulesGrantAdmin(eff.Rules), nil
+}
+
+// bindingRoleForUserRole maps a legacy User.Role value to the RBAC role a user
+// should be bound to, matching MigrateLegacyRoles / cmdUserAdd: admin → admin,
+// an explicit built-in (operator/viewer) → itself, and any other value (the
+// legacy "user") → operator.
+func bindingRoleForUserRole(role string) string {
+	switch role {
+	case RoleAdmin, RoleOperator, RoleViewer:
+		return role
+	default:
+		return RoleOperator
+	}
+}
+
+// CreateUserWithBinding creates a user and a matching RBAC role binding in one
+// step, keeping the legacy User.Role and the RBAC binding in sync (the
+// invariant the protected-stack admin gate and the RBAC engine both rely on).
+// Used by both the HTTP create handler and the swcproxy CLI so the two paths
+// cannot drift. Returns the created user with ID/timestamps populated.
+func CreateUserWithBinding(ctx context.Context, us UserStore, rs RBACStore, username, role string) (*User, error) {
+	u := &User{Username: username, Role: role}
+	if err := us.CreateUser(ctx, u); err != nil {
+		return nil, err
+	}
+	bind := &RoleBinding{Username: username, RoleName: bindingRoleForUserRole(role)}
+	if err := rs.CreateBinding(ctx, bind); err != nil && !errors.Is(err, ErrBindingExists) {
+		return u, err
+	}
+	return u, nil
+}
+
+// DeleteUserChecked deletes a user, cascading their role bindings, but refuses
+// (ErrLastAdmin) when doing so would leave no enabled admin. Replaces the raw
+// store DeleteUser in handlers/CLI so a user deletion can never orphan bindings
+// or strip the last admin (the bare store method does neither).
+func DeleteUserChecked(ctx context.Context, us UserStore, rs RBACStore, username string) error {
+	admins, err := computeAdmins(ctx, us, rs, nil, "")
+	if err != nil {
+		return err
+	}
+	delete(admins, username) // simulate the removal
+	if len(admins) == 0 {
+		return ErrLastAdmin
+	}
+	// Cascade bindings first: the worst case on a partial failure is a user with
+	// no bindings (default-deny), never an orphaned binding granting access.
+	bindings, err := rs.ListBindingsForUser(ctx, username)
+	if err != nil {
+		return err
+	}
+	for _, b := range bindings {
+		if err := rs.DeleteBinding(ctx, b.ID); err != nil && !errors.Is(err, ErrBindingNotFound) {
+			return err
+		}
+	}
+	return us.DeleteUser(ctx, username)
+}
+
+// SetUserEnabledChecked toggles a user's enabled flag but refuses
+// (ErrLastAdmin) when disabling would leave no enabled admin (a disabled user
+// cannot authenticate, so it must not be the last one standing). Enabling is
+// always allowed.
+func SetUserEnabledChecked(ctx context.Context, us UserStore, rs RBACStore, username string, enabled bool) error {
+	if !enabled {
+		admins, err := computeAdmins(ctx, us, rs, nil, "")
+		if err != nil {
+			return err
+		}
+		delete(admins, username)
+		if len(admins) == 0 {
+			return ErrLastAdmin
+		}
+	}
+	return us.SetUserEnabled(ctx, username, enabled)
+}
+
+// SetUserRoleChecked changes a user's role, keeping the legacy User.Role and
+// the RBAC binding in sync (all existing bindings are replaced by a single
+// binding to the new role). It refuses (ErrLastAdmin) when the change would
+// leave no enabled admin, and (ErrRoleNotFound) when the target role does not
+// exist.
+func SetUserRoleChecked(ctx context.Context, us UserStore, rs RBACStore, username, role string) error {
+	newRole, err := rs.GetRole(ctx, role)
+	if err != nil {
+		return err
+	}
+	u, err := us.GetUserByUsername(ctx, username)
+	if err != nil {
+		return err
+	}
+	// Replacing all of this user's bindings with the single new role means they
+	// hold admin iff the new role grants it and they are enabled.
+	admins, err := computeAdmins(ctx, us, rs, nil, "")
+	if err != nil {
+		return err
+	}
+	if u.Enabled && rulesGrantAdmin(newRole.Rules) {
+		admins[username] = true
+	} else {
+		delete(admins, username)
+	}
+	if len(admins) == 0 {
+		return ErrLastAdmin
+	}
+	if err := us.SetUserRole(ctx, username, role); err != nil {
+		return err
+	}
+	existing, err := rs.ListBindingsForUser(ctx, username)
+	if err != nil {
+		return err
+	}
+	for _, b := range existing {
+		if err := rs.DeleteBinding(ctx, b.ID); err != nil && !errors.Is(err, ErrBindingNotFound) {
+			return err
+		}
+	}
+	return rs.CreateBinding(ctx, &RoleBinding{Username: username, RoleName: role})
+}
