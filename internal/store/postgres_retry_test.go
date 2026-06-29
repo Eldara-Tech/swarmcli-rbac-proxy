@@ -56,3 +56,17 @@ func TestNewPostgresStoreWithRetry_ContextCancel(t *testing.T) {
 		t.Fatal("expected error when context is cancelled, got nil")
 	}
 }
+
+func TestNewPostgresStoreWithRetry_BadDSN(t *testing.T) {
+	// A malformed DSN can never become reachable, so it must fail fast even with
+	// a long timeout rather than retrying for the whole window.
+	start := time.Now()
+	s, err := NewPostgresStoreWithRetry(context.Background(), "://not a dsn", 30*time.Second)
+	if err == nil {
+		s.Close()
+		t.Fatal("expected error for malformed DSN, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("malformed DSN took %s; expected fail-fast (no retry loop)", elapsed)
+	}
+}

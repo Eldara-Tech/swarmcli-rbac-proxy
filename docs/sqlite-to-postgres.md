@@ -82,10 +82,13 @@ database.
 
 ## Rollback
 
-The migration only reads the SQLite source (it is never modified or deleted), so
-rolling back is reverting `PROXY_STORE`/`PROXY_DATABASE_*` to the SQLite settings
-and redeploying. Any writes made against PostgreSQL after cut-over are not
-reflected back into the SQLite file — keep the maintenance window tight.
+`swcproxy migrate` never writes user, role, or audit data back to the SQLite
+source, so rolling back is just reverting `PROXY_STORE`/`PROXY_DATABASE_*` to the
+SQLite settings and redeploying. (Opening the source does switch it to WAL mode
+and create `-wal`/`-shm` sidecar files, so it must sit on a writable filesystem;
+copy the `.db` beforehand if you want a byte-identical rollback artifact.) Any
+writes made against PostgreSQL after cut-over are not reflected back into the
+SQLite file — keep the maintenance window tight.
 
 ## Notes
 

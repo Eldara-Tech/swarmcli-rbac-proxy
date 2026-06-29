@@ -272,7 +272,7 @@ func TestLoad_OnboardingTokenTTL(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.OnboardingTokenTTL != 2*time.Hour {
+		if cfg.OnboardingTokenTTL != Duration(2*time.Hour) {
 			t.Errorf("OnboardingTokenTTL = %s, want 2h", cfg.OnboardingTokenTTL)
 		}
 	})
@@ -318,8 +318,14 @@ func TestLoad_DatabaseConnectTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.DatabaseConnectTimeout != 5*time.Second {
+		if cfg.DatabaseConnectTimeout != Duration(5*time.Second) {
 			t.Errorf("DatabaseConnectTimeout = %s, want 5s", cfg.DatabaseConnectTimeout)
+		}
+	})
+	t.Run("negative is rejected", func(t *testing.T) {
+		t.Setenv("PROXY_DATABASE_CONNECT_TIMEOUT", "-5s")
+		if _, err := Load(""); err == nil {
+			t.Fatal("expected error for negative PROXY_DATABASE_CONNECT_TIMEOUT")
 		}
 	})
 	t.Run("zero falls back to default", func(t *testing.T) {
@@ -336,6 +342,44 @@ func TestLoad_DatabaseConnectTimeout(t *testing.T) {
 		t.Setenv("PROXY_DATABASE_CONNECT_TIMEOUT", "not-a-duration")
 		if _, err := Load(""); err == nil {
 			t.Fatal("expected parse error")
+		}
+	})
+}
+
+func TestLoad_JSONDurations(t *testing.T) {
+	t.Run("duration strings decode", func(t *testing.T) {
+		p := writeJSON(t, `{"onboarding_token_ttl": "12h", "database_connect_timeout": "45s"}`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.OnboardingTokenTTL != Duration(12*time.Hour) {
+			t.Errorf("OnboardingTokenTTL = %s, want 12h", cfg.OnboardingTokenTTL)
+		}
+		if cfg.DatabaseConnectTimeout != Duration(45*time.Second) {
+			t.Errorf("DatabaseConnectTimeout = %s, want 45s", cfg.DatabaseConnectTimeout)
+		}
+	})
+	t.Run("nanosecond number still decodes", func(t *testing.T) {
+		p := writeJSON(t, `{"database_connect_timeout": 5000000000}`)
+		cfg, err := Load(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DatabaseConnectTimeout != Duration(5*time.Second) {
+			t.Errorf("DatabaseConnectTimeout = %s, want 5s", cfg.DatabaseConnectTimeout)
+		}
+	})
+	t.Run("invalid duration string is rejected", func(t *testing.T) {
+		p := writeJSON(t, `{"database_connect_timeout": "not-a-duration"}`)
+		if _, err := Load(p); err == nil {
+			t.Fatal("expected error for invalid duration string")
+		}
+	})
+	t.Run("negative duration is rejected", func(t *testing.T) {
+		p := writeJSON(t, `{"database_connect_timeout": "-5s"}`)
+		if _, err := Load(p); err == nil {
+			t.Fatal("expected error for negative database_connect_timeout")
 		}
 	})
 }

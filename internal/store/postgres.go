@@ -137,11 +137,22 @@ func NewPostgresStoreWithRetry(ctx context.Context, connString string, timeout t
 	if timeout <= 0 {
 		return NewPostgresStore(ctx, connString)
 	}
+	// A malformed DSN never becomes reachable — fail fast instead of retrying a
+	// deterministic parse error for the whole timeout window.
+	if _, err := pgxpool.ParseConfig(connString); err != nil {
+		return nil, err
+	}
 	deadline := time.Now().Add(timeout)
 	const maxBackoff = 5 * time.Second
 	backoff := 500 * time.Millisecond
 	for attempt := 1; ; attempt++ {
-		s, err := NewPostgresStore(ctx, connString)
+		// Bound each attempt by the shared deadline: pgxpool connects lazily
+		// inside NewPostgresStore (the first Exec), so against a black-holed host
+		// a single attempt would otherwise block on the OS TCP timeout and
+		// overrun `timeout` by minutes.
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		s, err := NewPostgresStore(attemptCtx, connString)
+		cancel()
 		if err == nil {
 			return s, nil
 		}

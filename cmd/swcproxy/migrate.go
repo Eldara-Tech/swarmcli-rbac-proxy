@@ -84,9 +84,15 @@ func runMigrateCommand(args []string) {
 	}
 
 	// Guard the empty-source footgun: NewSQLiteStore would otherwise create a
-	// fresh (empty) database from a typo'd path and "migrate" nothing.
-	if _, err := os.Stat(o.sqlitePath); err != nil {
+	// fresh (empty) database from a typo'd path and "migrate" nothing. Require a
+	// regular file so a directory or FIFO can't slip through (a FIFO would make
+	// the sqlite open block indefinitely).
+	info, err := os.Stat(o.sqlitePath)
+	if err != nil {
 		fatal("source sqlite database %q: %v", o.sqlitePath, err)
+	}
+	if !info.Mode().IsRegular() {
+		fatal("source sqlite database %q is not a regular file", o.sqlitePath)
 	}
 
 	ctx := context.Background()
@@ -110,12 +116,31 @@ func runMigrateCommand(args []string) {
 		fatal("export from sqlite: %v", err)
 	}
 
-	existing, err := dst.Export(ctx)
-	if err != nil {
-		fatal("inspect destination: %v", err)
-	}
-	if len(existing.Users) > 0 && !o.force {
-		fatal("destination already has %d users; pass --force to replace them", len(existing.Users))
+	// Refuse a non-empty destination unless --force. Check users, roles and
+	// bindings — not the audit log, which Restore only appends to — because
+	// Restore(replace=false) does plain INSERTs and aborts on the first
+	// unique-key collision. A server that ever booted against this database
+	// seeded the built-in roles, so a users-only check would wave that case
+	// through and then fail mid-Restore with an opaque "role already exists"
+	// instead of this hint. ListUsers/Roles/Bindings also avoid loading the
+	// (potentially huge) audit log that dst.Export would pull into memory.
+	if !o.force {
+		users, err := dst.ListUsers(ctx)
+		if err != nil {
+			fatal("inspect destination: %v", err)
+		}
+		roles, err := dst.ListRoles(ctx)
+		if err != nil {
+			fatal("inspect destination: %v", err)
+		}
+		bindings, err := dst.ListBindings(ctx)
+		if err != nil {
+			fatal("inspect destination: %v", err)
+		}
+		if len(users)+len(roles)+len(bindings) > 0 {
+			fatal("destination is not empty (%d users, %d roles, %d bindings); pass --force to replace it",
+				len(users), len(roles), len(bindings))
+		}
 	}
 
 	// One transaction across users, audit, roles and bindings: a failure leaves
@@ -124,12 +149,14 @@ func runMigrateCommand(args []string) {
 		fatal("migrate: %v", err)
 	}
 
-	_ = dst.RecordAudit(ctx, &store.AuditEntry{
+	if err := dst.RecordAudit(ctx, &store.AuditEntry{
 		Actor: "cli", Action: store.AuditDBMigrated,
 		Resource: "migrate", Status: "success",
 		Detail: fmt.Sprintf("source=sqlite:%s users=%d audit=%d roles=%d bindings=%d force=%v",
 			o.sqlitePath, len(data.Users), len(data.Audit), len(data.Roles), len(data.Bindings), o.force),
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: migration committed but recording the db.migrated audit entry failed: %v\n", err)
+	}
 
 	fmt.Fprintf(os.Stderr, "Migrated %d users, %d audit entries, %d roles and %d bindings from %s to postgres\n",
 		len(data.Users), len(data.Audit), len(data.Roles), len(data.Bindings), o.sqlitePath)
