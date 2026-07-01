@@ -19,7 +19,7 @@ RUN go build -trimpath -ldflags="-s -w \
       -X swarm-rbac-proxy/internal/version.Date=${DATE}" \
       -o /swcproxy ./cmd/swcproxy
 
-FROM alpine:3.23
+FROM alpine:3.24
 COPY --from=build /proxy /proxy
 COPY --from=build /swcproxy /usr/local/bin/swcproxy
 COPY welcome.sh /etc/profile.d/welcome.sh
