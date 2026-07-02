@@ -74,6 +74,11 @@ func classifyRequest(method, path string) (rbacRoute, bool) {
 		return rbacRoute{resource: store.ResourcePortForward, verb: store.VerbCreate}, true
 	case path == "/v1/logs" || strings.HasPrefix(path, "/v1/logs/"):
 		return rbacRoute{resource: store.ResourceStackLogs, verb: store.VerbGet}, true
+	case path == "/v1/containers" || strings.HasPrefix(path, "/v1/containers/"):
+		// Read-only per-container health/ports inventory. Authorized as a
+		// services read (viewer-allowed) — it reports on service replicas and,
+		// like GET /v1/volumes, exposes no mutation.
+		return rbacRoute{resource: store.ResourceServices, verb: store.VerbList}, true
 	case path == "/v1/volumes" || strings.HasPrefix(path, "/v1/volumes/"):
 		return mapAgentVolume(method, path)
 	}
