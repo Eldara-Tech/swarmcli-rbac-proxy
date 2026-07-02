@@ -71,6 +71,7 @@ func TestMapRequest(t *testing.T) {
 		{"agent forward", "GET", "/v1/forward", store.ResourcePortForward, store.VerbCreate, false},
 		{"agent logs", "GET", "/v1/logs", store.ResourceStackLogs, store.VerbGet, false},
 		{"agent containers", "GET", "/v1/containers", store.ResourceServices, store.VerbList, false},
+		{"agent containers non-GET is admin-only", "POST", "/v1/containers", resourceUnmapped, store.VerbCreate, false},
 		{"agent volumes list", "GET", "/v1/volumes", store.ResourceVolumes, store.VerbList, false},
 		{"agent volume create", "POST", "/v1/volumes", store.ResourceVolumes, store.VerbCreate, false},
 		{"agent volume prune", "POST", "/v1/volumes/prune", store.ResourceVolumes, store.VerbDelete, false},
