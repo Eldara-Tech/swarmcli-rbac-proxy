@@ -458,12 +458,61 @@ func checkExternalListenerAuth(cfg config.Config, allowInsecure bool) error {
 	return nil
 }
 
+// runHealthcheck is the `healthcheck` subcommand used as the stack
+// healthcheck.test. It probes the proxy's own plaintext internal listener
+// (PROXY_INTERNAL_LISTEN) for a 200 from /_swc/version and returns a process
+// exit code (0 = healthy). The external listener is mTLS, so the loopback
+// internal listener is the only local path that needs no client cert — the same
+// listener rbac-proxy already exposes for its admin control plane.
+//
+// The listener address is read straight from PROXY_INTERNAL_LISTEN, not via
+// config.Load: a liveness probe must not depend on unrelated config (config.Load
+// also reads the admin-token secret), which could fail and flap the container
+// unhealthy while the proxy itself is fine. The stack sets the healthcheck and
+// this env together, so they never diverge.
+func runHealthcheck() int {
+	addr := os.Getenv("PROXY_INTERNAL_LISTEN")
+	if addr == "" {
+		fmt.Fprintln(os.Stderr, "healthcheck: PROXY_INTERNAL_LISTEN not set")
+		return 1
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: bad PROXY_INTERNAL_LISTEN %q: %v\n", addr, err)
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	if err := healthProbe("http://" + net.JoinHostPort(host, port) + "/_swc/version"); err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// healthProbe GETs url with a short timeout and returns nil only on HTTP 200.
+func healthProbe(url string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "--version", "-v", "version":
 			fmt.Println(version.String())
 			return
+		case "healthcheck":
+			os.Exit(runHealthcheck())
 		}
 	}
 

@@ -79,7 +79,11 @@ with it (deny-wins).
 - **Mapping**: `internal/api/rbacmap.go` maps each request to one
   `{resource, verb}` (e.g. `GET /services`→`services:list`,
   `POST /services/{id}/update`→`services:update`, `/v1/exec`→`exec:create`,
-  `GET /swarm`→`swarm:get`). Reads are authorized too. Unmapped/raw ops
+  `GET /swarm`→`swarm:get`, `GET /v1/containers`→`services:list` — the
+  read-only per-container health/ports inventory, which the agent-manager
+  scopes to swarm service-task containers, so its disclosure matches
+  `GET /tasks` (also `services:list`); non-GET `/v1/containers` falls through
+  to unmapped/admin-only). Reads are authorized too. Unmapped/raw ops
   (`POST /containers/create`) map to the `unmapped` sentinel → admin-only.
 - **Stacks via label**: there is no `/stacks` Docker endpoint — a stack deploy
   is labeled `services`/`networks`/`configs`/`secrets` creates. A **mutating**
@@ -178,7 +182,7 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, internal-only /_swc/ control-plane (startbackup + version, branded 404) via mountControlPlane
+  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, `healthcheck` subcommand (Docker healthcheck self-probe: GETs the internal listener's /_swc/version for a 200), internal-only /_swc/ control-plane (startbackup + version, branded 404) via mountControlPlane
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
   .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy

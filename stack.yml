@@ -1,6 +1,12 @@
 services:
   proxy:
     image: eldaratech/swarmcli-rbac-proxy:latest
+    healthcheck:
+      test: ["CMD", "/proxy", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     deploy:
       placement:
         constraints: [node.role == manager]
