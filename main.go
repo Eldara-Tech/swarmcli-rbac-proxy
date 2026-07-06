@@ -458,12 +458,61 @@ func checkExternalListenerAuth(cfg config.Config, allowInsecure bool) error {
 	return nil
 }
 
+// runHealthcheck is the `healthcheck` subcommand used as the stack
+// healthcheck.test. It probes the proxy's own plaintext internal listener
+// (PROXY_INTERNAL_LISTEN) for a 200 from /_swc/version and returns a process
+// exit code (0 = healthy). The external listener is mTLS, so the loopback
+// internal listener is the only local path that needs no client cert — the same
+// listener rbac-proxy already exposes for its admin control plane. Reading
+// cfg.InternalListen (not a hardcoded 127.0.0.1:2375) guarantees the probe
+// targets whatever the server actually binds.
+func runHealthcheck() int {
+	cfg, err := config.Load(os.Getenv("PROXY_CONFIG"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: config: %v\n", err)
+		return 1
+	}
+	if cfg.InternalListen == "" {
+		fmt.Fprintln(os.Stderr, "healthcheck: PROXY_INTERNAL_LISTEN not set")
+		return 1
+	}
+	host, port, err := net.SplitHostPort(cfg.InternalListen)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: bad internal listen %q: %v\n", cfg.InternalListen, err)
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	if err := healthProbe("http://" + net.JoinHostPort(host, port) + "/_swc/version"); err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// healthProbe GETs url with a short timeout and returns nil only on HTTP 200.
+func healthProbe(url string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "--version", "-v", "version":
 			fmt.Println(version.String())
 			return
+		case "healthcheck":
+			os.Exit(runHealthcheck())
 		}
 	}
 

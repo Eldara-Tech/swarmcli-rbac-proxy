@@ -182,7 +182,7 @@ If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK
 
 ```
 swarm-rbac-proxy/
-  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, internal-only /_swc/ control-plane (startbackup + version, branded 404) via mountControlPlane
+  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, `healthcheck` subcommand (Docker healthcheck self-probe: GETs the internal listener's /_swc/version for a 200), internal-only /_swc/ control-plane (startbackup + version, branded 404) via mountControlPlane
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
   .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy
