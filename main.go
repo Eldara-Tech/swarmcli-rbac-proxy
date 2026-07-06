@@ -463,22 +463,22 @@ func checkExternalListenerAuth(cfg config.Config, allowInsecure bool) error {
 // (PROXY_INTERNAL_LISTEN) for a 200 from /_swc/version and returns a process
 // exit code (0 = healthy). The external listener is mTLS, so the loopback
 // internal listener is the only local path that needs no client cert — the same
-// listener rbac-proxy already exposes for its admin control plane. Reading
-// cfg.InternalListen (not a hardcoded 127.0.0.1:2375) guarantees the probe
-// targets whatever the server actually binds.
+// listener rbac-proxy already exposes for its admin control plane.
+//
+// The listener address is read straight from PROXY_INTERNAL_LISTEN, not via
+// config.Load: a liveness probe must not depend on unrelated config (config.Load
+// also reads the admin-token secret), which could fail and flap the container
+// unhealthy while the proxy itself is fine. The stack sets the healthcheck and
+// this env together, so they never diverge.
 func runHealthcheck() int {
-	cfg, err := config.Load(os.Getenv("PROXY_CONFIG"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "healthcheck: config: %v\n", err)
-		return 1
-	}
-	if cfg.InternalListen == "" {
+	addr := os.Getenv("PROXY_INTERNAL_LISTEN")
+	if addr == "" {
 		fmt.Fprintln(os.Stderr, "healthcheck: PROXY_INTERNAL_LISTEN not set")
 		return 1
 	}
-	host, port, err := net.SplitHostPort(cfg.InternalListen)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "healthcheck: bad internal listen %q: %v\n", cfg.InternalListen, err)
+		fmt.Fprintf(os.Stderr, "healthcheck: bad PROXY_INTERNAL_LISTEN %q: %v\n", addr, err)
 		return 1
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
