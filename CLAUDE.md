@@ -309,6 +309,32 @@ file copy. The client CA lives in Docker secrets, **not** the database — see
 [docs/backup-restore.md](docs/backup-restore.md) for why a DB restore alone
 does not preserve user connections, and the `--include-ca` DR bundle.
 
+## Logging
+
+zap, via `internal/log` (package `proxylog`): `Init(mode, level)` for the
+server, `InitTo(w, mode, level)` for the `swcproxy` CLI so that command output
+on stdout (a `backup` JSON artifact) stays clean. `dev` mode is a console
+encoder, anything else is JSON; the level is `debug|info|warn|error`, defaulting
+to debug in dev and info in prod. `L()` returns a no-op logger if `Init` was
+never called, so a missed initialisation is silence rather than a nil panic.
+
+This already meets the ecosystem logging contract, and nothing here needs to
+change — the note exists so the next person does not "fix" it into slog for
+consistency's sake. What the daemons across the repos agree on is the contract,
+not the library:
+
+- structured key/value pairs, never a formatted sentence
+- an ISO-8601 timestamp, a level, and a message field
+- the level and the output format both selectable at deploy time
+- JSON available for whatever ships the logs, human-readable the default
+- one logger per process, on one stream
+
+swarmcli-cd meets it with `log/slog` and `--log-level` / `--log-format` flags;
+swarmcli-agent meets it with `log/slog` and `AGENT_LOG_*` environment variables
+(it parses no flags). swarmcli and swarmcli-be stay on zap with lumberjack file
+rotation under `~/.local/state`, because a TUI cannot log to the terminal it
+owns — that is the one deliberate exception to "on one stream".
+
 ## Audit Log
 
 All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.updated` (enable/disable/role change), `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, and the logical-backup actions `backup.exported`, `backup.restored` (all recorded on success). Auth events (mTLS success/failure) are logged via zap only, not persisted.
