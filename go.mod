@@ -7,7 +7,7 @@ toolchain go1.26.5
 require (
 	github.com/jackc/pgx/v5 v5.10.0
 	go.uber.org/zap v1.28.0
-	modernc.org/sqlite v1.54.0
+	modernc.org/sqlite v1.55.0
 )
 
 require (
