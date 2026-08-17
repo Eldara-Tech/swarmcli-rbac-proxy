@@ -2,7 +2,7 @@ module swarm-rbac-proxy
 
 go 1.26
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
