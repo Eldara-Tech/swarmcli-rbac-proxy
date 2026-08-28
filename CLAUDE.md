@@ -329,6 +329,21 @@ not the library:
 - JSON available for whatever ships the logs, human-readable the default
 - one logger per process, on one stream
 
+One line per request goes through the same logger (`accessLog`, `accesslog.go`):
+method, path, status, bytes, duration, remote IP and the mTLS caller. A **served**
+request logs at **debug** and anything the proxy refused or could not complete
+logs at **info** — so the default level shows only failures, and a full request
+trace is one `PROXY_LOG_LEVEL=debug` away. The onboarding token is a path
+segment, so `redactPath` keeps it out of the log; it is the only path that is
+redacted, because Docker resource IDs and filters are what make a line useful.
+
+The standard library's own loggers are wired into this one too, via
+`proxylog.StdErrorLogger` — `http.Server.ErrorLog` on every listener and
+`httputil.ReverseProxy.ErrorLog`. Unset, they write to `log.Default()`, which is
+a second stream in a second format that `PROXY_LOG_LEVEL` cannot reach, and is
+how the proxy used to emit unstructured `http: proxy error: …` lines alongside
+its JSON.
+
 swarmcli-cd meets it with `log/slog` and `--log-level` / `--log-format` flags;
 swarmcli-agent meets it with `log/slog` and `AGENT_LOG_*` environment variables
 (it parses no flags). swarmcli and swarmcli-be stay on zap with lumberjack file
