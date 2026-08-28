@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"swarm-rbac-proxy/internal/api"
@@ -197,7 +198,9 @@ func newProxy(b backend) http.Handler {
 				pr.Out.Host = "docker"
 			}
 		},
-		Transport: transport,
+		Transport:    transport,
+		ErrorLog:     proxylog.StdErrorLogger("proxy"),
+		ErrorHandler: proxyErrorHandler,
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -209,22 +212,88 @@ func newProxy(b backend) http.Handler {
 	})
 }
 
+// proxyErrorHandler replaces httputil.ReverseProxy's default, which logs every
+// failure through log.Default() as "http: proxy error: <err>" — a second,
+// unstructured stream that PROXY_LOG_LEVEL cannot reach.
+//
+// It also demotes the most common failure, which is not an error at all. A
+// client that hangs up before the daemon answers cancels the inbound request,
+// so the outbound RoundTrip fails with context.Canceled; the default handler
+// reports that at the same volume as a dead backend. It is routine — a `docker`
+// command interrupted, a poll that hit its own deadline — and reporting it as a
+// proxy failure buries the failures that are real. Nothing is written to the
+// response either: the caller that would read it is already gone.
+func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.Canceled) {
+		l().Debugw("client hung up before the upstream responded",
+			"method", r.Method, "path", redactPath(r.URL.Path))
+		return
+	}
+	l().Errorw("proxy error", "error", err,
+		"method", r.Method, "path", redactPath(r.URL.Path))
+	w.WriteHeader(http.StatusBadGateway)
+}
+
+// Vars, not consts, so a test can shrink them: a test that had to wait out the
+// real windows would take an hour.
+var (
+	// upgradeIdleTimeout bounds a live exec/attach session with no traffic in
+	// either direction. It is long because an interactive shell left open is a
+	// legitimate thing to do.
+	upgradeIdleTimeout = 1 * time.Hour
+
+	// upgradeDrainTimeout bounds the backend half once the client half has
+	// ended — an idle window, reset by each chunk of output, not a cap on how
+	// long a command may run.
+	//
+	// At that point the caller has either finished sending stdin or gone away,
+	// and the two are indistinguishable here: both arrive as a FIN. So this is
+	// a trade between how long an abandoned session is held and how long a
+	// command may go silent after reading stdin to EOF before its output is
+	// judged never to be coming. Five minutes covers `cmd < file` shapes that
+	// think for a while, and still bounds a leaked session at a twelfth of what
+	// the idle timeout allowed.
+	upgradeDrainTimeout = 5 * time.Minute
+)
+
 // idleConn wraps a net.Conn and resets the deadline on each read/write,
 // providing an idle timeout that closes connections after inactivity.
+//
+// The timeout is atomic because handleUpgrade shortens it from the client half
+// of the session while the backend half is reading through it.
 type idleConn struct {
 	net.Conn
-	timeout time.Duration
+	timeout atomic.Int64 // idle window, in nanoseconds
+}
+
+func newIdleConn(c net.Conn, d time.Duration) *idleConn {
+	ic := &idleConn{Conn: c}
+	ic.timeout.Store(int64(d))
+	return ic
+}
+
+// shorten narrows the idle window and pushes the new one onto the connection
+// immediately. Storing alone would not be enough: a copy already parked in Read
+// holds the deadline it was given on entry, so without the SetReadDeadline here
+// the old window would have to expire before the new one could apply.
+func (c *idleConn) shorten(d time.Duration) {
+	c.timeout.Store(int64(d))
+	_ = c.SetReadDeadline(time.Now().Add(d))
+}
+
+func (c *idleConn) deadline() time.Time {
+	return time.Now().Add(time.Duration(c.timeout.Load()))
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetDeadline(c.deadline()); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(b)
 }
 
 func (c *idleConn) Write(b []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetDeadline(c.deadline()); err != nil {
 		return 0, err
 	}
 	return c.Conn.Write(b)
@@ -277,17 +346,40 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 		}
 	}
 
-	idleTimeout := 1 * time.Hour
-	client := &idleConn{clientConn, idleTimeout}
-	back := &idleConn{backConn, idleTimeout}
+	// Both windows are read once, here: the session's timings are settled when
+	// it starts, not re-read from package state by a goroutine mid-copy.
+	drain := upgradeDrainTimeout
+	client := newIdleConn(clientConn, upgradeIdleTimeout)
+	back := newIdleConn(backConn, upgradeIdleTimeout)
 
-	done := make(chan struct{})
+	// The two directions do not end together, and which one to wait for is the
+	// whole question.
+	//
+	// Waiting for both — the previous shape — meant an abandoned session sat
+	// here for the full idle timeout: the client half returns as soon as the
+	// caller goes away, but the daemon is never told, so it holds an idle shell
+	// open and the backward copy blocks on a read that will not come. One
+	// socket pair and two goroutines per abandoned exec, for an hour.
+	//
+	// Ending on the *first* half is wrong the other way: a caller that closes
+	// stdin cleanly (`echo x | docker exec -i …`) would have its output cut off
+	// mid-command.
+	//
+	// So: the client half half-closes the backend, which says "stdin is done"
+	// without ending the session, and arms a grace deadline so a session nobody
+	// is on the other end of expires in seconds rather than an hour. The
+	// session ends when the backend does, which is what "the command exited"
+	// actually looks like.
 	go func() {
-		io.Copy(client, back)
-		close(done)
+		_, _ = io.Copy(back, client)
+		if cw, ok := backConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = backConn.Close()
+		}
+		back.shorten(drain)
 	}()
-	io.Copy(back, client)
-	<-done
+	_, _ = io.Copy(client, back)
 }
 
 // mountControlPlane registers the proxy's control-plane routes under the
@@ -829,9 +921,10 @@ func main() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
 			srv := &http.Server{
 				Addr:              cfg.InternalListen,
-				Handler:           internalMux,
+				Handler:           accessLog(internalMux),
 				ReadHeaderTimeout: 10 * time.Second,
 				IdleTimeout:       120 * time.Second,
+				ErrorLog:          proxylog.StdErrorLogger("http-internal"),
 			}
 			if err := srv.ListenAndServe(); err != nil {
 				l().Fatalw("internal listener exited", "error", err)
@@ -876,10 +969,11 @@ func main() {
 
 		srv := &http.Server{
 			Addr:              listenAddr,
-			Handler:           externalMux,
+			Handler:           accessLog(externalMux),
 			TLSConfig:         tlsCfg,
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
+			ErrorLog:          proxylog.StdErrorLogger("http"),
 		}
 		if err := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil {
 			l().Fatalw("server exited", "error", err)
@@ -890,9 +984,10 @@ func main() {
 		}
 		srv := &http.Server{
 			Addr:              listenAddr,
-			Handler:           externalMux,
+			Handler:           accessLog(externalMux),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
+			ErrorLog:          proxylog.StdErrorLogger("http"),
 		}
 		if err := srv.ListenAndServe(); err != nil {
 			l().Fatalw("server exited", "error", err)
