@@ -145,7 +145,7 @@ func TestExtractIdentity_SANEmail(t *testing.T) {
 		Subject:        pkix.Name{CommonName: "fallback-cn"},
 		EmailAddresses: []string{"alice@example.com"},
 	}
-	got := extractIdentity(cert)
+	got := IdentityFromCert(cert)
 	if got != "alice@example.com" {
 		t.Errorf("got %q, want %q", got, "alice@example.com")
 	}
@@ -155,7 +155,7 @@ func TestExtractIdentity_CNFallback(t *testing.T) {
 	cert := &x509.Certificate{
 		Subject: pkix.Name{CommonName: "alice"},
 	}
-	got := extractIdentity(cert)
+	got := IdentityFromCert(cert)
 	if got != "alice" {
 		t.Errorf("got %q, want %q", got, "alice")
 	}
@@ -165,7 +165,7 @@ func TestExtractIdentity_EmptyCert(t *testing.T) {
 	cert := &x509.Certificate{
 		Subject: pkix.Name{CommonName: ""},
 	}
-	got := extractIdentity(cert)
+	got := IdentityFromCert(cert)
 	if got != "" {
 		t.Errorf("got %q, want empty string", got)
 	}

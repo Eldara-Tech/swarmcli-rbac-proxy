@@ -355,7 +355,7 @@ func TestIdleConn_TimeoutOnIdle(t *testing.T) {
 	defer server.Close()
 	defer client.Close()
 
-	ic := &idleConn{Conn: client, timeout: 50 * time.Millisecond}
+	ic := newIdleConn(client, 50*time.Millisecond)
 
 	// Write should succeed and reset deadline.
 	go func() {
@@ -380,7 +380,7 @@ func TestIdleConn_ActiveResetsPreventsTimeout(t *testing.T) {
 	defer server.Close()
 	defer client.Close()
 
-	ic := &idleConn{Conn: client, timeout: 100 * time.Millisecond}
+	ic := newIdleConn(client, 100*time.Millisecond)
 
 	// Continuous writes should keep resetting the deadline.
 	for i := 0; i < 3; i++ {

@@ -5,6 +5,7 @@ package proxylog
 
 import (
 	"io"
+	"log"
 	"os"
 	"strings"
 
@@ -137,4 +138,28 @@ func parseLogLevel(level, mode string) zapcore.Level {
 		}
 		return zap.InfoLevel
 	}
+}
+
+// zapWriter adapts an io.Writer to a zap level, for the standard library's
+// *log.Logger. log.Logger appends a newline that zap adds again, so it is
+// trimmed here.
+type zapWriter struct {
+	log func(args ...interface{})
+}
+
+func (w zapWriter) Write(p []byte) (int, error) {
+	w.log(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
+// StdErrorLogger returns a *log.Logger that writes into this package's logger
+// at error level, tagged with the given component.
+//
+// It exists for standard-library types that only accept a *log.Logger —
+// http.Server.ErrorLog and httputil.ReverseProxy.ErrorLog. Left unset, those
+// write to log.Default(): a second stream, in a second format, that
+// PROXY_LOG_LEVEL cannot reach. The contract this package meets says one logger
+// per process on one stream, so they have to be given this one.
+func StdErrorLogger(component string) *log.Logger {
+	return log.New(zapWriter{log: L().With("component", component).Error}, "", 0)
 }
