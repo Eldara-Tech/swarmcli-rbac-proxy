@@ -160,24 +160,46 @@ Protected resource types: `services`, `secrets`, `networks`, `volumes`, `configs
 
 ### Permission matrix
 
-| Operation on protected resource | Internal listener | External admin | External user |
-|---------------------------------|-------------------|----------------|---------------|
-| Read (GET)                      | allowed           | allowed        | allowed       |
-| Create (POST .../create)        | allowed           | blocked (403)  | blocked (403) |
-| Update (POST .../update)        | allowed           | allowed        | blocked (403) |
-| Delete (DELETE .../{id})        | allowed           | blocked (403)  | blocked (403) |
-| Exec/attach (protected stack)   | allowed           | allowed        | blocked (403) |
-| Swarm leave (POST /swarm/leave) | allowed           | blocked (403)  | blocked (403) |
+"External non-admin" is any authenticated caller whose role is not `admin` —
+`operator` or `viewer`. The guard keys on `admin` specifically, not on a
+role ranking.
+
+| Operation | Internal listener | External admin | External non-admin |
+|-----------|-------------------|----------------|--------------------|
+| Read (GET) — any resource | allowed | allowed | allowed |
+| Create (POST .../create) — protected stack | allowed | blocked (403) | blocked (403) |
+| Create (POST .../create) — other stack | allowed | allowed | allowed |
+| Create service — `TaskTemplate.Networks` attaches to protected overlay | allowed | blocked (403) | blocked (403) |
+| Update (POST .../update) — protected stack | allowed | allowed | blocked (403) |
+| Update (POST .../update) — other stack | allowed | allowed | allowed |
+| Update service — attaches a non-protected service to the protected overlay | allowed | blocked (403) | blocked (403) |
+| Network connect/disconnect — protected overlay | allowed | blocked (403) | blocked (403) |
+| Network connect/disconnect — other network | allowed | allowed | allowed |
+| Delete (DELETE .../{id}) — protected stack | allowed | blocked (403) | blocked (403) |
+| Delete (DELETE .../{id}) — other stack | allowed | allowed | allowed |
+| Exec/attach — protected-stack container | allowed | allowed | blocked (403) |
+| Exec/attach — non-protected container | allowed | allowed | allowed |
+| Port-forward (`GET /v1/forward`) — protected-stack task | allowed | blocked (403) | blocked (403) |
+| Port-forward (`GET /v1/forward`) — non-protected task | allowed | allowed | allowed |
+| Port-forward with `dest_addr` query param | allowed | blocked (400) | blocked (400) |
+| Volume read (`GET /v1/volumes...`) | allowed | allowed | allowed |
+| Volume mutate (create/delete/file delete/rename) — protected-stack volume | allowed | allowed | blocked (403) |
+| Volume mutate — non-protected volume | allowed | allowed | allowed |
+| Volume prune (`POST /v1/volumes/prune`) — bulk, node-wide | allowed | allowed | blocked (403) |
+| Swarm leave (POST /swarm/leave) | allowed | blocked (403) | blocked (403) |
 
 All operations on **non-protected** resources are allowed for all roles.
 
 **Why these restrictions:**
 
-- **Create blocked for all external users**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations.
-- **Update allowed for admins**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
-- **Delete blocked for all external users**: removing infrastructure services can make the cluster unmanageable. Only via internal listener.
-- **Exec/attach admin-only on protected stack**: shell access to infrastructure containers enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Regular users may still exec into non-protected containers.
-- **Swarm leave blocked for all external users**: tears down the entire cluster. Only via internal listener.
+- **Create blocked for all external callers on the protected stack**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
+- **Update allowed for admins on the protected stack**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
+- **Overlay-membership mutations blocked for every external role, admin included**: `TaskTemplate.Networks` attaching to the protected overlay on create/update, and `POST /networks/{id}/{connect,disconnect}` against it, all return `403` whatever the role. A compromised admin certificate therefore cannot bootstrap a pivot onto `agent-net`. The only legitimate ways to change overlay membership are the host Docker socket on a manager node, or the internal loopback listener. In-place updates of protected-stack services whose spec re-affirms an existing attachment still work — the check fires only when the target service is not itself on the protected stack.
+- **Delete blocked for all external callers on the protected stack**: removing infrastructure services can make the cluster unmanageable. Recoverable only via direct container access.
+- **Exec/attach admin-only on the protected stack**: shell access to infrastructure containers enables privilege escalation (for example direct database access via the `swcproxy` CLI). Non-admins may still exec into non-protected containers. An admin exec into a container already resident on the overlay is unaffected by the rule above — that guard's scope is membership, not traffic.
+- **Port-forward to the protected stack blocked for every role, admin included**: a raw-TCP relay to an infrastructure container is an exfiltration channel that outlives the per-request authorization model, since a forwarded socket can be reused indefinitely. Symmetric to the connect/disconnect block. Admins needing this must use the host Docker socket or the internal listener.
+- **Port-forward `dest_addr` rejected with 400**: the agent computes the destination from `container_id` itself, so honouring a client-supplied address would defeat the protected-stack task check. Both `agent-manager` and `agent` reject it defensively as well.
+- **Swarm leave blocked for all external callers**: it tears down the entire cluster. Only via the internal listener.
 
 If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
 
