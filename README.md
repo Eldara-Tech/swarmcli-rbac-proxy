@@ -134,10 +134,12 @@ When a user is created, `swcproxy` prints the `curl` command to share with the u
 - [Configuration reference](docs/configuration.md) — environment variables, JSON config, listener topology, stack protection
 - [API reference](docs/api.md) — management API endpoints with curl examples
 - [Security model](docs/security.md) — threat model, authentication layers, certificate lifecycle
+- [Architecture](docs/architecture.md) — the request chain, the dual listener, and the code map
+- [Troubleshooting](docs/troubleshooting.md) — symptoms in the proxy's output and what they mean
 
 ## Development
 
-- [Architecture and build commands](CLAUDE.md)
+- [Build and test commands](CLAUDE.md)
 - [Contributing guidelines](CONTRIBUTING.md)
 
 ## License

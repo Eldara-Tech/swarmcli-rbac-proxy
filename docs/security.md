@@ -61,8 +61,10 @@ Authorization has two composing layers (deny-wins):
    the protected stack, no overlay-membership pivots, no forward into it). It
    keys off the legacy `User.Role` admin flag, a separate axis from RBAC.
 
-See the proxy `CLAUDE.md` for the full permission matrix and the protected-stack
-permission table below.
+The full role/verb matrix is in [rbac.md](rbac.md#permission-matrix), and the
+21-row protected-stack matrix — including the rows that deny every external role,
+admin included — is in
+[configuration.md](configuration.md#permission-matrix).
 
 ## Certificate lifecycle
 
