@@ -183,11 +183,31 @@ authorization model.
 
 ## Auditing
 
-A request rejected by the RBAC policy engine is recorded in the audit log as
-`rbac.denied` (distinct from `guard.blocked`, which marks protected-stack
-denials). Role and binding mutations are audited as `role.created` /
-`role.updated` / `role.deleted` and `binding.created` / `binding.deleted`.
-Query with `swcproxy audit ls`.
+A request rejected by the RBAC policy engine is recorded as `rbac.denied` —
+distinct from `guard.blocked`, which marks protected-stack denials. Query with
+`swcproxy audit ls`.
+
+The complete action vocabulary, which is what you need when writing a SIEM rule:
+
+| Group | Actions |
+|---|---|
+| Users | `user.created`, `user.updated` (enable/disable/role change), `user.deleted` |
+| Credentials | `cert.issued`, `onboard.completed`, `token.regenerated` |
+| Denials | `rbac.denied` (policy engine), `guard.blocked` (protected-stack guard, volume denials included) |
+| RBAC management | `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted` |
+| Volumes | `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` |
+| Backup | `backup.exported`, `backup.restored` |
+
+Volume actions are recorded on **success**; a volume denial appears as
+`guard.blocked` like every other guarded operation.
+
+Each entry records id, timestamp, actor, action, resource (`type:id`), status
+(`success` / `denied`), detail and source IP. The actor is a username, or one of
+`cli`, `internal` (triggered via the internal listener) or `anonymous`.
+
+Authentication events — mTLS success and failure — are logged to stdout only and
+are **not** persisted to the audit table, so do not build an authentication alert
+on this table alone.
 
 ## See also
 

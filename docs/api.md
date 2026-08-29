@@ -32,23 +32,37 @@ When `PROXY_ADMIN_TOKEN` is not set, the API is open (no authentication required
 ```bash
 curl -s -X POST http://localhost:2375/api/v1/users \
   -H "Content-Type: application/json" \
-  -d '{"username": "alice", "role": "user"}'
+  -d '{"username": "alice", "role": "operator"}'
 ```
 
-The `role` field is optional and defaults to `"user"`. Set to `"admin"` for admin access.
+The `role` field is optional and defaults to `"operator"`. It must be one of the
+three built-in roles — `admin`, `operator`, `viewer` — and anything else is
+rejected with `400`. See [rbac.md](rbac.md) for what each one grants.
 
-Response (`201 Created`):
+`username` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`: it becomes the client
+certificate CN and appears in onboard URLs and audit records, so it is held to a
+conservative shell/URL/log-safe charset.
+
+Response (`201 Created`). The user is created **without credentials** — the
+response carries a single-use onboarding token instead, which the user redeems
+for their certificate bundle via [Onboard a user](#onboard-a-user):
 
 ```json
 {
-  "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
-  "username": "alice",
-  "role": "user",
-  "enabled": true,
-  "created_at": "2026-03-06T12:00:00Z",
-  "updated_at": "2026-03-06T12:00:00Z"
+  "user": {
+    "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "username": "alice",
+    "role": "operator",
+    "enabled": true,
+    "created_at": "2026-03-06T12:00:00Z",
+    "updated_at": "2026-03-06T12:00:00Z"
+  },
+  "onboard_token": "3f2b1c…",
+  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/3f2b1c…"
 }
 ```
+
+`onboard_url` is present only when the proxy knows its own external address.
 
 When `PROXY_TLS_CLIENT_CA_KEY` is set, the response includes an auto-generated client certificate bundle (fields `certificate.cert_pem`, `certificate.key_pem`, `certificate.ca_pem`). The private key is generated in memory and never stored on the server — if lost, the user must be deleted and recreated. See [the walkthrough](getting-started.md#2-start-the-proxy-with-mtls) for a full example.
 
@@ -81,13 +95,79 @@ Response (`200 OK`):
   {
     "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
     "username": "alice",
-    "role": "user",
+    "role": "operator",
     "enabled": true,
     "created_at": "2026-03-06T12:00:00Z",
     "updated_at": "2026-03-06T12:00:00Z"
   }
 ]
 ```
+
+The onboarding token and its issued/consumed timestamps are held on the record
+but never serialised, so they cannot leak through a list.
+
+## Update a user
+
+`PATCH /api/v1/users/{username}` changes the role, the enabled flag, or both.
+
+```bash
+curl -s -X PATCH http://localhost:2375/api/v1/users/alice \
+  -H "Content-Type: application/json" \
+  -d '{"role": "viewer", "enabled": false}'
+```
+
+Both fields are optional, but at least one must be present — an empty body is
+`400 nothing to update`. `role` is validated against the same three built-ins as
+create, deliberately: the protected-stack gate tests `User.Role == "admin"`, so an
+arbitrary string here would be misread rather than rejected.
+
+Two lockout guards return `409 Conflict`:
+
+- You cannot change **your own** role.
+- You cannot disable **yourself**.
+
+A third guard refuses to demote or disable the **last remaining admin**, so the
+instance can never be left without one. When a request sets both fields, the role
+lands first, so a combined change still applies even if the enable toggle is a
+no-op.
+
+## Regenerate an onboarding token
+
+`POST /api/v1/users/{username}/regenerate-token` issues a fresh single-use token,
+invalidating any previous one. Use it when a token was lost, leaked, or expired
+before the user redeemed it.
+
+```bash
+curl -s -X POST http://localhost:2375/api/v1/users/alice/regenerate-token
+```
+
+Response (`200 OK`) carries the token only — no user object:
+
+```json
+{
+  "onboard_token": "9d4e7a…",
+  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/9d4e7a…"
+}
+```
+
+`404` if the user does not exist.
+
+## Who am I
+
+`GET /api/v1/me` returns the identity the proxy resolved from the caller's client
+certificate. It is the cheapest way for a client to discover its own role.
+
+```bash
+curl -s --cert alice.crt --key alice.key https://localhost:2376/api/v1/me
+```
+
+```json
+{ "username": "alice", "role": "operator" }
+```
+
+It requires an mTLS identity, so it answers only on the external listener — a
+request on the internal listener, which carries no client certificate, is
+rejected rather than answered with an empty identity.
 
 ## Delete a user
 
@@ -192,6 +272,16 @@ Response (`410 Gone`):
 ```json
 {"message": "token already consumed"}
 ```
+
+## Control plane (`/_swc/`)
+
+The proxy reserves `/_swc/` on the **internal** listener for its own endpoints, so
+they can never be shadowed by, or fall through to, the Docker API — `GET
+/_swc/version` for build identity and `/_swc/startbackup` to trigger a
+database-only backup. An unknown path under the prefix returns a branded JSON
+404 rather than reaching Docker. Full usage, including why a `404` on
+`/_swc/version` means a stale build, is in
+[backup-restore.md](backup-restore.md#triggering-a-backup).
 
 ## Agent-manager forwarding
 
