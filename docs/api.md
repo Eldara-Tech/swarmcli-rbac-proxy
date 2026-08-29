@@ -281,7 +281,7 @@ they can never be shadowed by, or fall through to, the Docker API — `GET
 database-only backup. An unknown path under the prefix returns a branded JSON
 404 rather than reaching Docker. Full usage, including why a `404` on
 `/_swc/version` means a stale build, is in
-[backup-restore.md](backup-restore.md#triggering-a-backup).
+[backup-restore.md](backup-restore.md#trigger-over-the-internal-listener).
 
 ## Agent-manager forwarding
 
