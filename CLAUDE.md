@@ -40,7 +40,7 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
 
 ## Go Version & Build
 
-Go 1.26. No Makefile. GoReleaser handles binary releases with `-trimpath -s -w` ldflags and version injection (`internal/version`).
+Go 1.27. No Makefile. GoReleaser handles binary releases with `-trimpath -s -w` ldflags and version injection (`internal/version`).
 
 Version metadata is injected at build time via ldflags:
 - `-X swarm-rbac-proxy/internal/version.Version=...` — git tag

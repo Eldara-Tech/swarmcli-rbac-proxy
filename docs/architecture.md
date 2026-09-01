@@ -39,7 +39,7 @@ swarm-rbac-proxy/
   main_test.go          — unit tests against mock Unix socket
   integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
   .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy
-  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23), version injection via build args + ldflags, OCI labels
+  Dockerfile            — multi-stage build (golang:1.27-alpine → alpine:3.24), version injection via build args + ldflags, OCI labels
   welcome.sh            — container login banner with dynamic version display (COPY'd to /etc/profile.d/welcome.sh)
   stack.yml             — Docker Swarm stack definition
   cmd/
