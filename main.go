@@ -789,7 +789,7 @@ func main() {
 
 	userHandler := api.NewUserHandler(userStore, rbacStore, auditStore, cfg.ExternalURL)
 	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL, auditStore)
-	meHandler := api.NewMeHandler()
+	meHandler := api.NewMeHandler(rbacStore)
 	roleHandler := api.NewRoleHandler(rbacStore, userStore, auditStore)
 	bindingHandler := api.NewBindingHandler(rbacStore, userStore, auditStore)
 

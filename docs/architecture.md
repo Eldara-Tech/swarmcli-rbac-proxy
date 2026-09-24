@@ -89,8 +89,8 @@ swarm-rbac-proxy/
       rbac_test.go      — RBAC middleware matrix tests (viewer/operator/admin × resources/verbs)
       rbacmap.go        — mapRequest: HTTP {method,path} → {resource,verb}; stripDockerVersion shared helper
       rbacmap_test.go   — request-mapping table tests
-      me.go             — MeHandler: GET /api/v1/me → caller's own {username, role} from mTLS cert
-      me_test.go        — me handler tests (admin/user/no-user/method)
+      me.go             — MeHandler: GET /api/v1/me → caller's own {username, role, rules} from mTLS cert + RBAC store
+      me_test.go        — me handler tests (admin/user/no-user/method/rules/store error)
       onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
       onboard_test.go   — onboard handler tests
       guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation; ExecGuard: admin-only exec/attach; resourceStackLabel/stackLabelFromBody label resolvers shared with RBAC
