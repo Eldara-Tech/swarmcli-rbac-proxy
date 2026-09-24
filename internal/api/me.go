@@ -12,17 +12,21 @@ import (
 
 // MeHandler handles GET /api/v1/me: it returns the authenticated caller's own
 // identity and role, derived from their mTLS client certificate by the
-// RequireClientCert middleware. It lets a client (e.g. the CLI) learn its own
-// role without attempting a mutating operation and reading a 403. It carries no
-// state and never touches the store — the user is already resolved in context.
-type MeHandler struct{}
+// RequireClientCert middleware, plus the effective RBAC rules — the flattened
+// union of their bound roles' rules, as RBACMiddleware evaluates them. It lets a
+// client (e.g. the CLI) learn what it may do without attempting an operation and
+// reading a 403.
+type MeHandler struct {
+	rbac store.RBACStore
+}
 
-// NewMeHandler creates a MeHandler.
-func NewMeHandler() *MeHandler { return &MeHandler{} }
+// NewMeHandler creates a MeHandler that resolves rules from rbac.
+func NewMeHandler(rbac store.RBACStore) *MeHandler { return &MeHandler{rbac: rbac} }
 
 type meResponse struct {
-	Username string `json:"username"`
-	Role     string `json:"role"`
+	Username string                 `json:"username"`
+	Role     string                 `json:"role"`
+	Rules    []store.PermissionRule `json:"rules"`
 }
 
 func (h *MeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,8 +42,18 @@ func (h *MeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "client certificate required")
 		return
 	}
+	perms, err := store.GetEffectivePermissions(r.Context(), h.rbac, user.Username)
+	if err != nil {
+		l().Errorw("me: permission resolution failed", "error", err, "user", user.Username)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	rules := perms.Rules
+	if rules == nil {
+		rules = []store.PermissionRule{} // encode as [], never null
+	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(meResponse{Username: user.Username, Role: user.Role}); err != nil {
+	if err := json.NewEncoder(w).Encode(meResponse{Username: user.Username, Role: user.Role, Rules: rules}); err != nil {
 		l().Errorw("encode response failed", "error", err)
 	}
 }

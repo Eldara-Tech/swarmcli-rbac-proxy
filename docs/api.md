@@ -155,15 +155,27 @@ Response (`200 OK`) carries the token only — no user object:
 ## Who am I
 
 `GET /api/v1/me` returns the identity the proxy resolved from the caller's client
-certificate. It is the cheapest way for a client to discover its own role.
+certificate, plus its effective RBAC rules — the union of the rules of every role
+bound to the caller, exactly what the proxy evaluates on each request. It is the
+cheapest way for a client to discover what it may do.
 
 ```bash
 curl -s --cert alice.crt --key alice.key https://localhost:2376/api/v1/me
 ```
 
 ```json
-{ "username": "alice", "role": "operator" }
+{
+  "username": "alice",
+  "role": "operator",
+  "rules": [
+    { "resources": ["services", "nodes"], "verbs": ["get", "list"] }
+  ]
+}
 ```
+
+`rules` is always present, and is `[]` when the caller has no bindings; bindings
+to a deleted role are skipped. `role` is the legacy single role and is kept for
+backwards compatibility. A failure to read the bindings returns `500`.
 
 It requires an mTLS identity, so it answers only on the external listener — a
 request on the internal listener, which carries no client certificate, is
