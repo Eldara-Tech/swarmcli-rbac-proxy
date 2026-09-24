@@ -7,7 +7,7 @@ This project uses [GoReleaser](https://goreleaser.com/) for binary releases and 
 Binary releases are built for Linux (server component):
 - **Linux**: amd64, arm64
 
-Docker images are published to Docker Hub as `eldaratech/swarmcli-rbac-proxy`.
+Docker images are published to Docker Hub as `eldaratech/swarmcli-rbac-proxy`, for linux/amd64 and linux/arm64.
 
 ## How to Create a Release
 
@@ -32,6 +32,9 @@ gh release view v0.2.0 --repo Eldara-Tech/swarmcli-rbac-proxy
 # Check Docker image
 docker pull eldaratech/swarmcli-rbac-proxy:0.2.0
 docker run --rm eldaratech/swarmcli-rbac-proxy:0.2.0 /proxy --version
+
+# Check the image is multi-arch: the index must list linux/amd64 and linux/arm64
+docker buildx imagetools inspect eldaratech/swarmcli-rbac-proxy:0.2.0
 ```
 
 ## Version Information
