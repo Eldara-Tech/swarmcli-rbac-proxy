@@ -1,4 +1,8 @@
-FROM golang:1.27-alpine AS build
+# Cross-compiled on the build host, so the Go toolchain never runs emulated.
+# CGO is off, as in .goreleaser.yml; modernc.org/sqlite is pure Go. The
+# legacy builder (no buildx) leaves BUILDPLATFORM empty; the fallback builds
+# natively there.
+FROM --platform=${BUILDPLATFORM:-linux} golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -7,8 +11,11 @@ COPY . .
 ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
+ARG TARGETOS
+ARG TARGETARCH
 
-RUN go build -trimpath -ldflags="-s -w \
+RUN export CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} && \
+    go build -trimpath -ldflags="-s -w \
       -X swarm-rbac-proxy/internal/version.Version=${VERSION} \
       -X swarm-rbac-proxy/internal/version.Commit=${COMMIT} \
       -X swarm-rbac-proxy/internal/version.Date=${DATE}" \
