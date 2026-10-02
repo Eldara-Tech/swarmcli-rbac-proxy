@@ -262,6 +262,14 @@ func TestIntegration_ExternalMux_RoutesWired(t *testing.T) {
 		t.Fatalf("bindings for v: %v, %v", bindings, err)
 	}
 
+	// The licence verdict is the agent-manager's to give to every role: a
+	// viewer's phone must reach it, not an RBAC 403 from here. Asked before
+	// the loop below deletes v's binding.
+	if resp, body := env.do(env.client("v"), http.MethodGet, "/v1/license", nil); resp.StatusCode/100 != 2 || resp.Header.Get("X-Backend") != "agent" {
+		t.Errorf("viewer GET /v1/license: status %d, backend %q, body %s; want it forwarded to the agent-manager",
+			resp.StatusCode, resp.Header.Get("X-Backend"), body)
+	}
+
 	admin := env.client("a")
 	bearer := http.Header{"Authorization": {"Bearer " + externalMuxAdminToken}}
 	for _, tc := range []struct {
@@ -282,6 +290,7 @@ func TestIntegration_ExternalMux_RoutesWired(t *testing.T) {
 		{http.MethodDelete, "/api/v1/bindings/" + bindings[0].ID, ""},
 		{http.MethodGet, "/api/v1/me", ""},
 		{http.MethodGet, "/v1/containers", "agent"},
+		{http.MethodGet, "/v1/license", "agent"},
 		{http.MethodGet, "/v1.47/_ping", "docker"},
 	} {
 		resp, body := env.do(admin, tc.method, tc.path, bearer)
