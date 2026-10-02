@@ -79,6 +79,7 @@ func TestRBACMatrix(t *testing.T) {
 		{"swarm inspect", "GET", "/swarm", "", deny, deny, allow},
 		{"system info", "GET", "/info", "", allow, allow, allow},
 		{"ping", "GET", "/_ping", "", allow, allow, allow},
+		{"licence verdict (agent)", "GET", "/v1/license", "", allow, allow, allow},
 
 		// Standalone (unlabeled) mutations.
 		{"standalone service create", "POST", "/services/create", "{}", deny, allow, allow},

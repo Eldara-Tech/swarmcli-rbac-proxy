@@ -66,13 +66,15 @@ Verbs: **G**=get **L**=list **C**=create **U**=update **D**=delete, `*`=all.
 | exec / attach | — | C | * |
 | port-forward | — | C | * |
 | swarm | — | — | * |
-| system (`_ping` / `version` / `info`) | GL | GL | GL |
+| system (`_ping` / `version` / `info`, `GET /v1/license`) | GL | GL | GL |
 | roles / bindings | — | — | * |
 | containers (raw run) / unmapped (incl. `/events`) | — | — | * |
 
 `system` covers the Docker handshake endpoints (`_ping`, `version`, `info`) and
 is granted to every role so that `docker version` / `docker info` work for all
-users. `/events` is **not** part of `system` — it streams cluster-wide resource
+users. It also covers `GET /v1/license`, the agent-manager's licence verdict
+that the mobile app polls; the proxy only routes it, and the agent-manager
+decides. `/events` is **not** part of `system` — it streams cluster-wide resource
 lifecycle (including secret and config names) and is therefore admin-only.
 
 ### How stacks are authorized
