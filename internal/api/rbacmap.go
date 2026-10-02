@@ -84,6 +84,11 @@ func classifyRequest(method, path string) (rbacRoute, bool) {
 		return rbacRoute{resource: store.ResourceServices, verb: store.VerbList}, true
 	case path == "/v1/volumes" || strings.HasPrefix(path, "/v1/volumes/"):
 		return mapAgentVolume(method, path)
+	case method == http.MethodGet && path == "/v1/license":
+		// The agent-manager's licence verdict (204 or its 403), polled by
+		// clients that never cross it otherwise. Part of the handshake, so
+		// every role may ask; the proxy routes it and decides nothing.
+		return rbacRoute{resource: store.ResourceSystem, verb: store.VerbGet}, true
 	}
 	if strings.HasPrefix(path, "/v1/") {
 		return rbacRoute{}, false // unknown agent path

@@ -98,7 +98,9 @@ with it (deny-wins).
   read-only per-container health/ports inventory, which the agent-manager
   scopes to swarm service-task containers, so its disclosure matches
   `GET /tasks` (also `services:list`); non-GET `/v1/containers` falls through
-  to unmapped/admin-only). Reads are authorized too. Unmapped/raw ops
+  to unmapped/admin-only; `GET /v1/license`→`system:get`, the agent-manager's
+  licence verdict, which every role may ask for and the proxy only routes).
+  Reads are authorized too. Unmapped/raw ops
   (`POST /containers/create`) map to the `unmapped` sentinel → admin-only.
 - **Stacks via label**: there is no `/stacks` Docker endpoint — a stack deploy
   is labeled `services`/`networks`/`configs`/`secrets` creates. A **mutating**

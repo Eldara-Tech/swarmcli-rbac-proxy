@@ -78,6 +78,8 @@ func TestMapRequest(t *testing.T) {
 		{"agent volume delete", "DELETE", "/v1/volumes/vol", store.ResourceVolumes, store.VerbDelete, false},
 		{"agent volume file rename", "POST", "/v1/volumes/vol/files/rename", store.ResourceVolumes, store.VerbUpdate, false},
 		{"agent volume file upload", "POST", "/v1/volumes/vol/files/upload", store.ResourceVolumes, store.VerbUpdate, false},
+		{"agent license", "GET", "/v1/license", store.ResourceSystem, store.VerbGet, false},
+		{"agent license non-GET is admin-only", "POST", "/v1/license", resourceUnmapped, store.VerbCreate, false},
 
 		// Unmapped → admin-only sentinel.
 		{"raw container create", "POST", "/containers/create", resourceUnmapped, store.VerbCreate, false},
