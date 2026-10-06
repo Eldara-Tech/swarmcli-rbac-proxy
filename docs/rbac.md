@@ -46,7 +46,10 @@ rules; they are never overwritten if you do). They cannot be deleted.
   plus deploy/update of stacks and services and interactive `exec` /
   `port-forward` into non-infrastructure workloads. Cannot delete stacks,
   enumerate secrets, or touch swarm-level state. This is the default role for a
-  newly created non-admin user.
+  newly created non-admin user. A service spec can bind-mount the host or the
+  Docker socket and add capabilities, so creating services makes `operator`
+  **root-equivalent on every node that runs a non-protected workload**; grant
+  it accordingly.
 - **`admin`** — unrestricted (`*:*`).
 
 ### Permission matrix
@@ -89,6 +92,27 @@ resources, delete stacks (no `stacks: delete`), or enumerate secrets.
 
 **Reads** use the concrete resource only — there is no stacks-OR shortcut — so a
 `viewer`'s lack of `secrets` read cannot be bypassed by attaching a stack label.
+
+### Updating a service you cannot create
+
+A full service update can change anything in the spec, including the image,
+mounts, capabilities and user, which is as much power as creating the service.
+So an update may rewrite the spec only if the caller may also **create** that
+service: `services: create`, or `stacks: create` for a stack-labeled service.
+A caller with `update` but not `create` may only:
+
+- scale the service (`Mode.Replicated.Replicas`),
+- restart it (`TaskTemplate.ForceUpdate`), or
+- roll it back (`?rollback=previous`), which restores the spec it had before
+  its last update.
+
+The proxy compares the request body with the service's live spec, and refuses
+any other change, or any update carrying `X-Registry-Auth`, with a `403`
+audited as `rbac.denied`. A role such as "`viewer` plus `services: update`"
+therefore stays non-root, while `docker service scale`, `docker service update
+--force`, `docker service rollback`, the TUI and the mobile app keep working for
+it. Such a role cannot redeploy a stack, because `docker stack deploy` sends the
+whole spec. The rules returned by `GET /api/v1/me` still list plain `update`.
 
 ## How RBAC composes with the protected-stack guard
 

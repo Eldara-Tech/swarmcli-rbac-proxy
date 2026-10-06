@@ -60,10 +60,10 @@ func startExternalMux(t *testing.T, bindings map[string]string, extraRoles ...st
 	sock := startMockDockerSocket(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/stacked") {
-			fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"app"}}}`)
+			fmt.Fprint(w, `{"Spec":{"Labels":{"com.docker.stack.namespace":"app"},"TaskTemplate":{}}}`)
 			return
 		}
-		fmt.Fprint(w, `{"Spec":{"Labels":{}}}`)
+		fmt.Fprint(w, `{"Spec":{"Labels":{},"TaskTemplate":{}}}`)
 	}))
 	backendMock := func(name string) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +114,12 @@ func (e *externalMuxEnv) client(cn string) *http.Client {
 
 func (e *externalMuxEnv) do(c *http.Client, method, path string, header http.Header) (*http.Response, []byte) {
 	e.t.Helper()
-	req, err := http.NewRequest(method, "https://"+e.addr+path, nil)
+	return e.doBody(c, method, path, "", header)
+}
+
+func (e *externalMuxEnv) doBody(c *http.Client, method, path, reqBody string, header http.Header) (*http.Response, []byte) {
+	e.t.Helper()
+	req, err := http.NewRequest(method, "https://"+e.addr+path, strings.NewReader(reqBody))
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -191,7 +196,9 @@ func TestIntegration_ExternalMux_MeReturnsEffectiveRules(t *testing.T) {
 // TestIntegration_ExternalMux_MeRulesPredictEnforcement pins the contract a
 // client relies on: evaluating the rules from /me with the request's RBAC
 // mapping (candidates + verb, as in internal/api/rbacmap.go) predicts exactly
-// what the real middleware chain does — reaching Docker, or 403.
+// what the real middleware chain does — reaching Docker, or 403. A restart
+// carries the live spec with ForceUpdate bumped, as clients send it: a role
+// without create may update a service only that way.
 func TestIntegration_ExternalMux_MeRulesPredictEnforcement(t *testing.T) {
 	stackUpdater := store.Role{
 		Name:  "stack-updater",
@@ -205,16 +212,18 @@ func TestIntegration_ExternalMux_MeRulesPredictEnforcement(t *testing.T) {
 
 	stackable := func(res ...string) []string { return append([]string{store.ResourceServices}, res...) }
 	requests := []struct {
-		name, method, path string
-		candidates         []string
-		verb               string
+		name, method, path, body string
+		candidates               []string
+		verb                     string
 	}{
-		{"restart unlabeled", http.MethodPost, "/v1.47/services/plain/update", stackable(), store.VerbUpdate},
-		{"restart stack-labeled", http.MethodPost, "/v1.47/services/stacked/update", stackable(store.ResourceStacks), store.VerbUpdate},
-		{"service logs", http.MethodGet, "/v1.47/services/plain/logs", []string{store.ResourceStackLogs}, store.VerbGet},
-		{"delete unlabeled", http.MethodDelete, "/v1.47/services/plain", stackable(), store.VerbDelete},
-		{"delete stack-labeled", http.MethodDelete, "/v1.47/services/stacked", stackable(store.ResourceStacks), store.VerbDelete},
-		{"events", http.MethodGet, "/v1.47/events", []string{"unmapped"}, store.VerbGet},
+		{"restart unlabeled", http.MethodPost, "/v1.47/services/plain/update",
+			`{"Labels":{},"TaskTemplate":{"ForceUpdate":1}}`, stackable(), store.VerbUpdate},
+		{"restart stack-labeled", http.MethodPost, "/v1.47/services/stacked/update",
+			`{"Labels":{"com.docker.stack.namespace":"app"},"TaskTemplate":{"ForceUpdate":1}}`, stackable(store.ResourceStacks), store.VerbUpdate},
+		{"service logs", http.MethodGet, "/v1.47/services/plain/logs", "", []string{store.ResourceStackLogs}, store.VerbGet},
+		{"delete unlabeled", http.MethodDelete, "/v1.47/services/plain", "", stackable(), store.VerbDelete},
+		{"delete stack-labeled", http.MethodDelete, "/v1.47/services/stacked", "", stackable(store.ResourceStacks), store.VerbDelete},
+		{"events", http.MethodGet, "/v1.47/events", "", []string{"unmapped"}, store.VerbGet},
 	}
 
 	actual := map[string]bool{}
@@ -223,7 +232,7 @@ func TestIntegration_ExternalMux_MeRulesPredictEnforcement(t *testing.T) {
 		c := env.client(user)
 		for _, rq := range requests {
 			predicted := perms.Allows(rq.candidates, rq.verb)
-			resp, body := env.do(c, rq.method, rq.path, nil)
+			resp, body := env.doBody(c, rq.method, rq.path, rq.body, http.Header{"Content-Type": {"application/json"}})
 			allowed := resp.StatusCode/100 == 2 && resp.Header.Get("X-Backend") == "docker"
 			if !allowed && resp.StatusCode != http.StatusForbidden {
 				t.Errorf("%s / %s: status %d is neither a proxied 2xx nor 403; body %s", user, rq.name, resp.StatusCode, body)

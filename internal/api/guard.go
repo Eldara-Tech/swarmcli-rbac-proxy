@@ -508,25 +508,28 @@ func stackLabelFromBody(data []byte) (string, error) {
 }
 
 // bodyHasProtectedNetworkAttachment checks whether a service create/update
-// payload's TaskTemplate.Networks[] references any network that belongs to
-// the protected stack. Each referenced network id is resolved via the Docker
-// back-query; a 5xx from the daemon is surfaced as an error so the caller
-// can fail-closed.
+// payload's TaskTemplate.Networks[] or deprecated top-level Networks[] (which
+// the daemon still attaches when the former is empty) references any network
+// that belongs to the protected stack. Each referenced network id is resolved
+// via the Docker back-query; a 5xx from the daemon is surfaced as an error so
+// the caller can fail-closed.
 func (g *ResourceGuard) bodyHasProtectedNetworkAttachment(ctx context.Context, data []byte) (bool, error) {
 	if len(data) == 0 {
 		return false, nil
 	}
+	type attachments []struct {
+		Target string `json:"Target"`
+	}
 	var body struct {
 		TaskTemplate struct {
-			Networks []struct {
-				Target string `json:"Target"`
-			} `json:"Networks"`
+			Networks attachments `json:"Networks"`
 		} `json:"TaskTemplate"`
+		Networks attachments `json:"Networks"`
 	}
 	if err := json.Unmarshal(data, &body); err != nil {
 		return false, err
 	}
-	for _, n := range body.TaskTemplate.Networks {
+	for _, n := range append(body.TaskTemplate.Networks, body.Networks...) {
 		if n.Target == "" {
 			continue
 		}

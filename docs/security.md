@@ -9,11 +9,13 @@ The proxy protects against:
 - **Unauthorized Docker API access**: only users with valid client certificates can reach the Docker daemon through the external listener.
 - **Accidental infrastructure mutation**: non-admin users and even admins are blocked from creating or deleting resources in the protected Swarm stack. See [configuration.md](configuration.md#stack-resource-protection) for the full permission matrix.
 - **Privilege escalation via exec/attach**: non-admin users cannot exec or attach into protected stack containers via the Docker API, and cannot use the agent exec endpoint (`/v1/exec`), preventing access to admin tools (e.g. `swcproxy` CLI with direct database access).
+- **Privilege escalation via service update**: a role that may update a service but not create it can only scale, restart or roll it back. It cannot rewrite the spec. See [rbac.md](rbac.md#updating-a-service-you-cannot-create).
 
 The proxy does **not** protect against:
 
 - Compromised client certificates (no revocation mechanism — delete the user instead).
 - Attacks on the Docker daemon itself (the proxy is a policy layer, not a sandbox).
+- A role that may create services, such as the built-in `operator`. It is root-equivalent on every node that runs a non-protected workload: a service spec can bind-mount the host filesystem or the Docker socket and add capabilities. Only the protected stack is shielded from it.
 - Network-level attacks between proxy and daemon (use backend TLS if the daemon is remote).
 - Compromised containers on the internal overlay network (see [overlay network trust](#overlay-network-trust) below).
 
@@ -120,7 +122,7 @@ The old `swarmcli-agent-net` overlay carried `encrypted: "true"`, which tunnels 
 
 ### Overlay-membership pivot is still blocked (T1/T2)
 
-Overlay-membership mutations through the external proxy listener remain blocked for **every role, including admin** — `POST /services/create` with `TaskTemplate.Networks` targeting the protected overlay, `POST /services/{id}/update` pulling a non-protected service onto it, and `POST /networks/{id}/{connect,disconnect}` against the protected overlay all return `403`. An admin-cert compromise therefore cannot bootstrap a pivot onto `swarmcli-agent-net`. Legitimate sysadmin overlay work (attaching troubleshooting sidecars, joining containers to `agent-net` for diagnostics) must happen via the host Docker socket on a manager node or via the internal loopback listener (`PROXY_INTERNAL_LISTEN`). Admin `docker exec` / `attach` into containers that are already on the overlay continues to work through the proxy — the guard scope is membership, not traffic.
+Overlay-membership mutations through the external proxy listener remain blocked for **every role, including admin** — `POST /services/create` with `TaskTemplate.Networks` (or the deprecated top-level `Networks`) targeting the protected overlay, `POST /services/{id}/update` pulling a non-protected service onto it, and `POST /networks/{id}/{connect,disconnect}` against the protected overlay all return `403`. An admin-cert compromise therefore cannot bootstrap a pivot onto `swarmcli-agent-net`. Legitimate sysadmin overlay work (attaching troubleshooting sidecars, joining containers to `agent-net` for diagnostics) must happen via the host Docker socket on a manager node or via the internal loopback listener (`PROXY_INTERNAL_LISTEN`). Admin `docker exec` / `attach` into containers that are already on the overlay continues to work through the proxy — the guard scope is membership, not traffic.
 
 **Residual risk**: internal mTLS authenticates the three first-party services to each other, but each still mounts `/var/run/docker.sock:ro` and holds a valid internal-client identity, so a vulnerability in one service that yields code execution gives the attacker that service's lateral reach. This is mitigated by: read-only Docker socket mounts, distroless base images (agent, agent-manager), image vulnerability scanning, and restricting who can deploy to the swarm.
 
