@@ -111,6 +111,17 @@ with it (deny-wins).
   resources, delete stacks (no `stacks:delete`), enumerate secrets, or touch the
   protected stack. Reads use the concrete resource only (no stacks-OR), so
   `viewer`'s `secrets:—` is not bypassable via a stack label.
+- **Update without create** (`operationalUpdateDenial`,
+  `internal/api/serviceupdate.go`; operator-facing in
+  [docs/rbac.md](docs/rbac.md#updating-a-service-you-cannot-create)): a full
+  service update is root-equivalent, so a caller without `create` on the same
+  candidates may only change Replicas/ForceUpdate or roll back.
+  Invariants: the spec comparison stays generic JSON, so an unknown, extra or
+  case-variant key counts as a change (the daemon's decoder is
+  case-insensitive); it must fail closed when the live spec cannot be read
+  (no socket client on a TCP backend); and an allowed request is forwarded
+  without its `/vX.Y` prefix, because the daemon strips fields an older API
+  lacks (seccomp, capabilities) from the body before applying it.
 - **Chain order** (external): `RequireClientCert` → `RBACMiddleware.Wrap` →
   `ExecGuard` → `ResourceGuard.Wrap` → proxy. RBAC is a no-op on the internal
   listener and when mTLS is off (no identity to authorize).

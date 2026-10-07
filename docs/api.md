@@ -323,6 +323,8 @@ proxy maps each request to a `{resource, verb}` (e.g. `GET /services` →
 it with `403` unless one of the caller's roles grants it. Stack-labeled
 mutations (resources carrying `com.docker.stack.namespace`) are additionally
 authorized under the `stacks` resource, so a role with `stacks:create` can
-deploy a full stack. Unmapped or raw operations (e.g. `POST /containers/create`)
+deploy a full stack. A role with `services:update` but no matching `create`
+may only scale, restart or roll back a service
+([rbac.md](rbac.md#updating-a-service-you-cannot-create)). Unmapped or raw operations (e.g. `POST /containers/create`)
 require the `admin` role. RBAC denials are audited as `rbac.denied`. The
 internal listener bypasses RBAC entirely.
