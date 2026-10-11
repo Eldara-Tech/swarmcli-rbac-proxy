@@ -38,6 +38,27 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
   go test -race -tags=integration ./...
 ```
 
+**On macOS, `go test ./internal/api` fails with `bind: invalid argument`** — on
+`main` too. Its tests listen on a unix socket under `t.TempDir()`, and macOS's
+long `TMPDIR` plus the test name passes the 104-byte socket-path limit. Run it
+with `TMPDIR=/tmp/<short>`; CI is Linux and never sees it.
+
+**Rehearsing against a local swarm** (macOS with colima; no image build): run
+the built binary natively with
+`PROXY_DOCKER_URL=unix://$HOME/.colima/default/docker.sock`,
+`PROXY_STORE=memory`, `PROXY_PROTECTED_STACK=<name>`, a throwaway CA and
+`PROXY_SEED_USERNAME=admin1 PROXY_SEED_ROLE=admin`. The management API on the
+external listener wants a known user's client cert even alongside the bearer
+token (`client certificate required` / `unknown user`), so create the other
+users over `/api/v1/users` presenting admin1's. Act as a user with the real
+docker CLI: `DOCKER_HOST=tcp://127.0.0.1:<port> DOCKER_TLS_VERIFY=1
+DOCKER_CERT_PATH=<dir with ca.pem, cert.pem, key.pem>`. Two traps in stock
+macOS `openssl` (LibreSSL) with an EC key: `x509 -req` signs with SHA-1 unless
+given `-sha256`, which Go rejects and curl reports only as `tlsv1 alert unknown
+ca`; and `req -x509` makes a v1 CA with no extensions, so give it
+`basicConstraints=critical,CA:TRUE` through an `-extfile`. Prefix the stacks and
+services you create, and remove them afterwards.
+
 ## Go Version & Build
 
 Go 1.27. No Makefile. GoReleaser handles binary releases with `-trimpath -s -w` ldflags and version injection (`internal/version`).
@@ -51,6 +72,7 @@ For local development, defaults are `dev`/`none`/`unknown`. See `RELEASING.md` f
 
 When updating the Go version, keep these in sync:
 - `go.mod` — `go` and `toolchain` directives
+- `Dockerfile` — the `golang:X.Y-alpine` build stage, the compiler of the published image. Dependabot bumps it on its own; pair that PR with the `go.mod` bump, or CI (which reads Go from `go.mod`) keeps testing a compiler the shipped binary does not use
 - `.devcontainer/Dockerfile` — `mcr.microsoft.com/devcontainers/go` image tag (tracks major.minor; patch versions are handled by `GOTOOLCHAIN=auto`)
 - `govulncheck` CI step — bump suppressed vuln IDs if the new toolchain resolves them, or add new ones if it introduces new unfixed stdlib vulns
 
