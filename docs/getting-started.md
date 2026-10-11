@@ -42,9 +42,10 @@ openssl req -new -x509 -key certs/ca-key.pem -out certs/ca.pem \
 # Proxy TLS cert — presented to Docker CLI clients
 openssl ecparam -genkey -name prime256v1 -out certs/server-key.pem
 openssl req -new -key certs/server-key.pem -out certs/server.csr -subj "/CN=localhost"
+# -sha256: macOS's stock openssl (LibreSSL) otherwise signs with SHA-1, which Go rejects
 openssl x509 -req -in certs/server.csr \
   -CA certs/ca.pem -CAkey certs/ca-key.pem -CAcreateserial \
-  -out certs/server-cert.pem -days 365 \
+  -out certs/server-cert.pem -days 365 -sha256 \
   -extfile <(printf "subjectAltName=IP:127.0.0.1,DNS:localhost\nextendedKeyUsage=serverAuth")
 ```
 
