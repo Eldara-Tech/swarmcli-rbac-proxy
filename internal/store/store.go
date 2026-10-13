@@ -92,7 +92,7 @@ type AuditStore interface {
 // roles and bindings. It is the unit Export produces and Restore consumes, so a
 // restore can reproduce the original authorization state — not just the user
 // rows. Custom roles and non-default bindings are included; without them a
-// restore would silently fall back to the legacy admin/operator migration.
+// restore would silently fall back to the legacy User.Role migration.
 type BackupData struct {
 	Users    []User
 	Audit    []AuditEntry

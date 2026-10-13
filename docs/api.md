@@ -36,8 +36,8 @@ curl -s -X POST http://localhost:2375/api/v1/users \
 ```
 
 The `role` field is optional and defaults to `"operator"`. It must be one of the
-three built-in roles — `admin`, `operator`, `viewer` — and anything else is
-rejected with `400`. See [rbac.md](rbac.md) for what each one grants.
+four built-in roles — `admin`, `operator`, `responder`, `viewer` — and anything
+else is rejected with `400`. See [rbac.md](rbac.md) for what each one grants.
 
 `username` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`: it becomes the client
 certificate CN and appears in onboard URLs and audit records, so it is held to a
@@ -58,13 +58,23 @@ for their certificate bundle via [Onboard a user](#onboard-a-user):
     "updated_at": "2026-03-06T12:00:00Z"
   },
   "onboard_token": "3f2b1c…",
-  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/3f2b1c…"
+  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/3f2b1c…",
+  "expires_at": "2026-03-07T12:00:00Z"
 }
 ```
 
 `onboard_url` is present only when the proxy knows its own external address.
+`expires_at` (RFC 3339, UTC) is when the token stops being redeemable: the time
+it was issued plus `PROXY_ONBOARDING_TOKEN_TTL` (default `24h`, see
+[configuration.md](configuration.md)), rounded down to the second so it is never
+later than the real expiry. Proxies older than this field do not send it.
 
-When `PROXY_TLS_CLIENT_CA_KEY` is set, the response includes an auto-generated client certificate bundle (fields `certificate.cert_pem`, `certificate.key_pem`, `certificate.ca_pem`). The private key is generated in memory and never stored on the server — if lost, the user must be deleted and recreated. See [the walkthrough](getting-started.md#2-start-the-proxy-with-mtls) for a full example.
+The response carries no key or certificate. When `PROXY_TLS_CLIENT_CA_KEY` is
+set, the proxy generates the private key and signs the certificate when the
+token is redeemed, and returns both once in that response; the key is never
+stored on the server. See
+[the walkthrough](getting-started.md#2-start-the-proxy-with-mtls) for a full
+example.
 
 ### Error: duplicate username
 
@@ -117,7 +127,7 @@ curl -s -X PATCH http://localhost:2375/api/v1/users/alice \
 ```
 
 Both fields are optional, but at least one must be present — an empty body is
-`400 nothing to update`. `role` is validated against the same three built-ins as
+`400 nothing to update`. `role` is validated against the same four built-ins as
 create, deliberately: the protected-stack gate tests `User.Role == "admin"`, so an
 arbitrary string here would be misread rather than rejected.
 
@@ -141,12 +151,14 @@ before the user redeemed it.
 curl -s -X POST http://localhost:2375/api/v1/users/alice/regenerate-token
 ```
 
-Response (`200 OK`) carries the token only — no user object:
+Response (`200 OK`) carries the token only — no user object, and `expires_at`
+as for create:
 
 ```json
 {
   "onboard_token": "9d4e7a…",
-  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/9d4e7a…"
+  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/9d4e7a…",
+  "expires_at": "2026-03-07T12:00:00Z"
 }
 ```
 
@@ -202,8 +214,8 @@ Response (`404 Not Found`):
 The proxy authorizes every proxied Docker/agent request against the caller's
 **roles**. A role is a named set of permission rules (`{resources, verbs}` with
 `*` wildcards); a **binding** maps a user to a role. The built-in roles
-`viewer`, `operator`, and `admin` are seeded on startup. These management
-endpoints are admin-token protected like the user API.
+`viewer`, `responder`, `operator`, and `admin` are seeded on startup. These
+management endpoints are admin-token protected like the user API.
 
 ### List / inspect roles
 

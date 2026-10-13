@@ -423,6 +423,7 @@ type routeDeps struct {
 	ca                *certauth.CA
 	adminToken        string
 	externalURL       string
+	onboardTokenTTL   time.Duration
 	backupDir         string
 	agentManagerProxy http.Handler // nil when agent-manager forwarding is off
 	dockerProxy       http.Handler
@@ -434,7 +435,7 @@ type routeDeps struct {
 // (external only; no-op internally and when mTLS is off). wrapExec applies
 // the protected-stack exec/forward guard (no-op on the internal listener).
 func registerRoutes(mux *http.ServeMux, d routeDeps, internal bool, wrapProxy, wrapRBAC, wrapExec, wrapAdmin func(http.Handler) http.Handler) {
-	userHandler := api.NewUserHandler(d.userStore, d.rbacStore, d.auditStore, d.externalURL)
+	userHandler := api.NewUserHandler(d.userStore, d.rbacStore, d.auditStore, d.externalURL, d.onboardTokenTTL)
 	onboardHandler := api.NewOnboardHandler(d.userStore, d.ca, d.externalURL, d.auditStore)
 	meHandler := api.NewMeHandler(d.rbacStore)
 	roleHandler := api.NewRoleHandler(d.rbacStore, d.userStore, d.auditStore)
@@ -824,9 +825,14 @@ func main() {
 
 	// Seed the built-in roles (idempotent; never clobbers admin edits) and
 	// migrate any users that predate RBAC into a role binding derived from
-	// their legacy User.Role (admin → admin, else → operator).
+	// their legacy User.Role (a built-in role name → itself, else → operator).
 	if err := store.SeedDefaultRoles(context.Background(), rbacStore); err != nil {
 		l().Fatalw("seed default roles failed", "error", err)
+	}
+	if shadowed, err := store.ShadowedBuiltins(context.Background(), rbacStore); err != nil {
+		l().Warnw("could not check for custom roles named like built-ins", "error", err)
+	} else if len(shadowed) > 0 {
+		l().Warnw("custom roles hold built-in role names and keep their own rules; assigning one by name grants those rules", "roles", shadowed)
 	}
 	if err := store.MigrateLegacyRoles(context.Background(), userStore, rbacStore); err != nil {
 		l().Fatalw("legacy role migration failed", "error", err)
@@ -943,6 +949,7 @@ func main() {
 		ca:                ca,
 		adminToken:        cfg.AdminToken,
 		externalURL:       cfg.ExternalURL,
+		onboardTokenTTL:   cfg.OnboardingTokenTTL,
 		backupDir:         backup.DefaultDir(cfg),
 		agentManagerProxy: agentManagerProxy,
 		dockerProxy:       dockerProxy,

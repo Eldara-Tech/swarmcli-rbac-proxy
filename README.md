@@ -17,7 +17,7 @@ Docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix soc
 ## Features
 
 - **mTLS client certificates** -- each user gets a unique certificate; no shared credentials
-- **Role-based access control** -- dynamic, Kubernetes-style roles and per-user bindings with default-deny; built-in `viewer`/`operator`/`admin` plus custom roles ([guide](docs/rbac.md))
+- **Role-based access control** -- dynamic, Kubernetes-style roles and per-user bindings with default-deny; built-in `viewer`/`responder`/`operator`/`admin` plus custom roles ([guide](docs/rbac.md))
 - **Infrastructure stack protection** -- auto-detects the proxy's own Swarm stack and blocks external users from creating or deleting its services, secrets, networks, and configs
 - **Exec/attach guard** -- non-admin users cannot exec into protected containers
 - **Automated certificate issuance** -- generates client certificates on user creation (no manual openssl)
@@ -121,7 +121,7 @@ swcproxy binding rm <id>             # remove a binding (last-admin protected)
 swcproxy audit ls --limit 10
 ```
 
-Roles, bindings, and the built-in `viewer`/`operator`/`admin` permission matrix
+Roles, bindings, and the built-in `viewer`/`responder`/`operator`/`admin` permission matrix
 are covered in the [roles & permissions guide](docs/rbac.md). Custom roles are
 defined via the management API ([docs/api.md](docs/api.md#rbac-roles-and-bindings)).
 

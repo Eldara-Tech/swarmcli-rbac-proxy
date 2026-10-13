@@ -161,7 +161,7 @@ Protected resource types: `services`, `secrets`, `networks`, `volumes`, `configs
 ### Permission matrix
 
 "External non-admin" is any authenticated caller whose role is not `admin` —
-`operator` or `viewer`. The guard keys on `admin` specifically, not on a
+`operator`, `responder` or `viewer`. The guard keys on `admin` specifically, not on a
 role ranking.
 
 | Operation | Internal listener | External admin | External non-admin |

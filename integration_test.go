@@ -560,7 +560,7 @@ func TestIntegration_FrontendMTLS_ManagementAPINotWrapped(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "")))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "", 0)))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -802,7 +802,7 @@ func TestIntegration_CreateUserWithCert_ThenMTLSAccess(t *testing.T) {
 
 	_ = store.SeedDefaultRoles(context.Background(), s)
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "tcp://proxy:2376")))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "tcp://proxy:2376", 0)))
 	mux.Handle("GET /api/v1/onboard/{token}", api.NewOnboardHandler(s, issuer, "tcp://proxy:2376", nil))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
@@ -1711,7 +1711,7 @@ func TestIntegration_FrontendMTLS_NoCertManagementAPIAllowed(t *testing.T) {
 	b := backend{network: "tcp", address: backendAddr}
 
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "")))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "", 0)))
 	mux.Handle("/", api.RequireClientCert(s, newProxy(b)))
 
 	tlsCfg := &tls.Config{
@@ -1789,7 +1789,7 @@ func TestIntegration_ExecGuard_MTLS_OnboardedUserBlocked(t *testing.T) {
 
 	_ = store.SeedDefaultRoles(context.Background(), s)
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "tcp://proxy:2376")))
+	mux.Handle("/api/v1/users", api.RequireToken("secret", api.NewUserHandler(s, s, nil, "tcp://proxy:2376", 0)))
 	mux.Handle("GET /api/v1/onboard/{token}", api.NewOnboardHandler(s, issuer, "tcp://proxy:2376", nil))
 	mux.Handle("/", api.RequireClientCert(s, g.ExecGuard(newProxy(b))))
 
