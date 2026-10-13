@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
@@ -41,7 +42,7 @@ func newSeededStore(t *testing.T) *store.MemoryStore {
 func newTestHandler(t *testing.T) (*UserHandler, *store.MemoryStore) {
 	t.Helper()
 	s := newSeededStore(t)
-	return NewUserHandler(s, s, nil, testExternalURL), s
+	return NewUserHandler(s, s, nil, testExternalURL, 0), s
 }
 
 // testMux wires the handler to a mux so {username} path values resolve.
@@ -82,7 +83,10 @@ type createResp struct {
 	User         *store.User `json:"user"`
 	OnboardToken string      `json:"onboard_token"`
 	OnboardURL   string      `json:"onboard_url"`
+	ExpiresAt    *time.Time  `json:"expires_at"`
 }
+
+const invalidRoleMsg = `{"message":"role must be one of: admin, operator, responder, viewer"}`
 
 func userBindings(t *testing.T, s *store.MemoryStore, username string) []string {
 	t.Helper()
@@ -145,11 +149,29 @@ func TestCreateUser_AdminRoleBinds(t *testing.T) {
 	}
 }
 
+func TestCreateUser_ResponderRoleBinds(t *testing.T) {
+	h, s := newTestHandler(t)
+	w := postJSON(testMux(h), "/api/v1/users", `{"username":"phone","role":"responder"}`, "")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", w.Code, w.Body)
+	}
+	u, _ := s.GetUserByUsername(context.Background(), "phone")
+	if u.Role != store.RoleResponder {
+		t.Errorf("User.Role = %q, want responder", u.Role)
+	}
+	if got := userBindings(t, s, "phone"); len(got) != 1 || got[0] != store.RoleResponder {
+		t.Errorf("bindings = %v, want [responder]", got)
+	}
+}
+
 func TestCreateUser_InvalidRole(t *testing.T) {
 	h, _ := newTestHandler(t)
 	w := postJSON(testMux(h), "/api/v1/users", `{"username":"x","role":"superuser"}`, "")
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != invalidRoleMsg {
+		t.Errorf("body = %s, want %s", got, invalidRoleMsg)
 	}
 }
 
@@ -239,6 +261,46 @@ func TestRegenerateToken(t *testing.T) {
 	}
 	if !strings.Contains(resp.OnboardURL, "/api/v1/onboard/") {
 		t.Errorf("onboard_url = %q", resp.OnboardURL)
+	}
+}
+
+// TestOnboardToken_ExpiresAt checks that create and regenerate report when the
+// token stops being redeemable: the issue time the store stamped plus the TTL
+// it enforces, rounded down to the second, so never later.
+func TestOnboardToken_ExpiresAt(t *testing.T) {
+	for _, ttl := range []time.Duration{24 * time.Hour, 90 * time.Minute} {
+		s := newSeededStore(t)
+		s.SetTokenTTL(ttl)
+		mux := testMux(NewUserHandler(s, s, nil, testExternalURL, ttl))
+		for _, tc := range []struct{ path, body string }{
+			{"/api/v1/users", `{"username":"kim"}`},
+			{"/api/v1/users/kim/regenerate-token", ""},
+		} {
+			w := postJSON(mux, tc.path, tc.body, "")
+			if w.Code != http.StatusCreated && w.Code != http.StatusOK {
+				t.Fatalf("%s: status = %d (body %s)", tc.path, w.Code, w.Body)
+			}
+			var resp createResp
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("%s: decode: %v", tc.path, err)
+			}
+			u, _ := s.GetUserByUsername(context.Background(), "kim")
+			expiry := u.TokenIssuedAt.Add(ttl)
+			if resp.ExpiresAt == nil || resp.ExpiresAt.After(expiry) || expiry.Sub(*resp.ExpiresAt) >= 2*time.Second ||
+				resp.ExpiresAt.Nanosecond() != 0 {
+				t.Errorf("%s ttl=%s: expires_at = %v, want whole seconds just before %v", tc.path, ttl, resp.ExpiresAt, expiry)
+			}
+		}
+	}
+}
+
+// TestOnboardToken_NoExpiresAtWithoutTTL: a zero TTL means no expiry to the
+// stores, so there is no instant to report.
+func TestOnboardToken_NoExpiresAtWithoutTTL(t *testing.T) {
+	h, _ := newTestHandler(t)
+	w := postJSON(testMux(h), "/api/v1/users", `{"username":"lee"}`, "")
+	if w.Code != http.StatusCreated || strings.Contains(w.Body.String(), "expires_at") {
+		t.Errorf("status %d body %s, want 201 without expires_at", w.Code, w.Body)
 	}
 }
 
@@ -388,6 +450,25 @@ func TestUpdate_RoleChange(t *testing.T) {
 	}
 }
 
+func TestUpdate_RoleChangeToResponder(t *testing.T) {
+	h, s := newTestHandler(t)
+	mux := testMux(h)
+	seedAdmin(t, s, "admin")
+	postJSON(mux, "/api/v1/users", `{"username":"phone","role":"operator"}`, "")
+
+	w := patchAs(mux, "phone", `{"role":"responder"}`, "admin")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body)
+	}
+	u, _ := s.GetUserByUsername(context.Background(), "phone")
+	if u.Role != store.RoleResponder {
+		t.Errorf("User.Role = %q, want responder", u.Role)
+	}
+	if got := userBindings(t, s, "phone"); len(got) != 1 || got[0] != store.RoleResponder {
+		t.Errorf("bindings = %v, want [responder] (replaced)", got)
+	}
+}
+
 func TestUpdate_RoleChange_InvalidRole(t *testing.T) {
 	h, s := newTestHandler(t)
 	mux := testMux(h)
@@ -434,7 +515,7 @@ func TestUpdate_NothingToUpdate(t *testing.T) {
 
 func TestAudit_CreateAndDelete(t *testing.T) {
 	s := newSeededStore(t)
-	h := NewUserHandler(s, s, s, testExternalURL)
+	h := NewUserHandler(s, s, s, testExternalURL, 0)
 	mux := testMux(h)
 	seedAdmin(t, s, "admin")
 
@@ -497,6 +578,9 @@ func TestUpdate_InvalidRole(t *testing.T) {
 	w := patchAs(mux, "frank", `{"role":"superuser"}`, "admin")
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (non-builtin role)", w.Code)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != invalidRoleMsg {
+		t.Errorf("body = %s, want %s", got, invalidRoleMsg)
 	}
 	// User.Role must be unchanged after a rejected PATCH.
 	u, _ := s.GetUserByUsername(context.Background(), "frank")

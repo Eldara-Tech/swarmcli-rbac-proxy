@@ -44,7 +44,8 @@ Authorization has two composing layers (deny-wins):
      `{resources, verbs}` rules (`*` wildcards allowed); a `RoleBinding` maps a
      user to a role; effective permission is the union of all bound roles.
      **Default-deny** — an unmapped path or a missing grant is a `403`.
-   - **Built-in roles** `viewer` (read-only), `operator` (deploy/update stacks &
+   - **Built-in roles** `viewer` (read-only), `responder` (viewer plus scale,
+     restart and roll back services), `operator` (deploy/update stacks &
      services, exec/forward to non-infra workloads), and `admin` (`*`). Seeded
      on startup and editable; custom roles/bindings are managed via
      `/api/v1/roles` and `/api/v1/bindings` (admin-token protected).

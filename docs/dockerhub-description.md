@@ -54,7 +54,8 @@ docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix soc
 
 - **mTLS client certificates** — one certificate per user, no shared credentials.
 - **Role-based access control** — Kubernetes-style roles and per-user bindings,
-  default-deny, with built-in `viewer` / `operator` / `admin` plus custom roles.
+  default-deny, with built-in `viewer` / `responder` / `operator` / `admin` plus
+  custom roles.
 - **Infrastructure stack protection** — detects the proxy's own Swarm stack and
   refuses external attempts to change its services, secrets, networks or configs.
 - **Exec/attach guard** — non-admin users cannot exec into protected containers.

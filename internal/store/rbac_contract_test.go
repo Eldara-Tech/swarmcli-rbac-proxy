@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -231,6 +232,70 @@ func testRBACStoreContract(t *testing.T, newStore func() rbacTestStore) {
 		got, _ := s.GetRole(ctx, RoleViewer)
 		if len(got.Rules) != 1 || got.Rules[0].Resources[0] != ResourceSecrets {
 			t.Fatalf("re-seed clobbered admin edit: %+v", got.Rules)
+		}
+	})
+
+	t.Run("Seed_AddsResponderToExistingStore", func(t *testing.T) {
+		s := newStore()
+		// A store seeded before responder existed, with one built-in customised.
+		roles := DefaultRoles()
+		for i := range roles {
+			if roles[i].Name == RoleResponder {
+				continue
+			}
+			if err := s.CreateRole(ctx, &roles[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		edited := []PermissionRule{{Resources: []string{ResourceSecrets}, Verbs: []string{VerbGet}}}
+		if err := s.UpdateRole(ctx, &Role{Name: RoleOperator, Rules: edited}); err != nil {
+			t.Fatal(err)
+		}
+		if err := SeedDefaultRoles(ctx, s); err != nil {
+			t.Fatalf("SeedDefaultRoles: %v", err)
+		}
+		got, err := s.GetRole(ctx, RoleResponder)
+		if err != nil {
+			t.Fatalf("responder not seeded: %v", err)
+		}
+		if !got.Builtin || !reflect.DeepEqual(got.Rules, defaultRole(t, RoleResponder).Rules) {
+			t.Errorf("responder = %+v, want the builtin default", got)
+		}
+		if op, _ := s.GetRole(ctx, RoleOperator); !reflect.DeepEqual(op.Rules, edited) {
+			t.Errorf("operator edit clobbered: %+v", op.Rules)
+		}
+	})
+
+	t.Run("MigrateLegacyRoles_RebindsByUserRole", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		want := map[string]string{}
+		for _, tc := range []struct{ user, role, binding string }{
+			{"adm", RoleAdmin, RoleAdmin},
+			{"op", RoleOperator, RoleOperator},
+			{"resp", RoleResponder, RoleResponder},
+			{"view", RoleViewer, RoleViewer},
+			{"legacy", "user", RoleOperator},
+		} {
+			if _, err := CreateUserWithBinding(ctx, s, s, tc.user, tc.role); err != nil {
+				t.Fatal(err)
+			}
+			// Remove every binding, as DELETE /api/v1/bindings/{id} can.
+			bs, _ := s.ListBindingsForUser(ctx, tc.user)
+			for _, b := range bs {
+				if err := s.DeleteBinding(ctx, b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want[tc.user] = tc.binding
+		}
+		if err := MigrateLegacyRoles(ctx, s, s); err != nil {
+			t.Fatalf("MigrateLegacyRoles: %v", err)
+		}
+		for user, role := range want {
+			if bs, _ := s.ListBindingsForUser(ctx, user); len(bs) != 1 || bs[0].RoleName != role {
+				t.Errorf("%s re-bound to %+v, want [%s]", user, bs, role)
+			}
 		}
 	})
 

@@ -154,10 +154,10 @@ The CA has a 10-year validity and effectively never changes, so a single
 re-imports users, the audit log, and the RBAC roles and bindings **verbatim** —
 preserving IDs, timestamps and token state — in a single transaction across all
 tables, so a failed restore leaves the store untouched rather than half-applied.
-Because roles and bindings are carried, a restored user keeps the exact role
-they had (a `viewer` stays a `viewer`); without them the startup legacy
-migration would re-derive bindings from `User.Role` and silently promote
-non-admins to `operator`.
+Because roles and bindings are carried, a restored user keeps the exact
+bindings they had; without them the startup legacy migration would re-derive
+one binding per user from `User.Role` alone, dropping custom roles and extra
+bindings and silently promoting a legacy `user` to `operator`.
 
 ```bash
 docker exec -i "$(docker ps -q -f name=rbac_proxy)" \

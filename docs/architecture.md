@@ -86,7 +86,7 @@ swarm-rbac-proxy/
       roles.go          — RoleHandler: CRUD /api/v1/roles (admin-token protected)
       bindings.go       — BindingHandler: list/create/delete /api/v1/bindings (admin-token protected)
       rbac.go           — RBACMiddleware: per-role resource/verb authorization on the data plane (default-deny, stacks-label OR)
-      rbac_test.go      — RBAC middleware matrix tests (viewer/operator/admin × resources/verbs)
+      rbac_test.go      — RBAC middleware matrix tests (viewer/responder/operator/admin × resources/verbs)
       rbacmap.go        — mapRequest: HTTP {method,path} → {resource,verb}; stripDockerVersion shared helper
       rbacmap_test.go   — request-mapping table tests
       me.go             — MeHandler: GET /api/v1/me → caller's own {username, role, rules} from mTLS cert + RBAC store

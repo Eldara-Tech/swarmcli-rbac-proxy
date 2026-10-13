@@ -107,11 +107,14 @@ with it (deny-wins).
   `RoleBinding` maps a user → role. A user's effective permission is the union
   of all bound roles' rules. **Default-deny.** Persisted in all three stores
   (`internal/store/rbac.go`).
-- **Built-in roles** `viewer`/`operator`/`admin` are seeded idempotently on
-  startup (`SeedDefaultRoles`) and never overwritten if edited. Legacy users are
-  migrated on startup (`MigrateLegacyRoles`): `User.Role` admin→admin, else
-  →operator (operator, not viewer, so an upgraded non-admin keeps the
-  non-protected create/update/exec it had pre-RBAC). `User.Role` is retained as the source for the protected-stack
+- **Built-in roles** `viewer`/`responder`/`operator`/`admin` are seeded
+  idempotently on startup (`SeedDefaultRoles`, per role by name, so a new
+  built-in reaches an existing DB) and never overwritten if edited. Every user
+  with no binding is bound on startup (`MigrateLegacyRoles`) via
+  `bindingRoleForUserRole`: a built-in `User.Role` → itself, else (legacy
+  `user`) →operator (operator, not viewer, so an upgraded non-admin keeps the
+  non-protected create/update/exec it had pre-RBAC). It runs every start, so it
+  must not map a viewer or responder to operator. `User.Role` is retained as the source for the protected-stack
   `isAdmin` gate (a separate axis from RBAC).
 - **Mapping**: `internal/api/rbacmap.go` maps each request to one
   `{resource, verb}` (e.g. `GET /services`→`services:list`,
@@ -152,7 +155,10 @@ with it (deny-wins).
   duplicated here byte-for-byte; a hand-synced table is exactly what drifted in
   `docs/api.md` and `docs/configuration.md`, so it is a pointer now. The shape worth
   keeping in mind while editing `internal/api/rbacmap.go`: `viewer` is read-only and
-  has no access at all to volumes, configs or secrets; `operator` adds create/update
+  has no access at all to volumes, configs or secrets; `responder` is `viewer` plus
+  `services: update` and nothing else, for the mobile app — it stays non-root only
+  because #166's update-without-create limit applies to it, so it must never gain
+  create on services or stacks; `operator` adds create/update
   on stacks and services plus `exec`/`port-forward` create; only `admin` reaches
   secrets, swarm, roles/bindings and raw containers.
 
@@ -222,10 +228,10 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 
 ## API Endpoints
 
-- `POST /api/v1/users` — Create user (`{"username":"alice","role":"operator"}`; role ∈ {admin, operator, viewer}, default operator) → 201 `{"user":{…},"onboard_token":"<hex>","onboard_url":"<external>/api/v1/onboard/<token>"}`. Also creates the matching RBAC binding (admin→admin, operator→operator, viewer→viewer) so the legacy `User.Role` and the RBAC binding stay in sync. The private key is **not** returned — it is generated on the user's machine when they redeem the token at the onboard endpoint.
+- `POST /api/v1/users` — Create user (`{"username":"alice","role":"operator"}`; role ∈ {admin, operator, responder, viewer}, default operator) → 201 `{"user":{…},"onboard_token":"<hex>","onboard_url":"<external>/api/v1/onboard/<token>","expires_at":"<RFC 3339>"}`. Also creates the matching RBAC binding (admin→admin, operator→operator, responder→responder, viewer→viewer) so the legacy `User.Role` and the RBAC binding stay in sync. `expires_at` is the clock read before `SetOnboardToken` stamps the issue time, truncated to the second, plus the TTL from the config value the store's `SetTokenTTL` also gets (`routeDeps.onboardTokenTTL`), so it is never later than what `ConsumeOnboardToken` enforces. The private key is **not** returned — the proxy generates it when the token is redeemed at the onboard endpoint and returns it once in that tar.
 - `GET /api/v1/users` — List all users (200, always returns array)
 - `PATCH /api/v1/users/{username}` — Update user (`{"enabled":false}` and/or `{"role":"viewer"}`) → 200 with the updated user. Refuses self-disable / self-role-change (409) and any change that would remove the last admin (409); a role change replaces the user's bindings and updates `User.Role` atomically.
-- `POST /api/v1/users/{username}/regenerate-token` — Issue a fresh one-time onboard token → 200 `{"onboard_token":…,"onboard_url":…}` (404 if user not found)
+- `POST /api/v1/users/{username}/regenerate-token` — Issue a fresh one-time onboard token → 200 `{"onboard_token":…,"onboard_url":…,"expires_at":…}` (404 if user not found)
 - `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found). Refuses to delete the caller themselves (409) or the last admin (409), and cascades the user's role bindings.
 - `GET|POST /api/v1/roles`, `GET|PUT|DELETE /api/v1/roles/{name}` — RBAC role CRUD (admin-authorized: bearer token OR mTLS admin). Built-in roles can't be deleted (409); in-use roles can't be deleted (409); updates that would remove the last admin are refused (409)
 - `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-authorized). Deleting the last admin binding is refused (409)

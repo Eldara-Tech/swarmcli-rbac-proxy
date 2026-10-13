@@ -54,7 +54,7 @@ jq '.schema, .version, (.users|length), (.roles|length), (.bindings|length), (.c
 # "swarmcli-rbac-proxy/backup"
 # 1
 # 3
-# R   (>= the three built-in roles)
+# R   (>= the four built-in roles)
 # B
 # true
 jq '.users[0] | {username, role, has_token: (.onboard_token|length>0)}' "$WORK/backup.json"

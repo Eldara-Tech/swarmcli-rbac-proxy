@@ -62,7 +62,7 @@ func serviceSocket(t *testing.T) string {
 }
 
 // newUpdateEnv binds u to an update-only role (reads plus update), s to stacks
-// create+update, o to operator and v to viewer.
+// create+update, r to the built-in responder, o to operator and v to viewer.
 func newUpdateEnv(t *testing.T, sock string) (*RBACMiddleware, *store.MemoryStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -80,7 +80,7 @@ func newUpdateEnv(t *testing.T, sock string) (*RBACMiddleware, *store.MemoryStor
 			t.Fatal(err)
 		}
 	}
-	for user, role := range map[string]string{"u": "updater", "s": "stacker", "o": store.RoleOperator, "v": store.RoleViewer} {
+	for user, role := range map[string]string{"u": "updater", "s": "stacker", "r": store.RoleResponder, "o": store.RoleOperator, "v": store.RoleViewer} {
 		if err := s.CreateUser(ctx, &store.User{Username: user}); err != nil {
 			t.Fatal(err)
 		}
@@ -171,6 +171,22 @@ func TestServiceUpdate_WithoutCreate(t *testing.T) {
 		{"invalid JSON", "u", "/services/web/update?version=42", "{", nil, deny, ""},
 		{"empty body", "u", "/services/web/update?version=42", "", nil, deny, ""},
 		{"oversized body", "u", "/services/web/update?version=42", strings.Repeat(" ", 2<<20+1), nil, deny, ""},
+
+		// The built-in responder role is this shape: viewer's reads plus
+		// services:update.
+		{"responder scale", "r", "/v1.45/services/web/update?version=42",
+			specWith(t, func(s map[string]any) { s["Mode"] = map[string]any{"Replicated": map[string]any{"Replicas": 5}} }),
+			nil, allow, "/services/web/update"},
+		{"responder restart", "r", "/v1.53/services/web/update?version=42",
+			specWith(t, func(s map[string]any) { task(s)["ForceUpdate"] = 2 }), nil, allow, "/services/web/update"},
+		{"responder rollback", "r", "/v1.45/services/web/update?version=42&rollback=previous",
+			evilMount, nil, allow, "/services/web/update"},
+		{"responder stack-labeled scale", "r", "/services/stacked/update?version=42",
+			strings.Replace(liveSpec, `"Labels":{}`, `"Labels":{"com.docker.stack.namespace":"app"}`, 1),
+			nil, allow, "/services/stacked/update"},
+		{"responder image", "r", "/services/web/update?version=42",
+			specWith(t, func(s map[string]any) { container(s)["Image"] = "evil:1" }), nil, deny, ""},
+		{"responder bind mount", "r", "/services/web/update?version=42", evilMount, nil, deny, ""},
 
 		// Callers who may create the service keep the full update, unrewritten.
 		{"operator", "o", "/v1.45/services/web/update?version=42", evilMount, nil, allow, "/v1.45/services/web/update"},

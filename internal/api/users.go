@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	proxylog "swarm-rbac-proxy/internal/log"
 	"swarm-rbac-proxy/internal/store"
@@ -29,12 +30,15 @@ type UserHandler struct {
 	rbac        store.RBACStore
 	audit       store.AuditStore
 	externalURL string
+	tokenTTL    time.Duration
 }
 
 // NewUserHandler creates a handler backed by the given stores. externalURL is
-// the public proxy origin used to build onboarding URLs (PROXY_EXTERNAL_URL).
-func NewUserHandler(s store.UserStore, rbac store.RBACStore, audit store.AuditStore, externalURL string) *UserHandler {
-	return &UserHandler{store: s, rbac: rbac, audit: audit, externalURL: externalURL}
+// the public proxy origin used to build onboarding URLs (PROXY_EXTERNAL_URL);
+// tokenTTL is the onboarding-token lifetime the store enforces on redemption
+// (PROXY_ONBOARDING_TOKEN_TTL), reported back as expires_at.
+func NewUserHandler(s store.UserStore, rbac store.RBACStore, audit store.AuditStore, externalURL string, tokenTTL time.Duration) *UserHandler {
+	return &UserHandler{store: s, rbac: rbac, audit: audit, externalURL: externalURL, tokenTTL: tokenTTL}
 }
 
 func (h *UserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +75,7 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	role, ok := normalizeCreateRole(req.Role)
 	if !ok {
-		writeError(w, http.StatusBadRequest, "role must be one of: admin, operator, viewer")
+		writeError(w, http.StatusBadRequest, "role must be one of: admin, operator, responder, viewer")
 		return
 	}
 
@@ -94,7 +98,7 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 	l().Infow("user created", "id", u.ID, "username", u.Username, "role", u.Role)
 	recordAudit(h.audit, r, store.AuditUserCreated, "user:"+u.Username, "success", "role:"+u.Role)
 
-	token, err := h.issueToken(r, u.Username)
+	resp, err := h.issueToken(r, u.Username)
 	if err != nil {
 		// The user exists (and is audited above) but has no usable token; surface
 		// the failure so the caller can retry (regenerate-token) rather than
@@ -104,7 +108,8 @@ func (h *UserHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, onboardResponse{User: u, OnboardToken: token, OnboardURL: h.onboardURL(token)})
+	resp.User = u
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (h *UserHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +172,7 @@ func (h *UserHandler) RegenerateToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	token, err := h.issueToken(r, username)
+	resp, err := h.issueToken(r, username)
 	if err != nil {
 		l().Errorw("set onboard token failed", "error", err, "username", username)
 		writeError(w, http.StatusInternalServerError, "internal error")
@@ -175,7 +180,7 @@ func (h *UserHandler) RegenerateToken(w http.ResponseWriter, r *http.Request) {
 	}
 	l().Infow("onboard token regenerated", "username", username)
 	recordAudit(h.audit, r, store.AuditTokenRegenerated, "user:"+username, "success", "")
-	writeJSON(w, http.StatusOK, onboardResponse{OnboardToken: token, OnboardURL: h.onboardURL(token)})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // Update handles PATCH /api/v1/users/{username}: enable/disable and/or role
@@ -208,7 +213,7 @@ func (h *UserHandler) Update(w http.ResponseWriter, r *http.Request) {
 	// management API cannot set User.Role to an arbitrary string that the
 	// protected-stack admin gate (User.Role == "admin") would then misread.
 	if req.Role != nil && !isBuiltinRole(*req.Role) {
-		writeError(w, http.StatusBadRequest, "role must be one of: admin, operator, viewer")
+		writeError(w, http.StatusBadRequest, "role must be one of: admin, operator, responder, viewer")
 		return
 	}
 	self := actorFromRequest(r) == username
@@ -267,16 +272,26 @@ func (h *UserHandler) writeUpdateErr(w http.ResponseWriter, r *http.Request, use
 	}
 }
 
-// issueToken generates a fresh one-time onboard token and persists it.
-func (h *UserHandler) issueToken(r *http.Request, username string) (string, error) {
+// issueToken generates a fresh one-time onboard token, persists it, and returns
+// the response body for it (without the user).
+func (h *UserHandler) issueToken(r *http.Request, username string) (onboardResponse, error) {
 	token, err := generateOnboardToken()
 	if err != nil {
-		return "", err
+		return onboardResponse{}, err
 	}
+	// Read before SetOnboardToken stamps the issue time that ConsumeOnboardToken
+	// measures the TTL from, and truncated to the second (postgres keeps only
+	// microseconds), so expires_at is never later than the real expiry.
+	issued := time.Now().UTC().Truncate(time.Second)
 	if err := h.store.SetOnboardToken(r.Context(), username, token); err != nil {
-		return "", err
+		return onboardResponse{}, err
 	}
-	return token, nil
+	resp := onboardResponse{OnboardToken: token, OnboardURL: h.onboardURL(token)}
+	if h.tokenTTL > 0 { // the stores treat a zero TTL as no expiry
+		expires := issued.Add(h.tokenTTL)
+		resp.ExpiresAt = &expires
+	}
+	return resp, nil
 }
 
 // onboardURL builds the public onboarding URL for a token, or "" when no
@@ -293,20 +308,22 @@ func (h *UserHandler) onboardURL(token string) string {
 }
 
 // onboardResponse is the body for create and regenerate-token: the user (omitted
-// for regenerate) plus the one-time token and its ready-to-use onboard URL. The
-// private key is never here — it is generated on the user's machine when they
-// redeem the token at GET /api/v1/onboard/{token}.
+// for regenerate) plus the one-time token, its ready-to-use onboard URL and when
+// it stops being redeemable. The private key is never here — the proxy generates
+// it when the token is redeemed at GET /api/v1/onboard/{token} and returns it,
+// with the signed certificate, in that response's context tar.
 type onboardResponse struct {
 	User         *store.User `json:"user,omitempty"`
 	OnboardToken string      `json:"onboard_token"`
 	OnboardURL   string      `json:"onboard_url,omitempty"`
+	ExpiresAt    *time.Time  `json:"expires_at,omitempty"`
 }
 
-// isBuiltinRole reports whether role is exactly one of the three assignable
+// isBuiltinRole reports whether role is exactly one of the four assignable
 // built-in roles (no empty-string defaulting, unlike normalizeCreateRole).
 func isBuiltinRole(role string) bool {
 	switch role {
-	case store.RoleAdmin, store.RoleOperator, store.RoleViewer:
+	case store.RoleAdmin, store.RoleOperator, store.RoleResponder, store.RoleViewer:
 		return true
 	default:
 		return false

@@ -117,12 +117,13 @@ const (
 
 // Built-in role names.
 const (
-	RoleViewer   = "viewer"
-	RoleOperator = "operator"
-	RoleAdmin    = "admin"
+	RoleViewer    = "viewer"
+	RoleResponder = "responder"
+	RoleOperator  = "operator"
+	RoleAdmin     = "admin"
 )
 
-// DefaultRoles returns the three built-in roles. Their rules encode the agreed
+// DefaultRoles returns the four built-in roles. Their rules encode the agreed
 // permission matrix; they are seeded idempotently and never overwritten once
 // present (an admin may customise them). See the proxy CLAUDE.md for the matrix.
 func DefaultRoles() []Role {
@@ -136,6 +137,21 @@ func DefaultRoles() []Role {
 					ResourceStacks, ResourceStackLogs, ResourceServices,
 					ResourceNodes, ResourceNetworks, ResourceSystem,
 				}, Verbs: readVerbs},
+			},
+		},
+		{
+			Name:    RoleResponder,
+			Builtin: true,
+			Rules: []PermissionRule{
+				// Exactly viewer's reads.
+				{Resources: []string{
+					ResourceStacks, ResourceStackLogs, ResourceServices,
+					ResourceNodes, ResourceNetworks, ResourceSystem,
+				}, Verbs: readVerbs},
+				// Update without create, which operationalUpdateDenial
+				// (internal/api) confines to scale, restart and rollback. Granting
+				// create on services or stacks would lift that limit.
+				{Resources: []string{ResourceServices}, Verbs: []string{VerbUpdate}},
 			},
 		},
 		{
@@ -264,12 +280,14 @@ func SeedDefaultRoles(ctx context.Context, rs RBACStore) error {
 }
 
 // MigrateLegacyRoles creates a role binding for every user that has none yet,
-// derived from the legacy User.Role field (admin → admin, anything else →
-// operator). operator (not viewer) is the non-admin default so an upgraded
-// legacy user keeps the non-protected create/update/exec they had under the
-// pre-RBAC model; viewer is a stricter, read-only tier an admin assigns
-// explicitly. Idempotent: users that already have a binding are left untouched.
-// User.Role is retained as the source for the protected-stack admin gate.
+// derived from the legacy User.Role field by bindingRoleForUserRole: a built-in
+// role name binds to itself, anything else (the pre-RBAC "user") to operator.
+// operator (not viewer) is that fallback so an upgraded legacy user keeps the
+// non-protected create/update/exec they had under the pre-RBAC model. It runs
+// on every start, so it also re-binds a user whose bindings were all removed,
+// and must not turn a viewer or responder into an operator doing so.
+// Idempotent: users that already have a binding are left untouched. User.Role
+// is retained as the source for the protected-stack admin gate.
 func MigrateLegacyRoles(ctx context.Context, us UserStore, rs RBACStore) error {
 	users, err := us.ListUsers(ctx)
 	if err != nil {
@@ -283,11 +301,7 @@ func MigrateLegacyRoles(ctx context.Context, us UserStore, rs RBACStore) error {
 		if len(existing) > 0 {
 			continue
 		}
-		roleName := RoleOperator
-		if u.Role == RoleAdmin {
-			roleName = RoleAdmin
-		}
-		b := &RoleBinding{Username: u.Username, RoleName: roleName}
+		b := &RoleBinding{Username: u.Username, RoleName: bindingRoleForUserRole(u.Role)}
 		if err := rs.CreateBinding(ctx, b); err != nil && !errors.Is(err, ErrBindingExists) {
 			return err
 		}
@@ -400,12 +414,12 @@ func UserIsAdmin(ctx context.Context, rs RBACStore, username string) (bool, erro
 }
 
 // bindingRoleForUserRole maps a legacy User.Role value to the RBAC role a user
-// should be bound to, matching MigrateLegacyRoles / cmdUserAdd: admin → admin,
-// an explicit built-in (operator/viewer) → itself, and any other value (the
-// legacy "user") → operator.
+// should be bound to, for both MigrateLegacyRoles and CreateUserWithBinding:
+// admin → admin, an explicit built-in (operator/responder/viewer) → itself, and
+// any other value (the legacy "user") → operator.
 func bindingRoleForUserRole(role string) string {
 	switch role {
-	case RoleAdmin, RoleOperator, RoleViewer:
+	case RoleAdmin, RoleOperator, RoleResponder, RoleViewer:
 		return role
 	default:
 		return RoleOperator
