@@ -829,6 +829,11 @@ func main() {
 	if err := store.SeedDefaultRoles(context.Background(), rbacStore); err != nil {
 		l().Fatalw("seed default roles failed", "error", err)
 	}
+	if shadowed, err := store.ShadowedBuiltins(context.Background(), rbacStore); err != nil {
+		l().Warnw("could not check for custom roles named like built-ins", "error", err)
+	} else if len(shadowed) > 0 {
+		l().Warnw("custom roles hold built-in role names and keep their own rules; assigning one by name grants those rules", "roles", shadowed)
+	}
 	if err := store.MigrateLegacyRoles(context.Background(), userStore, rbacStore); err != nil {
 		l().Fatalw("legacy role migration failed", "error", err)
 	}

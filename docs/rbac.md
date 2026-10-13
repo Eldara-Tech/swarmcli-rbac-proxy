@@ -39,7 +39,9 @@ sentinel and are therefore **admin-only**.
 
 Four roles are seeded on startup and are editable (an admin can adjust their
 rules; they are never overwritten if you do). They cannot be deleted. A role
-added in a later release is seeded on the next start of an existing install.
+added in a later release is seeded on the next start of an existing install,
+unless a custom role already has its name: that role keeps its own rules, and
+the proxy logs a warning at every start naming it.
 
 - **`viewer`** — read-only across the common Swarm resources. Cannot read
   secrets, volumes, or configs; cannot exec, deploy, or mutate anything.

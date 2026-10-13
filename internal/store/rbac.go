@@ -279,6 +279,26 @@ func SeedDefaultRoles(ctx context.Context, rs RBACStore) error {
 	return nil
 }
 
+// ShadowedBuiltins names the built-in roles whose name an existing custom role
+// already holds. Seeding goes by name, so such a role keeps its custom rules,
+// and anything that assigns the built-in by name gets those rules instead.
+func ShadowedBuiltins(ctx context.Context, rs RBACStore) ([]string, error) {
+	var shadowed []string
+	for _, r := range DefaultRoles() {
+		existing, err := rs.GetRole(ctx, r.Name)
+		if errors.Is(err, ErrRoleNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !existing.Builtin {
+			shadowed = append(shadowed, r.Name)
+		}
+	}
+	return shadowed, nil
+}
+
 // MigrateLegacyRoles creates a role binding for every user that has none yet,
 // derived from the legacy User.Role field by bindingRoleForUserRole: a built-in
 // role name binds to itself, anything else (the pre-RBAC "user") to operator.

@@ -266,6 +266,31 @@ func testRBACStoreContract(t *testing.T, newStore func() rbacTestStore) {
 		}
 	})
 
+	t.Run("ShadowedBuiltins_NamesACustomRoleHoldingABuiltinName", func(t *testing.T) {
+		s := newStore()
+		// An admin made their own "responder" before the built-in existed.
+		custom := &Role{Name: RoleResponder, Rules: []PermissionRule{{Resources: []string{ResourceExec}, Verbs: []string{VerbCreate}}}}
+		if err := s.CreateRole(ctx, custom); err != nil {
+			t.Fatal(err)
+		}
+		if err := SeedDefaultRoles(ctx, s); err != nil {
+			t.Fatalf("SeedDefaultRoles: %v", err)
+		}
+		got, err := ShadowedBuiltins(ctx, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, []string{RoleResponder}) {
+			t.Errorf("ShadowedBuiltins = %v, want [responder]", got)
+		}
+
+		clean := newStore()
+		_ = SeedDefaultRoles(ctx, clean)
+		if got, _ := ShadowedBuiltins(ctx, clean); len(got) != 0 {
+			t.Errorf("a freshly seeded store shadows %v", got)
+		}
+	})
+
 	t.Run("MigrateLegacyRoles_RebindsByUserRole", func(t *testing.T) {
 		s := newStore()
 		_ = SeedDefaultRoles(ctx, s)
