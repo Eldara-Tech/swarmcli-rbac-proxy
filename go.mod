@@ -2,7 +2,7 @@ module swarm-rbac-proxy
 
 go 1.27
 
-toolchain go1.27.0
+toolchain go1.27.2
 
 require (
 	github.com/jackc/pgx/v5 v5.11.0
@@ -22,7 +22,7 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
