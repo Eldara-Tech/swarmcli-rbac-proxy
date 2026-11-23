@@ -151,8 +151,9 @@ The ultimate test is an onboarded user surviving a full rebuild. Mirrors
 2. `docker exec <proxy> swcproxy backup --include-ca -o /data/dr.json`.
 3. Tear the stack down, delete the volume and the `rbac_client_ca*` secrets
    (simulate disaster). Redeploy on an empty volume.
-4. `docker exec -i <proxy> swcproxy restore -i /data/dr.json --ca-out /data/ca`
-   (`--ca-out` is created if it doesn't exist).
+4. `docker exec -i <proxy> swcproxy restore -i /data/dr.json --force --ca-out /data/ca`
+   (`--force` because the redeployed proxy has already seeded its store;
+   `--ca-out` is created if it doesn't exist).
 5. Run the printed `docker secret create` + `docker stack deploy` commands.
 6. From the **original** user's machine: `docker context use <ctx> && docker ps`.
 
