@@ -9,14 +9,38 @@ transaction. It is a **logical** copy built on the same export/import machinery
 as [backup and restore](backup-restore.md), so it is portable across backends
 rather than a file copy.
 
+## Pick the path by where PostgreSQL runs
+
+`migrate` needs one process that can open the SQLite file and reach PostgreSQL
+at the same time, which in practice means the running proxy container. Whether
+that container can reach PostgreSQL decides the path:
+
+- **External or managed PostgreSQL** the proxy container can already reach:
+  follow [Steps](#steps) below.
+- **PostgreSQL added to the proxy's own stack**: deploy it on a network the
+  proxy service is attached to and keep every existing secret. The proxy can
+  then reach it, so [Steps](#steps) apply unchanged.
+- **PostgreSQL on a network the proxy is not attached to, or on a new
+  cluster**: use [backup and restore](backup-restore.md) instead. Take
+  `swcproxy backup --include-ca --include-tokens -o /data/proxy-dr.json` on the
+  old proxy, then follow the [full cluster rebuild](backup-restore.md#full-cluster-rebuild-database--ca-bundle)
+  against a PostgreSQL-backed proxy, passing `--force` to `restore` because that
+  proxy seeds its built-in roles and seed user into the empty database on first
+  start.
+
+Whichever path you take, the proxy must keep serving the **old** client CA. A
+freshly bootstrapped deployment mints a new one, and every existing
+`docker context` then fails mTLS until its user re-onboards. `migrate` never
+touches the CA (see below); the backup path carries it only with `--include-ca`.
+
 ## What moves, and what does not
 
 Migrated (everything in the database):
 
 - **Users** — including `enabled` state and **pending onboarding tokens** (so a
-  user who is mid-onboarding is not broken). Unlike `swcproxy backup`, migrate
-  copies tokens verbatim: it is a direct store-to-store transfer with no
-  artifact written to disk.
+  user who is mid-onboarding is not broken). Unlike a default
+  `swcproxy backup`, migrate copies tokens verbatim: it is a direct
+  store-to-store transfer with no artifact written to disk.
 - **Audit log** — full history.
 - **RBAC roles and bindings** — including custom roles and non-default bindings.
 
@@ -30,7 +54,7 @@ Not in the database, and therefore unaffected by migration:
 
 ## Prerequisites
 
-- A reachable PostgreSQL database and a connection URL. Use a verified-TLS DSN
+- A PostgreSQL database the proxy can reach, and its URL. Use a verified-TLS DSN
   in production: `postgres://user:pass@host:5432/db?sslmode=verify-full`
   (`sslmode=disable` only on a trusted private network).
 - The `swcproxy` CLI, which ships in the proxy image. Run it inside the proxy
@@ -92,9 +116,8 @@ SQLite file — keep the maintenance window tight.
 
 ## Notes
 
-- migrate is one-directional (SQLite → PostgreSQL); it is the documented path
-  the issue calls for. The underlying export/import is symmetric, so the reverse
-  is mechanically possible via [backup/restore](backup-restore.md) if ever
-  needed.
+- migrate is one-directional (SQLite → PostgreSQL). The underlying
+  export/import is symmetric, so the reverse is mechanically possible via
+  [backup/restore](backup-restore.md) if ever needed.
 - `swcproxy` commands always **fail fast** on an unreachable database (no
   retry). The connection wait applies only to the long-running proxy server.
