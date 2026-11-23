@@ -46,7 +46,10 @@ swarm-rbac-proxy/
     swcproxy/
       main.go           — Admin CLI: version, user ls/add/delete/regenerate-token, audit ls (direct store access)
       backup.go         — Admin CLI: backup/restore (delegates artifact assembly to internal/backup; optional CA bundle; default-location output resolution)
+      migrate.go        — Admin CLI: `migrate` (SQLite → PostgreSQL logical copy via store Export→Restore; fail-fast on the dest; db.migrated audit)
       main_test.go      — CLI unit tests (flag parsing, helpers)
+      migrate_test.go   — `parseMigrateArgs` unit tests (no DB)
+      migrate_integration_test.go — `swcproxy migrate` e2e (//go:build integration; SQLite source → TEST_DATABASE_URL postgres dest)
   internal/
     backup/
       backup.go         — Logical backup artifact (Doc/User/CA schema incl. roles+bindings, Create with token-redaction, Marshal/ToData/WriteToDir [O_EXCL, no overwrite]/DefaultDir/Filename), shared by the swcproxy CLI and the server's /startbackup handler
@@ -68,12 +71,13 @@ swarm-rbac-proxy/
       rbac.go           — RBACStore interface, Role/RoleBinding/PermissionRule types, resource/verb vocabulary, built-in roles, effective-permission resolver, seeding, legacy migration, last-admin lockout helpers
       memory.go         — in-memory UserStore + AuditStore + RBACStore + BackupStore (dev/testing)
       sqlite.go         — SQLite UserStore + AuditStore + RBACStore + BackupStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
-      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore + BackupStore (pgx/v5, with migrations; rules stored as JSONB)
+      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore + BackupStore (pgx/v5, with migrations; rules stored as JSONB). NewPostgresStoreWithRetry adds startup connection-wait (server-only; CLI fails fast)
       contract_test.go  — shared contract tests for all store implementations (user + audit)
       rbac_contract_test.go — shared RBAC contract tests (roles, bindings, resolver, seeding, migration, lockout)
       memory_test.go    — memory store unit tests
       sqlite_test.go    — SQLite store unit tests (contract + WAL)
       postgres_test.go  — postgres integration tests (//go:build integration)
+      postgres_retry_test.go — NewPostgresStoreWithRetry fail-fast/timeout/cancel paths (no DB, fast suite)
     api/
       auth.go           — RequireToken middleware (bearer token validation)
       auth_test.go      — auth middleware tests

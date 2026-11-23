@@ -760,13 +760,13 @@ func main() {
 			l().Fatalw("sqlite store init failed", "error", err)
 		}
 		defer sq.Close()
-		sq.SetTokenTTL(cfg.OnboardingTokenTTL)
+		sq.SetTokenTTL(time.Duration(cfg.OnboardingTokenTTL))
 		userStore = sq
 		auditStore = sq
 		rbacStore = sq
 	case "memory":
 		ms := store.NewMemoryStore()
-		ms.SetTokenTTL(cfg.OnboardingTokenTTL)
+		ms.SetTokenTTL(time.Duration(cfg.OnboardingTokenTTL))
 		userStore = ms
 		auditStore = ms
 		rbacStore = ms
@@ -774,19 +774,19 @@ func main() {
 		if cfg.DatabaseURL == "" {
 			l().Fatalw("missing required config", "error", "database_url is required when store=postgres")
 		}
-		pg, err := store.NewPostgresStore(context.Background(), cfg.DatabaseURL)
+		pg, err := store.NewPostgresStoreWithRetry(context.Background(), cfg.DatabaseURL, time.Duration(cfg.DatabaseConnectTimeout))
 		if err != nil {
 			l().Fatalw("postgres store init failed", "error", err)
 		}
 		defer pg.Close()
-		pg.SetTokenTTL(cfg.OnboardingTokenTTL)
+		pg.SetTokenTTL(time.Duration(cfg.OnboardingTokenTTL))
 		userStore = pg
 		auditStore = pg
 		rbacStore = pg
 	default:
 		l().Fatalw("unknown store type", "store", cfg.Store)
 	}
-	l().Infow("onboarding token TTL", "ttl", cfg.OnboardingTokenTTL)
+	l().Infow("onboarding token TTL", "ttl", time.Duration(cfg.OnboardingTokenTTL))
 
 	// T7b: refuse to start with an empty admin token when the user store
 	// already contains admin-role identities. On a redeploy that drops
@@ -949,7 +949,7 @@ func main() {
 		ca:                ca,
 		adminToken:        cfg.AdminToken,
 		externalURL:       cfg.ExternalURL,
-		onboardTokenTTL:   cfg.OnboardingTokenTTL,
+		onboardTokenTTL:   time.Duration(cfg.OnboardingTokenTTL),
 		backupDir:         backup.DefaultDir(cfg),
 		agentManagerProxy: agentManagerProxy,
 		dockerProxy:       dockerProxy,

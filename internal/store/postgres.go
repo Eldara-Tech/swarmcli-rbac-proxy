@@ -127,6 +127,57 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 	return &PostgresStore{pool: pool}, nil
 }
 
+// NewPostgresStoreWithRetry calls NewPostgresStore, retrying with exponential
+// backoff (500ms → capped at 5s) until it succeeds or `timeout` elapses. It
+// exists so the long-lived proxy survives a not-yet-ready database on a Swarm
+// stack deploy (proxy and postgres start together) instead of crash-looping.
+// timeout <= 0 means fail-fast — a single attempt, used by the CLI / migrate
+// paths where an interactive operator prefers a crisp error.
+func NewPostgresStoreWithRetry(ctx context.Context, connString string, timeout time.Duration) (*PostgresStore, error) {
+	if timeout <= 0 {
+		return NewPostgresStore(ctx, connString)
+	}
+	// A malformed DSN never becomes reachable — fail fast instead of retrying a
+	// deterministic parse error for the whole timeout window.
+	if _, err := pgxpool.ParseConfig(connString); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	const maxBackoff = 5 * time.Second
+	backoff := 500 * time.Millisecond
+	for attempt := 1; ; attempt++ {
+		// Bound each attempt by the shared deadline: pgxpool connects lazily
+		// inside NewPostgresStore (the first Exec), so against a black-holed host
+		// a single attempt would otherwise block on the OS TCP timeout and
+		// overrun `timeout` by minutes.
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		s, err := NewPostgresStore(attemptCtx, connString)
+		cancel()
+		if err == nil {
+			return s, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, err
+		}
+		wait := backoff
+		if wait > remaining {
+			wait = remaining
+		}
+		lPostgres().Warnw("waiting for postgres", "attempt", attempt, "retry_in", wait, "error", err)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+		if backoff < maxBackoff {
+			if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
 // Close releases the connection pool.
 func (s *PostgresStore) Close() {
 	s.pool.Close()

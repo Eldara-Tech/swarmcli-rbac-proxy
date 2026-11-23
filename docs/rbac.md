@@ -242,7 +242,7 @@ The complete action vocabulary, which is what you need when writing a SIEM rule:
 | Denials | `rbac.denied` (policy engine), `guard.blocked` (protected-stack guard, volume denials included) |
 | RBAC management | `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted` |
 | Volumes | `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` |
-| Backup | `backup.exported`, `backup.restored` |
+| Backup | `backup.exported`, `backup.restored`, `db.migrated` (a completed `swcproxy migrate`, recorded on the destination store) |
 
 Volume actions are recorded on **success**; a volume denial appears as
 `guard.blocked` like every other guarded operation.

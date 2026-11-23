@@ -15,7 +15,42 @@ import (
 // DefaultOnboardingTokenTTL is the default lifetime for newly issued
 // onboarding tokens when PROXY_ONBOARDING_TOKEN_TTL is unset. Leaked
 // tokens in wikis, CI logs, or chat stop being usable after this window.
-const DefaultOnboardingTokenTTL = 24 * time.Hour
+const DefaultOnboardingTokenTTL = Duration(24 * time.Hour)
+
+// DefaultDatabaseConnectTimeout is how long the proxy waits (with backoff) for
+// PostgreSQL to become reachable at startup when PROXY_DATABASE_CONNECT_TIMEOUT
+// is unset.
+const DefaultDatabaseConnectTimeout = Duration(30 * time.Second)
+
+// Duration is a time.Duration that JSON-decodes from either a Go duration
+// string ("30s", "2h") or a raw nanosecond number, so config.json accepts the
+// same human-friendly form as the PROXY_* duration env vars (stock
+// encoding/json rejects a JSON string into a bare time.Duration).
+type Duration time.Duration
+
+// String renders the underlying duration (e.g. "24h0m0s") for logs and errors.
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// UnmarshalJSON accepts a Go duration string ("30s") or a nanosecond number.
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case string:
+		parsed, err := time.ParseDuration(x)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", x, err)
+		}
+		*d = Duration(parsed)
+	case float64:
+		*d = Duration(int64(x))
+	default:
+		return fmt.Errorf("duration must be a string like \"30s\" or a nanosecond number, got %T", v)
+	}
+	return nil
+}
 
 // Config holds all proxy configuration values.
 type Config struct {
@@ -65,7 +100,14 @@ type Config struct {
 	// tokens. Zero is interpreted as DefaultOnboardingTokenTTL after Load.
 	// Must be strictly positive after defaults are applied; Load returns
 	// an error on non-positive values.
-	OnboardingTokenTTL time.Duration `json:"onboarding_token_ttl"`
+	OnboardingTokenTTL Duration `json:"onboarding_token_ttl"`
+
+	// DatabaseConnectTimeout bounds how long the proxy waits for PostgreSQL to
+	// become reachable at startup before giving up (the server retries with
+	// backoff so a stack deploy where postgres starts alongside the proxy does
+	// not crash-loop). Zero is interpreted as DefaultDatabaseConnectTimeout
+	// after Load. Applies to the server only; the CLI/migrate paths fail fast.
+	DatabaseConnectTimeout Duration `json:"database_connect_timeout"`
 }
 
 // envOverrides maps Config fields to their environment variable names.
@@ -149,7 +191,18 @@ func Load(path string) (Config, error) {
 		if d <= 0 {
 			return cfg, fmt.Errorf("PROXY_ONBOARDING_TOKEN_TTL must be a positive duration, got %q", v)
 		}
-		cfg.OnboardingTokenTTL = d
+		cfg.OnboardingTokenTTL = Duration(d)
+	}
+
+	if v := os.Getenv("PROXY_DATABASE_CONNECT_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, fmt.Errorf("parse PROXY_DATABASE_CONNECT_TIMEOUT %q: %w", v, err)
+		}
+		if d < 0 {
+			return cfg, fmt.Errorf("PROXY_DATABASE_CONNECT_TIMEOUT must not be negative, got %q", v)
+		}
+		cfg.DatabaseConnectTimeout = Duration(d)
 	}
 
 	if cfg.Store == "" {
@@ -161,8 +214,14 @@ func Load(path string) (Config, error) {
 	if cfg.OnboardingTokenTTL == 0 {
 		cfg.OnboardingTokenTTL = DefaultOnboardingTokenTTL
 	}
+	if cfg.DatabaseConnectTimeout == 0 {
+		cfg.DatabaseConnectTimeout = DefaultDatabaseConnectTimeout
+	}
 	if cfg.OnboardingTokenTTL < 0 {
 		return cfg, fmt.Errorf("onboarding_token_ttl must be a positive duration, got %s", cfg.OnboardingTokenTTL)
+	}
+	if cfg.DatabaseConnectTimeout < 0 {
+		return cfg, fmt.Errorf("database_connect_timeout must not be negative, got %s", cfg.DatabaseConnectTimeout)
 	}
 
 	return cfg, nil
