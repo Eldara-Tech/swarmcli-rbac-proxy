@@ -618,6 +618,35 @@ const serviceCreateWithProtectedNet = `{
   }
 }`
 
+// The daemon still attaches the deprecated top-level ServiceSpec.Networks when
+// TaskTemplate.Networks is empty (moby daemon/cluster/convert/service.go).
+const serviceCreateWithDeprecatedProtectedNet = `{
+  "Name": "pivot",
+  "TaskTemplate": {"ContainerSpec": {"Image": "alpine"}},
+  "Networks": [{"Target": "proto-net-id"}]
+}`
+
+func TestGuard_DeprecatedNetworksPivot_Blocked(t *testing.T) {
+	for _, path := range []string{"/v1.43/services/create", "/v1.43/services/user-svc/update"} {
+		for _, role := range []string{"admin", "user"} {
+			t.Run(path+" "+role, func(t *testing.T) {
+				sock := startTestSocket(t, networkMock("swarmcli-infra", "user-app"))
+				guard := NewResourceGuard("swarmcli-infra", sock, nil)
+				inner, called := passHandler()
+				r := httptest.NewRequest("POST", path, strings.NewReader(serviceCreateWithDeprecatedProtectedNet))
+				r = withUser(r, &store.User{Role: role})
+				w := httptest.NewRecorder()
+
+				guard.Wrap(inner).ServeHTTP(w, r)
+
+				if w.Code != http.StatusForbidden || *called {
+					t.Errorf("status = %d, called = %v; want 403 and not called", w.Code, *called)
+				}
+			})
+		}
+	}
+}
+
 func TestGuard_NonAdminServiceCreateWithProtectedNetAttachment(t *testing.T) {
 	sock := startTestSocket(t, networkMock("swarmcli-infra", "user-app"))
 	guard := NewResourceGuard("swarmcli-infra", sock, nil)

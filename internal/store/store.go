@@ -30,6 +30,8 @@ type UserStore interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	GetUserByUsername(ctx context.Context, username string) (*User, error)
 	DeleteUser(ctx context.Context, username string) error
+	SetUserEnabled(ctx context.Context, username string, enabled bool) error
+	SetUserRole(ctx context.Context, username string, role string) error
 	SetOnboardToken(ctx context.Context, username string, token string) error
 	ConsumeOnboardToken(ctx context.Context, token string) (*User, error)
 }
@@ -39,6 +41,7 @@ type AuditAction string
 
 const (
 	AuditUserCreated      AuditAction = "user.created"
+	AuditUserUpdated      AuditAction = "user.updated"
 	AuditUserDeleted      AuditAction = "user.deleted"
 	AuditCertIssued       AuditAction = "cert.issued"
 	AuditOnboardCompleted AuditAction = "onboard.completed"
@@ -92,7 +95,7 @@ type AuditStore interface {
 // roles and bindings. It is the unit Export produces and Restore consumes, so a
 // restore can reproduce the original authorization state — not just the user
 // rows. Custom roles and non-default bindings are included; without them a
-// restore would silently fall back to the legacy admin/operator migration.
+// restore would silently fall back to the legacy User.Role migration.
 type BackupData struct {
 	Users    []User
 	Audit    []AuditEntry

@@ -30,8 +30,10 @@ func (m *mockUserStore) GetUserByUsername(_ context.Context, username string) (*
 	}
 	return nil, store.ErrUserNotFound
 }
-func (m *mockUserStore) DeleteUser(_ context.Context, _ string) error         { return nil }
-func (m *mockUserStore) SetOnboardToken(_ context.Context, _, _ string) error { return nil }
+func (m *mockUserStore) DeleteUser(_ context.Context, _ string) error             { return nil }
+func (m *mockUserStore) SetUserEnabled(_ context.Context, _ string, _ bool) error { return nil }
+func (m *mockUserStore) SetUserRole(_ context.Context, _ string, _ string) error  { return nil }
+func (m *mockUserStore) SetOnboardToken(_ context.Context, _, _ string) error     { return nil }
 func (m *mockUserStore) ConsumeOnboardToken(_ context.Context, _ string) (*store.User, error) {
 	return nil, store.ErrTokenNotFound
 }
@@ -143,7 +145,7 @@ func TestExtractIdentity_SANEmail(t *testing.T) {
 		Subject:        pkix.Name{CommonName: "fallback-cn"},
 		EmailAddresses: []string{"alice@example.com"},
 	}
-	got := extractIdentity(cert)
+	got := IdentityFromCert(cert)
 	if got != "alice@example.com" {
 		t.Errorf("got %q, want %q", got, "alice@example.com")
 	}
@@ -153,7 +155,7 @@ func TestExtractIdentity_CNFallback(t *testing.T) {
 	cert := &x509.Certificate{
 		Subject: pkix.Name{CommonName: "alice"},
 	}
-	got := extractIdentity(cert)
+	got := IdentityFromCert(cert)
 	if got != "alice" {
 		t.Errorf("got %q, want %q", got, "alice")
 	}
@@ -163,7 +165,7 @@ func TestExtractIdentity_EmptyCert(t *testing.T) {
 	cert := &x509.Certificate{
 		Subject: pkix.Name{CommonName: ""},
 	}
-	got := extractIdentity(cert)
+	got := IdentityFromCert(cert)
 	if got != "" {
 		t.Errorf("got %q, want empty string", got)
 	}

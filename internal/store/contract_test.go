@@ -183,6 +183,65 @@ func testUserStoreContract(t *testing.T, newStore func() UserStore) {
 		}
 	})
 
+	t.Run("SetUserEnabled", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		if err := s.CreateUser(ctx, &User{Username: "toggler"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetUserEnabled(ctx, "toggler", false); err != nil {
+			t.Fatalf("SetUserEnabled(false): %v", err)
+		}
+		u, err := s.GetUserByUsername(ctx, "toggler")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.Enabled {
+			t.Error("expected disabled")
+		}
+		if err := s.SetUserEnabled(ctx, "toggler", true); err != nil {
+			t.Fatalf("SetUserEnabled(true): %v", err)
+		}
+		u, _ = s.GetUserByUsername(ctx, "toggler")
+		if !u.Enabled {
+			t.Error("expected enabled")
+		}
+	})
+
+	t.Run("SetUserEnabled_NotFound", func(t *testing.T) {
+		s := newStore()
+		if err := s.SetUserEnabled(context.Background(), "nobody", false); !errors.Is(err, ErrUserNotFound) {
+			t.Fatalf("expected ErrUserNotFound, got %v", err)
+		}
+	})
+
+	t.Run("SetUserRole", func(t *testing.T) {
+		s := newStore()
+		ctx := context.Background()
+
+		if err := s.CreateUser(ctx, &User{Username: "promotable", Role: RoleOperator}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetUserRole(ctx, "promotable", RoleAdmin); err != nil {
+			t.Fatalf("SetUserRole: %v", err)
+		}
+		u, err := s.GetUserByUsername(ctx, "promotable")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.Role != RoleAdmin {
+			t.Errorf("role = %q, want admin", u.Role)
+		}
+	})
+
+	t.Run("SetUserRole_NotFound", func(t *testing.T) {
+		s := newStore()
+		if err := s.SetUserRole(context.Background(), "nobody", RoleViewer); !errors.Is(err, ErrUserNotFound) {
+			t.Fatalf("expected ErrUserNotFound, got %v", err)
+		}
+	})
+
 	t.Run("OnboardToken_HappyPath", func(t *testing.T) {
 		s := newStore()
 		ctx := context.Background()

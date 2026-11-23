@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -234,6 +235,95 @@ func testRBACStoreContract(t *testing.T, newStore func() rbacTestStore) {
 		}
 	})
 
+	t.Run("Seed_AddsResponderToExistingStore", func(t *testing.T) {
+		s := newStore()
+		// A store seeded before responder existed, with one built-in customised.
+		roles := DefaultRoles()
+		for i := range roles {
+			if roles[i].Name == RoleResponder {
+				continue
+			}
+			if err := s.CreateRole(ctx, &roles[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		edited := []PermissionRule{{Resources: []string{ResourceSecrets}, Verbs: []string{VerbGet}}}
+		if err := s.UpdateRole(ctx, &Role{Name: RoleOperator, Rules: edited}); err != nil {
+			t.Fatal(err)
+		}
+		if err := SeedDefaultRoles(ctx, s); err != nil {
+			t.Fatalf("SeedDefaultRoles: %v", err)
+		}
+		got, err := s.GetRole(ctx, RoleResponder)
+		if err != nil {
+			t.Fatalf("responder not seeded: %v", err)
+		}
+		if !got.Builtin || !reflect.DeepEqual(got.Rules, defaultRole(t, RoleResponder).Rules) {
+			t.Errorf("responder = %+v, want the builtin default", got)
+		}
+		if op, _ := s.GetRole(ctx, RoleOperator); !reflect.DeepEqual(op.Rules, edited) {
+			t.Errorf("operator edit clobbered: %+v", op.Rules)
+		}
+	})
+
+	t.Run("ShadowedBuiltins_NamesACustomRoleHoldingABuiltinName", func(t *testing.T) {
+		s := newStore()
+		// An admin made their own "responder" before the built-in existed.
+		custom := &Role{Name: RoleResponder, Rules: []PermissionRule{{Resources: []string{ResourceExec}, Verbs: []string{VerbCreate}}}}
+		if err := s.CreateRole(ctx, custom); err != nil {
+			t.Fatal(err)
+		}
+		if err := SeedDefaultRoles(ctx, s); err != nil {
+			t.Fatalf("SeedDefaultRoles: %v", err)
+		}
+		got, err := ShadowedBuiltins(ctx, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, []string{RoleResponder}) {
+			t.Errorf("ShadowedBuiltins = %v, want [responder]", got)
+		}
+
+		clean := newStore()
+		_ = SeedDefaultRoles(ctx, clean)
+		if got, _ := ShadowedBuiltins(ctx, clean); len(got) != 0 {
+			t.Errorf("a freshly seeded store shadows %v", got)
+		}
+	})
+
+	t.Run("MigrateLegacyRoles_RebindsByUserRole", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		want := map[string]string{}
+		for _, tc := range []struct{ user, role, binding string }{
+			{"adm", RoleAdmin, RoleAdmin},
+			{"op", RoleOperator, RoleOperator},
+			{"resp", RoleResponder, RoleResponder},
+			{"view", RoleViewer, RoleViewer},
+			{"legacy", "user", RoleOperator},
+		} {
+			if _, err := CreateUserWithBinding(ctx, s, s, tc.user, tc.role); err != nil {
+				t.Fatal(err)
+			}
+			// Remove every binding, as DELETE /api/v1/bindings/{id} can.
+			bs, _ := s.ListBindingsForUser(ctx, tc.user)
+			for _, b := range bs {
+				if err := s.DeleteBinding(ctx, b.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want[tc.user] = tc.binding
+		}
+		if err := MigrateLegacyRoles(ctx, s, s); err != nil {
+			t.Fatalf("MigrateLegacyRoles: %v", err)
+		}
+		for user, role := range want {
+			if bs, _ := s.ListBindingsForUser(ctx, user); len(bs) != 1 || bs[0].RoleName != role {
+				t.Errorf("%s re-bound to %+v, want [%s]", user, bs, role)
+			}
+		}
+	})
+
 	t.Run("MigrateLegacyRoles", func(t *testing.T) {
 		s := newStore()
 		_ = SeedDefaultRoles(ctx, s)
@@ -290,6 +380,89 @@ func testRBACStoreContract(t *testing.T, newStore func() rbacTestStore) {
 		downgrade := &Role{Name: RoleAdmin, Rules: []PermissionRule{viewerRule}}
 		if err := UpdateRoleChecked(ctx, s, s, downgrade); !errors.Is(err, ErrLastAdmin) {
 			t.Fatalf("got %v, want ErrLastAdmin", err)
+		}
+	})
+
+	t.Run("CreateUserWithBinding_SyncsRole", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		if _, err := CreateUserWithBinding(ctx, s, s, "alice", RoleAdmin); err != nil {
+			t.Fatalf("CreateUserWithBinding: %v", err)
+		}
+		bindings, _ := s.ListBindingsForUser(ctx, "alice")
+		if len(bindings) != 1 || bindings[0].RoleName != RoleAdmin {
+			t.Fatalf("bindings = %+v, want [admin]", bindings)
+		}
+		isAdmin, err := UserIsAdmin(ctx, s, "alice")
+		if err != nil || !isAdmin {
+			t.Fatalf("UserIsAdmin = %v, %v; want true", isAdmin, err)
+		}
+		// A non-admin (legacy "user") binds to operator.
+		if _, err := CreateUserWithBinding(ctx, s, s, "bob", "user"); err != nil {
+			t.Fatal(err)
+		}
+		bb, _ := s.ListBindingsForUser(ctx, "bob")
+		if len(bb) != 1 || bb[0].RoleName != RoleOperator {
+			t.Fatalf("bob bindings = %+v, want [operator]", bb)
+		}
+	})
+
+	t.Run("DeleteUserChecked_CascadesAndGuardsLastAdmin", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		_, _ = CreateUserWithBinding(ctx, s, s, "root", RoleAdmin)
+		// Deleting the only admin is refused.
+		if err := DeleteUserChecked(ctx, s, s, "root"); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("got %v, want ErrLastAdmin", err)
+		}
+		// A non-admin deletes cleanly and its binding is cascaded.
+		_, _ = CreateUserWithBinding(ctx, s, s, "carol", RoleOperator)
+		if err := DeleteUserChecked(ctx, s, s, "carol"); err != nil {
+			t.Fatalf("delete carol: %v", err)
+		}
+		if bs, _ := s.ListBindingsForUser(ctx, "carol"); len(bs) != 0 {
+			t.Fatalf("carol bindings after delete = %+v, want none", bs)
+		}
+	})
+
+	t.Run("SetUserEnabledChecked_GuardsLastAdmin", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		_, _ = CreateUserWithBinding(ctx, s, s, "root", RoleAdmin)
+		if err := SetUserEnabledChecked(ctx, s, s, "root", false); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("got %v, want ErrLastAdmin", err)
+		}
+		// Second admin present: disabling the first is allowed.
+		_, _ = CreateUserWithBinding(ctx, s, s, "root2", RoleAdmin)
+		if err := SetUserEnabledChecked(ctx, s, s, "root", false); err != nil {
+			t.Fatalf("disable with second admin: %v", err)
+		}
+	})
+
+	t.Run("SetUserRoleChecked_SyncsAndGuardsLastAdmin", func(t *testing.T) {
+		s := newStore()
+		_ = SeedDefaultRoles(ctx, s)
+		_, _ = CreateUserWithBinding(ctx, s, s, "root", RoleAdmin)
+		// Demoting the only admin is refused.
+		if err := SetUserRoleChecked(ctx, s, s, "root", RoleOperator); !errors.Is(err, ErrLastAdmin) {
+			t.Fatalf("got %v, want ErrLastAdmin", err)
+		}
+		// Promote an operator to admin: User.Role and the binding both update.
+		_, _ = CreateUserWithBinding(ctx, s, s, "dave", RoleOperator)
+		if err := SetUserRoleChecked(ctx, s, s, "dave", RoleAdmin); err != nil {
+			t.Fatalf("promote dave: %v", err)
+		}
+		u, _ := s.GetUserByUsername(ctx, "dave")
+		if u.Role != RoleAdmin {
+			t.Errorf("User.Role = %q, want admin", u.Role)
+		}
+		bs, _ := s.ListBindingsForUser(ctx, "dave")
+		if len(bs) != 1 || bs[0].RoleName != RoleAdmin {
+			t.Errorf("dave bindings = %+v, want [admin]", bs)
+		}
+		// Unknown role is rejected.
+		if err := SetUserRoleChecked(ctx, s, s, "dave", "wizard"); !errors.Is(err, ErrRoleNotFound) {
+			t.Fatalf("got %v, want ErrRoleNotFound", err)
 		}
 	})
 }

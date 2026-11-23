@@ -248,6 +248,48 @@ func (s *SQLiteStore) DeleteUser(ctx context.Context, username string) error {
 	return nil
 }
 
+func (s *SQLiteStore) SetUserEnabled(ctx context.Context, username string, enabled bool) error {
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET enabled = ?, updated_at = ? WHERE username = ?`,
+		enabledInt, now, username,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+func (s *SQLiteStore) SetUserRole(ctx context.Context, username string, role string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET role = ?, updated_at = ? WHERE username = ?`,
+		role, now, username,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 func (s *SQLiteStore) SetOnboardToken(ctx context.Context, username string, token string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := s.db.ExecContext(ctx,

@@ -70,12 +70,16 @@ func TestMapRequest(t *testing.T) {
 		{"agent exec", "POST", "/v1/exec", store.ResourceExec, store.VerbCreate, false},
 		{"agent forward", "GET", "/v1/forward", store.ResourcePortForward, store.VerbCreate, false},
 		{"agent logs", "GET", "/v1/logs", store.ResourceStackLogs, store.VerbGet, false},
+		{"agent containers", "GET", "/v1/containers", store.ResourceServices, store.VerbList, false},
+		{"agent containers non-GET is admin-only", "POST", "/v1/containers", resourceUnmapped, store.VerbCreate, false},
 		{"agent volumes list", "GET", "/v1/volumes", store.ResourceVolumes, store.VerbList, false},
 		{"agent volume create", "POST", "/v1/volumes", store.ResourceVolumes, store.VerbCreate, false},
 		{"agent volume prune", "POST", "/v1/volumes/prune", store.ResourceVolumes, store.VerbDelete, false},
 		{"agent volume delete", "DELETE", "/v1/volumes/vol", store.ResourceVolumes, store.VerbDelete, false},
 		{"agent volume file rename", "POST", "/v1/volumes/vol/files/rename", store.ResourceVolumes, store.VerbUpdate, false},
 		{"agent volume file upload", "POST", "/v1/volumes/vol/files/upload", store.ResourceVolumes, store.VerbUpdate, false},
+		{"agent license", "GET", "/v1/license", store.ResourceSystem, store.VerbGet, false},
+		{"agent license non-GET is admin-only", "POST", "/v1/license", resourceUnmapped, store.VerbCreate, false},
 
 		// Unmapped → admin-only sentinel.
 		{"raw container create", "POST", "/containers/create", resourceUnmapped, store.VerbCreate, false},

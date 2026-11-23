@@ -37,42 +37,60 @@ sentinel and are therefore **admin-only**.
 
 ## Built-in roles
 
-Three roles are seeded on startup and are editable (an admin can adjust their
-rules; they are never overwritten if you do). They cannot be deleted.
+Four roles are seeded on startup and are editable (an admin can adjust their
+rules; they are never overwritten if you do). They cannot be deleted. A role
+added in a later release is seeded on the next start of an existing install,
+unless a custom role already has its name: that role keeps its own rules, and
+the proxy logs a warning at every start naming it.
 
 - **`viewer`** — read-only across the common Swarm resources. Cannot read
   secrets, volumes, or configs; cannot exec, deploy, or mutate anything.
+- **`responder`** — everything `viewer` can read, plus `services: update`, and
+  nothing else. It is meant for the SwarmCLI mobile app, which enrols a phone
+  as a user of its own, so that a lost phone does not carry a root-equivalent
+  `operator` certificate. Because it may update services but not create them,
+  [the update limit below](#updating-a-service-you-cannot-create) confines it
+  to scaling, restarting and rolling back. Granting it `create` on `services`
+  or `stacks` lifts that limit.
 - **`operator`** — everything `viewer` can read, plus volume and config reads,
   plus deploy/update of stacks and services and interactive `exec` /
   `port-forward` into non-infrastructure workloads. Cannot delete stacks,
   enumerate secrets, or touch swarm-level state. This is the default role for a
-  newly created non-admin user.
+  newly created non-admin user. A service spec can bind-mount the host or the
+  Docker socket and add capabilities, so creating services makes `operator`
+  **root-equivalent on every node that runs a non-protected workload**; grant
+  it accordingly.
 - **`admin`** — unrestricted (`*:*`).
 
 ### Permission matrix
 
 Verbs: **G**=get **L**=list **C**=create **U**=update **D**=delete, `*`=all.
 
-| resource | viewer | operator | admin |
-|---|---|---|---|
-| stacks | GL | GLCU | * |
-| stack logs | GL | GL | * |
-| services | GL | GLCU | * |
-| nodes | GL | GL | * |
-| networks | GL | GL | * |
-| volumes | — | GL | * |
-| configs | — | GL | * |
-| secrets | — | — | * |
-| exec / attach | — | C | * |
-| port-forward | — | C | * |
-| swarm | — | — | * |
-| system (`_ping` / `version` / `info`) | GL | GL | GL |
-| roles / bindings | — | — | * |
-| containers (raw run) / unmapped (incl. `/events`) | — | — | * |
+| resource | viewer | responder | operator | admin |
+|---|---|---|---|---|
+| stacks | GL | GL | GLCU | * |
+| stack logs | GL | GL | GL | * |
+| services | GL | GLU¹ | GLCU | * |
+| nodes | GL | GL | GL | * |
+| networks | GL | GL | GL | * |
+| volumes | — | — | GL | * |
+| configs | — | — | GL | * |
+| secrets | — | — | — | * |
+| exec / attach | — | — | C | * |
+| port-forward | — | — | C | * |
+| swarm | — | — | — | * |
+| system (`_ping` / `version` / `info`, `GET /v1/license`) | GL | GL | GL | GL |
+| roles / bindings | — | — | — | * |
+| containers (raw run) / unmapped (incl. `/events`) | — | — | — | * |
+
+¹ Scale, restart and roll back only — see
+[Updating a service you cannot create](#updating-a-service-you-cannot-create).
 
 `system` covers the Docker handshake endpoints (`_ping`, `version`, `info`) and
 is granted to every role so that `docker version` / `docker info` work for all
-users. `/events` is **not** part of `system` — it streams cluster-wide resource
+users. It also covers `GET /v1/license`, the agent-manager's licence verdict
+that the mobile app polls; the proxy only routes it, and the agent-manager
+decides. `/events` is **not** part of `system` — it streams cluster-wide resource
 lifecycle (including secret and config names) and is therefore admin-only.
 
 ### How stacks are authorized
@@ -87,6 +105,28 @@ resources, delete stacks (no `stacks: delete`), or enumerate secrets.
 
 **Reads** use the concrete resource only — there is no stacks-OR shortcut — so a
 `viewer`'s lack of `secrets` read cannot be bypassed by attaching a stack label.
+
+### Updating a service you cannot create
+
+A full service update can change anything in the spec, including the image,
+mounts, capabilities and user, which is as much power as creating the service.
+So an update may rewrite the spec only if the caller may also **create** that
+service: `services: create`, or `stacks: create` for a stack-labeled service.
+A caller with `update` but not `create` may only:
+
+- scale the service (`Mode.Replicated.Replicas`),
+- restart it (`TaskTemplate.ForceUpdate`), or
+- roll it back (`?rollback=previous`), which restores the spec it had before
+  its last update.
+
+The proxy compares the request body with the service's live spec, and refuses
+any other change, or any update carrying `X-Registry-Auth`, with a `403`
+audited as `rbac.denied`. A role such as "`viewer` plus `services: update`" —
+the built-in `responder` — therefore stays non-root, while `docker service
+scale`, `docker service update --force`, `docker service rollback`, the TUI and
+the mobile app keep working for it. Such a role cannot redeploy a stack, because
+`docker stack deploy` sends the whole spec. The rules returned by
+`GET /api/v1/me` still list plain `update`.
 
 ## How RBAC composes with the protected-stack guard
 
@@ -181,13 +221,39 @@ The legacy `User.Role` flag is retained, but only as the input to the
 protected-stack guard's separate `isAdmin` gate — it is no longer the
 authorization model.
 
+The migration step runs on every start, for any user left with no binding at
+all, and binds them to the built-in role their `User.Role` names (`admin`,
+`operator`, `responder` or `viewer`), or to `operator` for anything else.
+Removing a user's last binding therefore locks them out only until the next
+restart; delete or disable the user instead.
+
 ## Auditing
 
-A request rejected by the RBAC policy engine is recorded in the audit log as
-`rbac.denied` (distinct from `guard.blocked`, which marks protected-stack
-denials). Role and binding mutations are audited as `role.created` /
-`role.updated` / `role.deleted` and `binding.created` / `binding.deleted`.
-Query with `swcproxy audit ls`.
+A request rejected by the RBAC policy engine is recorded as `rbac.denied` —
+distinct from `guard.blocked`, which marks protected-stack denials. Query with
+`swcproxy audit ls`.
+
+The complete action vocabulary, which is what you need when writing a SIEM rule:
+
+| Group | Actions |
+|---|---|
+| Users | `user.created`, `user.updated` (enable/disable/role change), `user.deleted` |
+| Credentials | `cert.issued`, `onboard.completed`, `token.regenerated` |
+| Denials | `rbac.denied` (policy engine), `guard.blocked` (protected-stack guard, volume denials included) |
+| RBAC management | `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted` |
+| Volumes | `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` |
+| Backup | `backup.exported`, `backup.restored`, `db.migrated` (a completed `swcproxy migrate`, recorded on the destination store) |
+
+Volume actions are recorded on **success**; a volume denial appears as
+`guard.blocked` like every other guarded operation.
+
+Each entry records id, timestamp, actor, action, resource (`type:id`), status
+(`success` / `denied`), detail and source IP. The actor is a username, or one of
+`cli`, `internal` (triggered via the internal listener) or `anonymous`.
+
+Authentication events — mTLS success and failure — are logged to stdout only and
+are **not** persisted to the audit table, so do not build an authentication alert
+on this table alone.
 
 ## See also
 

@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"swarm-rbac-proxy/internal/api"
@@ -197,7 +198,9 @@ func newProxy(b backend) http.Handler {
 				pr.Out.Host = "docker"
 			}
 		},
-		Transport: transport,
+		Transport:    transport,
+		ErrorLog:     proxylog.StdErrorLogger("proxy"),
+		ErrorHandler: proxyErrorHandler,
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -209,22 +212,88 @@ func newProxy(b backend) http.Handler {
 	})
 }
 
+// proxyErrorHandler replaces httputil.ReverseProxy's default, which logs every
+// failure through log.Default() as "http: proxy error: <err>" — a second,
+// unstructured stream that PROXY_LOG_LEVEL cannot reach.
+//
+// It also demotes the most common failure, which is not an error at all. A
+// client that hangs up before the daemon answers cancels the inbound request,
+// so the outbound RoundTrip fails with context.Canceled; the default handler
+// reports that at the same volume as a dead backend. It is routine — a `docker`
+// command interrupted, a poll that hit its own deadline — and reporting it as a
+// proxy failure buries the failures that are real. Nothing is written to the
+// response either: the caller that would read it is already gone.
+func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.Canceled) {
+		l().Debugw("client hung up before the upstream responded",
+			"method", r.Method, "path", redactPath(r.URL.Path))
+		return
+	}
+	l().Errorw("proxy error", "error", err,
+		"method", r.Method, "path", redactPath(r.URL.Path))
+	w.WriteHeader(http.StatusBadGateway)
+}
+
+// Vars, not consts, so a test can shrink them: a test that had to wait out the
+// real windows would take an hour.
+var (
+	// upgradeIdleTimeout bounds a live exec/attach session with no traffic in
+	// either direction. It is long because an interactive shell left open is a
+	// legitimate thing to do.
+	upgradeIdleTimeout = 1 * time.Hour
+
+	// upgradeDrainTimeout bounds the backend half once the client half has
+	// ended — an idle window, reset by each chunk of output, not a cap on how
+	// long a command may run.
+	//
+	// At that point the caller has either finished sending stdin or gone away,
+	// and the two are indistinguishable here: both arrive as a FIN. So this is
+	// a trade between how long an abandoned session is held and how long a
+	// command may go silent after reading stdin to EOF before its output is
+	// judged never to be coming. Five minutes covers `cmd < file` shapes that
+	// think for a while, and still bounds a leaked session at a twelfth of what
+	// the idle timeout allowed.
+	upgradeDrainTimeout = 5 * time.Minute
+)
+
 // idleConn wraps a net.Conn and resets the deadline on each read/write,
 // providing an idle timeout that closes connections after inactivity.
+//
+// The timeout is atomic because handleUpgrade shortens it from the client half
+// of the session while the backend half is reading through it.
 type idleConn struct {
 	net.Conn
-	timeout time.Duration
+	timeout atomic.Int64 // idle window, in nanoseconds
+}
+
+func newIdleConn(c net.Conn, d time.Duration) *idleConn {
+	ic := &idleConn{Conn: c}
+	ic.timeout.Store(int64(d))
+	return ic
+}
+
+// shorten narrows the idle window and pushes the new one onto the connection
+// immediately. Storing alone would not be enough: a copy already parked in Read
+// holds the deadline it was given on entry, so without the SetReadDeadline here
+// the old window would have to expire before the new one could apply.
+func (c *idleConn) shorten(d time.Duration) {
+	c.timeout.Store(int64(d))
+	_ = c.SetReadDeadline(time.Now().Add(d))
+}
+
+func (c *idleConn) deadline() time.Time {
+	return time.Now().Add(time.Duration(c.timeout.Load()))
 }
 
 func (c *idleConn) Read(b []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetDeadline(c.deadline()); err != nil {
 		return 0, err
 	}
 	return c.Conn.Read(b)
 }
 
 func (c *idleConn) Write(b []byte) (int, error) {
-	if err := c.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+	if err := c.SetDeadline(c.deadline()); err != nil {
 		return 0, err
 	}
 	return c.Conn.Write(b)
@@ -277,17 +346,40 @@ func handleUpgrade(w http.ResponseWriter, r *http.Request, b backend) {
 		}
 	}
 
-	idleTimeout := 1 * time.Hour
-	client := &idleConn{clientConn, idleTimeout}
-	back := &idleConn{backConn, idleTimeout}
+	// Both windows are read once, here: the session's timings are settled when
+	// it starts, not re-read from package state by a goroutine mid-copy.
+	drain := upgradeDrainTimeout
+	client := newIdleConn(clientConn, upgradeIdleTimeout)
+	back := newIdleConn(backConn, upgradeIdleTimeout)
 
-	done := make(chan struct{})
+	// The two directions do not end together, and which one to wait for is the
+	// whole question.
+	//
+	// Waiting for both — the previous shape — meant an abandoned session sat
+	// here for the full idle timeout: the client half returns as soon as the
+	// caller goes away, but the daemon is never told, so it holds an idle shell
+	// open and the backward copy blocks on a read that will not come. One
+	// socket pair and two goroutines per abandoned exec, for an hour.
+	//
+	// Ending on the *first* half is wrong the other way: a caller that closes
+	// stdin cleanly (`echo x | docker exec -i …`) would have its output cut off
+	// mid-command.
+	//
+	// So: the client half half-closes the backend, which says "stdin is done"
+	// without ending the session, and arms a grace deadline so a session nobody
+	// is on the other end of expires in seconds rather than an hour. The
+	// session ends when the backend does, which is what "the command exited"
+	// actually looks like.
 	go func() {
-		io.Copy(client, back)
-		close(done)
+		_, _ = io.Copy(back, client)
+		if cw, ok := backConn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		} else {
+			_ = backConn.Close()
+		}
+		back.shorten(drain)
 	}()
-	io.Copy(back, client)
-	<-done
+	_, _ = io.Copy(client, back)
 }
 
 // mountControlPlane registers the proxy's control-plane routes under the
@@ -319,6 +411,98 @@ func mountControlPlane(mux *http.ServeMux, internal bool, userStore store.UserSt
 	mux.HandleFunc("/startbackup", backupHandler) // back-compat alias (pre-/_swc/ docs & muscle memory)
 	mux.HandleFunc("GET /_swc/version", handleControlVersion)
 	mux.HandleFunc("/_swc/", handleControlNotFound) // reserved namespace never falls through to Docker
+}
+
+// routeDeps is what registerRoutes mounts on a listener's mux. main builds one
+// and shares it between the internal and external listeners.
+type routeDeps struct {
+	userStore         store.UserStore
+	auditStore        store.AuditStore
+	rbacStore         store.RBACStore
+	guard             *api.ResourceGuard
+	ca                *certauth.CA
+	adminToken        string
+	externalURL       string
+	onboardTokenTTL   time.Duration
+	backupDir         string
+	agentManagerProxy http.Handler // nil when agent-manager forwarding is off
+	dockerProxy       http.Handler
+}
+
+// registerRoutes sets up the mux with the given middleware wrappers for
+// proxy routes. wrapProxy resolves identity (RequireClientCert externally,
+// MarkInternalRequest internally). wrapRBAC enforces role-based access
+// (external only; no-op internally and when mTLS is off). wrapExec applies
+// the protected-stack exec/forward guard (no-op on the internal listener).
+func registerRoutes(mux *http.ServeMux, d routeDeps, internal bool, wrapProxy, wrapRBAC, wrapExec, wrapAdmin func(http.Handler) http.Handler) {
+	userHandler := api.NewUserHandler(d.userStore, d.rbacStore, d.auditStore, d.externalURL, d.onboardTokenTTL)
+	onboardHandler := api.NewOnboardHandler(d.userStore, d.ca, d.externalURL, d.auditStore)
+	meHandler := api.NewMeHandler(d.rbacStore)
+	roleHandler := api.NewRoleHandler(d.rbacStore, d.userStore, d.auditStore)
+	bindingHandler := api.NewBindingHandler(d.rbacStore, d.userStore, d.auditStore)
+
+	mountControlPlane(mux, internal, d.userStore, d.auditStore, d.backupDir)
+	// Management plane (users / roles / bindings). wrapAdmin authorizes the
+	// caller: the admin bearer token OR (external listener) an mTLS-
+	// authenticated admin, so an admin can manage users from the TUI — which
+	// carries a client cert but no bearer token — while the bearer path keeps
+	// CLI/bootstrap/internal-listener access. See api.RequireAdminOrToken.
+	mux.Handle("/api/v1/users", wrapAdmin(userHandler))
+	mux.Handle("POST /api/v1/users/{username}/regenerate-token", wrapAdmin(http.HandlerFunc(userHandler.RegenerateToken)))
+	mux.Handle("PATCH /api/v1/users/{username}", wrapAdmin(http.HandlerFunc(userHandler.Update)))
+	mux.Handle("DELETE /api/v1/users/{username}", wrapAdmin(http.HandlerFunc(userHandler.Delete)))
+	mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
+	mux.Handle("GET /api/v1/roles", wrapAdmin(http.HandlerFunc(roleHandler.List)))
+	mux.Handle("POST /api/v1/roles", wrapAdmin(http.HandlerFunc(roleHandler.Create)))
+	mux.Handle("GET /api/v1/roles/{name}", wrapAdmin(http.HandlerFunc(roleHandler.Get)))
+	mux.Handle("PUT /api/v1/roles/{name}", wrapAdmin(http.HandlerFunc(roleHandler.Update)))
+	mux.Handle("DELETE /api/v1/roles/{name}", wrapAdmin(http.HandlerFunc(roleHandler.Delete)))
+	mux.Handle("GET /api/v1/bindings", wrapAdmin(http.HandlerFunc(bindingHandler.List)))
+	mux.Handle("POST /api/v1/bindings", wrapAdmin(http.HandlerFunc(bindingHandler.Create)))
+	mux.Handle("DELETE /api/v1/bindings/{id}", wrapAdmin(http.HandlerFunc(bindingHandler.Delete)))
+	// Self-identity: cert-authenticated (wrapProxy = RequireClientCert on
+	// the external listener), so the caller's role is resolved from their
+	// mTLS CN. On the internal listener wrapProxy is MarkInternalRequest,
+	// which sets no user, so this returns 401 there — the internal listener
+	// has no per-user identity and is not used for role discovery.
+	mux.Handle("GET /api/v1/me", wrapProxy(meHandler))
+	if d.agentManagerProxy != nil {
+		mux.Handle("/v1/", wrapProxy(wrapRBAC(wrapExec(d.agentManagerProxy))))
+	}
+	mux.Handle("/", wrapProxy(wrapRBAC(wrapExec(d.dockerProxy))))
+}
+
+// buildExternalMux builds the external listener's mux. mTLS reports whether a
+// client CA is configured: only then are callers identified (RequireClientCert)
+// and RBAC enforced; otherwise both are no-ops and only the bearer token admits
+// to the management API.
+func buildExternalMux(d routeDeps, mTLS bool) *http.ServeMux {
+	// RBAC middleware: enforces per-role resource/verb authorization on the
+	// proxy data plane. It reuses the guard for stack-label resolution.
+	rbacMW := api.NewRBACMiddleware(d.rbacStore, d.auditStore, d.guard)
+
+	var proxyAuth func(http.Handler) http.Handler
+	var rbacWrap func(http.Handler) http.Handler
+	if mTLS {
+		proxyAuth = func(next http.Handler) http.Handler {
+			return api.RequireClientCert(d.userStore, next)
+		}
+		// RBAC can only be enforced when callers are identified by mTLS.
+		rbacWrap = rbacMW.Wrap
+	} else {
+		proxyAuth = func(next http.Handler) http.Handler { return next }
+		rbacWrap = func(next http.Handler) http.Handler { return next }
+	}
+
+	// External management auth: resolve identity (proxyAuth = RequireClientCert
+	// when mTLS is on) then admit the admin bearer token OR an mTLS-authenticated
+	// admin. Without mTLS, proxyAuth is a no-op and only the bearer token admits.
+	externalAdmin := func(next http.Handler) http.Handler {
+		return proxyAuth(api.RequireAdminOrToken(d.adminToken, d.rbacStore, d.auditStore, next))
+	}
+	mux := http.NewServeMux()
+	registerRoutes(mux, d, false, proxyAuth, rbacWrap, d.guard.ExecGuard, externalAdmin)
+	return mux
 }
 
 // handleControlVersion reports the proxy build identity on the internal
@@ -458,12 +642,61 @@ func checkExternalListenerAuth(cfg config.Config, allowInsecure bool) error {
 	return nil
 }
 
+// runHealthcheck is the `healthcheck` subcommand used as the stack
+// healthcheck.test. It probes the proxy's own plaintext internal listener
+// (PROXY_INTERNAL_LISTEN) for a 200 from /_swc/version and returns a process
+// exit code (0 = healthy). The external listener is mTLS, so the loopback
+// internal listener is the only local path that needs no client cert — the same
+// listener rbac-proxy already exposes for its admin control plane.
+//
+// The listener address is read straight from PROXY_INTERNAL_LISTEN, not via
+// config.Load: a liveness probe must not depend on unrelated config (config.Load
+// also reads the admin-token secret), which could fail and flap the container
+// unhealthy while the proxy itself is fine. The stack sets the healthcheck and
+// this env together, so they never diverge.
+func runHealthcheck() int {
+	addr := os.Getenv("PROXY_INTERNAL_LISTEN")
+	if addr == "" {
+		fmt.Fprintln(os.Stderr, "healthcheck: PROXY_INTERNAL_LISTEN not set")
+		return 1
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: bad PROXY_INTERNAL_LISTEN %q: %v\n", addr, err)
+		return 1
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	if err := healthProbe("http://" + net.JoinHostPort(host, port) + "/_swc/version"); err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// healthProbe GETs url with a short timeout and returns nil only on HTTP 200.
+func healthProbe(url string) error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func main() {
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "--version", "-v", "version":
 			fmt.Println(version.String())
 			return
+		case "healthcheck":
+			os.Exit(runHealthcheck())
 		}
 	}
 
@@ -592,9 +825,14 @@ func main() {
 
 	// Seed the built-in roles (idempotent; never clobbers admin edits) and
 	// migrate any users that predate RBAC into a role binding derived from
-	// their legacy User.Role (admin → admin, else → operator).
+	// their legacy User.Role (a built-in role name → itself, else → operator).
 	if err := store.SeedDefaultRoles(context.Background(), rbacStore); err != nil {
 		l().Fatalw("seed default roles failed", "error", err)
+	}
+	if shadowed, err := store.ShadowedBuiltins(context.Background(), rbacStore); err != nil {
+		l().Warnw("could not check for custom roles named like built-ins", "error", err)
+	} else if len(shadowed) > 0 {
+		l().Warnw("custom roles hold built-in role names and keep their own rules; assigning one by name grants those rules", "roles", shadowed)
 	}
 	if err := store.MigrateLegacyRoles(context.Background(), userStore, rbacStore); err != nil {
 		l().Fatalw("legacy role migration failed", "error", err)
@@ -640,29 +878,6 @@ func main() {
 	guard := api.NewResourceGuard(protectedStack, socketPath, auditStore)
 	if protectedStack != "" {
 		l().Infow("resource guard enabled", "protected_stack", protectedStack)
-	}
-
-	// RBAC middleware: enforces per-role resource/verb authorization on the
-	// proxy data plane. It reuses the guard for stack-label resolution.
-	rbacMW := api.NewRBACMiddleware(rbacStore, auditStore, guard)
-
-	userHandler := api.NewUserHandler(userStore, ca, auditStore)
-	onboardHandler := api.NewOnboardHandler(userStore, ca, cfg.ExternalURL, auditStore)
-	meHandler := api.NewMeHandler()
-	roleHandler := api.NewRoleHandler(rbacStore, userStore, auditStore)
-	bindingHandler := api.NewBindingHandler(rbacStore, userStore, auditStore)
-
-	var proxyAuth func(http.Handler) http.Handler
-	var rbacWrap func(http.Handler) http.Handler
-	if cfg.TLSClientCA != "" {
-		proxyAuth = func(next http.Handler) http.Handler {
-			return api.RequireClientCert(userStore, next)
-		}
-		// RBAC can only be enforced when callers are identified by mTLS.
-		rbacWrap = rbacMW.Wrap
-	} else {
-		proxyAuth = func(next http.Handler) http.Handler { return next }
-		rbacWrap = func(next http.Handler) http.Handler { return next }
 	}
 
 	var agentManagerProxy http.Handler
@@ -726,36 +941,18 @@ func main() {
 
 	dockerProxy := guard.Wrap(newProxy(b))
 
-	// registerRoutes sets up the mux with the given middleware wrappers for
-	// proxy routes. wrapProxy resolves identity (RequireClientCert externally,
-	// MarkInternalRequest internally). wrapRBAC enforces role-based access
-	// (external only; no-op internally and when mTLS is off). wrapExec applies
-	// the protected-stack exec/forward guard (no-op on the internal listener).
-	registerRoutes := func(mux *http.ServeMux, internal bool, wrapProxy, wrapRBAC, wrapExec func(http.Handler) http.Handler) {
-		tok := cfg.AdminToken
-		mountControlPlane(mux, internal, userStore, auditStore, backup.DefaultDir(cfg))
-		mux.Handle("/api/v1/users", api.RequireToken(tok, userHandler))
-		mux.Handle("DELETE /api/v1/users/{username}", api.RequireToken(tok, http.HandlerFunc(userHandler.Delete)))
-		mux.Handle("GET /api/v1/onboard/{token}", onboardHandler)
-		// RBAC management plane — admin-token protected, like user management.
-		mux.Handle("GET /api/v1/roles", api.RequireToken(tok, http.HandlerFunc(roleHandler.List)))
-		mux.Handle("POST /api/v1/roles", api.RequireToken(tok, http.HandlerFunc(roleHandler.Create)))
-		mux.Handle("GET /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Get)))
-		mux.Handle("PUT /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Update)))
-		mux.Handle("DELETE /api/v1/roles/{name}", api.RequireToken(tok, http.HandlerFunc(roleHandler.Delete)))
-		mux.Handle("GET /api/v1/bindings", api.RequireToken(tok, http.HandlerFunc(bindingHandler.List)))
-		mux.Handle("POST /api/v1/bindings", api.RequireToken(tok, http.HandlerFunc(bindingHandler.Create)))
-		mux.Handle("DELETE /api/v1/bindings/{id}", api.RequireToken(tok, http.HandlerFunc(bindingHandler.Delete)))
-		// Self-identity: cert-authenticated (wrapProxy = RequireClientCert on
-		// the external listener), so the caller's role is resolved from their
-		// mTLS CN. On the internal listener wrapProxy is MarkInternalRequest,
-		// which sets no user, so this returns 401 there — the internal listener
-		// has no per-user identity and is not used for role discovery.
-		mux.Handle("GET /api/v1/me", wrapProxy(meHandler))
-		if agentManagerProxy != nil {
-			mux.Handle("/v1/", wrapProxy(wrapRBAC(wrapExec(agentManagerProxy))))
-		}
-		mux.Handle("/", wrapProxy(wrapRBAC(wrapExec(dockerProxy))))
+	deps := routeDeps{
+		userStore:         userStore,
+		auditStore:        auditStore,
+		rbacStore:         rbacStore,
+		guard:             guard,
+		ca:                ca,
+		adminToken:        cfg.AdminToken,
+		externalURL:       cfg.ExternalURL,
+		onboardTokenTTL:   time.Duration(cfg.OnboardingTokenTTL),
+		backupDir:         backup.DefaultDir(cfg),
+		agentManagerProxy: agentManagerProxy,
+		dockerProxy:       dockerProxy,
 	}
 
 	l().Infow("proxy listening", "addr", listenAddr, "backend_network", b.network, "backend_addr", b.address)
@@ -767,14 +964,18 @@ func main() {
 	if cfg.InternalListen != "" {
 		internalMux := http.NewServeMux()
 		noWrap := func(next http.Handler) http.Handler { return next }
-		registerRoutes(internalMux, true, api.MarkInternalRequest, noWrap, noWrap)
+		// Internal listener: trusted loopback. Management stays bearer-token
+		// protected exactly as before (no mTLS identity here for the admin path).
+		internalAdmin := func(next http.Handler) http.Handler { return api.RequireToken(cfg.AdminToken, next) }
+		registerRoutes(internalMux, deps, true, api.MarkInternalRequest, noWrap, noWrap, internalAdmin)
 		go func() {
 			l().Infow("internal listener starting", "addr", cfg.InternalListen)
 			srv := &http.Server{
 				Addr:              cfg.InternalListen,
-				Handler:           internalMux,
+				Handler:           accessLog(internalMux),
 				ReadHeaderTimeout: 10 * time.Second,
 				IdleTimeout:       120 * time.Second,
+				ErrorLog:          proxylog.StdErrorLogger("http-internal"),
 			}
 			if err := srv.ListenAndServe(); err != nil {
 				l().Fatalw("internal listener exited", "error", err)
@@ -783,7 +984,6 @@ func main() {
 	}
 
 	// External listener.
-	externalMux := http.NewServeMux()
 	// Exec guard: active on the external listener; stack-aware — only exec on
 	// protected-stack containers requires admin. Without mTLS no caller can prove
 	// identity, so protected-stack exec is blocked (fail-closed); non-protected
@@ -791,7 +991,7 @@ func main() {
 	if cfg.AgentManagerURL != "" && cfg.TLSClientCA == "" {
 		l().Warnw("exec guard active without mTLS: exec on protected stack will be blocked; non-protected exec may pass without identity; use PROXY_INTERNAL_LISTEN for local exec access")
 	}
-	registerRoutes(externalMux, false, proxyAuth, rbacWrap, guard.ExecGuard)
+	externalMux := buildExternalMux(deps, cfg.TLSClientCA != "")
 
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		l().Infow("frontend TLS enabled", "cert", cfg.TLSCert, "key", cfg.TLSKey)
@@ -813,10 +1013,11 @@ func main() {
 
 		srv := &http.Server{
 			Addr:              listenAddr,
-			Handler:           externalMux,
+			Handler:           accessLog(externalMux),
 			TLSConfig:         tlsCfg,
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
+			ErrorLog:          proxylog.StdErrorLogger("http"),
 		}
 		if err := srv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey); err != nil {
 			l().Fatalw("server exited", "error", err)
@@ -827,9 +1028,10 @@ func main() {
 		}
 		srv := &http.Server{
 			Addr:              listenAddr,
-			Handler:           externalMux,
+			Handler:           accessLog(externalMux),
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
+			ErrorLog:          proxylog.StdErrorLogger("http"),
 		}
 		if err := srv.ListenAndServe(); err != nil {
 			l().Fatalw("server exited", "error", err)

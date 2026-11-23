@@ -81,6 +81,24 @@ func (m *RBACMiddleware) Wrap(next http.Handler) http.Handler {
 			writeError(w, http.StatusForbidden, "forbidden: "+route.verb+" on "+route.resource+" not permitted for your role")
 			return
 		}
+		// Updating a service you could not create is limited to scale,
+		// restart and rollback (see operationalUpdateDenial).
+		if route.resource == store.ResourceServices && route.verb == store.VerbUpdate && !perms.Allows(candidates, store.VerbCreate) {
+			reason, err := m.guard.operationalUpdateDenial(r, route.id)
+			if err != nil {
+				l().Warnw("rbac: service spec back-query failed, blocking update", "error", err, "path", r.URL.Path)
+				writeError(w, http.StatusServiceUnavailable, "cannot verify service spec")
+				return
+			}
+			if reason != "" {
+				l().Warnw("rbac: denied", "user", user.Username, "resource", route.resource, "verb", route.verb, "path", r.URL.Path, "reason", reason)
+				recordAudit(m.audit, r, store.AuditRBACDenied, route.resource+":"+route.verb, "denied",
+					"role lacks create, so may only scale, restart or roll back: "+reason)
+				writeError(w, http.StatusForbidden, "forbidden: your role may only scale, restart or roll back services it cannot create: "+reason)
+				return
+			}
+			r = withoutAPIVersion(r)
+		}
 		next.ServeHTTP(w, r)
 	})
 }

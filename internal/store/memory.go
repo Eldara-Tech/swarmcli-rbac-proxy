@@ -89,6 +89,36 @@ func (s *MemoryStore) DeleteUser(_ context.Context, username string) error {
 	return ErrUserNotFound
 }
 
+func (s *MemoryStore) SetUserEnabled(_ context.Context, username string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, u := range s.users {
+		if u.Username == username {
+			u.Enabled = enabled
+			u.UpdatedAt = time.Now().UTC()
+			s.users[id] = u
+			return nil
+		}
+	}
+	return ErrUserNotFound
+}
+
+func (s *MemoryStore) SetUserRole(_ context.Context, username string, role string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, u := range s.users {
+		if u.Username == username {
+			u.Role = role
+			u.UpdatedAt = time.Now().UTC()
+			s.users[id] = u
+			return nil
+		}
+	}
+	return ErrUserNotFound
+}
+
 func (s *MemoryStore) SetOnboardToken(_ context.Context, username string, token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

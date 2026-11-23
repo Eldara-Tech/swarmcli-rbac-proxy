@@ -74,8 +74,21 @@ func classifyRequest(method, path string) (rbacRoute, bool) {
 		return rbacRoute{resource: store.ResourcePortForward, verb: store.VerbCreate}, true
 	case path == "/v1/logs" || strings.HasPrefix(path, "/v1/logs/"):
 		return rbacRoute{resource: store.ResourceStackLogs, verb: store.VerbGet}, true
+	case method == http.MethodGet && (path == "/v1/containers" || strings.HasPrefix(path, "/v1/containers/")):
+		// Read-only per-container health/ports inventory, scoped by the
+		// agent-manager to swarm service-task containers. Authorized as a
+		// services read (viewer-allowed): its disclosure matches GET /tasks
+		// (also services:list) and it exposes no mutation. Non-GET methods fall
+		// through to the unmapped (admin-only) sentinel, mirroring how the raw
+		// Docker /containers routes send non-reads to unmapped.
+		return rbacRoute{resource: store.ResourceServices, verb: store.VerbList}, true
 	case path == "/v1/volumes" || strings.HasPrefix(path, "/v1/volumes/"):
 		return mapAgentVolume(method, path)
+	case method == http.MethodGet && path == "/v1/license":
+		// The agent-manager's licence verdict (204 or its 403), polled by
+		// clients that never cross it otherwise. Part of the handshake, so
+		// every role may ask; the proxy routes it and decides nothing.
+		return rbacRoute{resource: store.ResourceSystem, verb: store.VerbGet}, true
 	}
 	if strings.HasPrefix(path, "/v1/") {
 		return rbacRoute{}, false // unknown agent path

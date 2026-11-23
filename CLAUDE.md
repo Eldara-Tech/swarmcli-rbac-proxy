@@ -4,7 +4,22 @@ Transparent reverse proxy that relays Docker API requests from TCP to a Unix soc
 
 ## Maintaining this file
 
-Keep CLAUDE.md up to date. When adding new files, endpoints, env vars, CI jobs, or dependencies, update the relevant sections here as part of the same change.
+When adding files, endpoints, env vars, CI jobs or dependencies, update the
+relevant section here in the same change — but **update the doc, not this file,
+whenever `docs/` already owns the subject.** Operator-facing reference — the API,
+the configuration surface, the role model, the audit vocabulary — belongs in
+`docs/`, and this file should point at it rather than carry a second copy.
+
+That distinction is not stylistic. Both hand-synced tables in here drifted out of
+`docs/`: `docs/api.md` documented a two-role model (`"role": "user"`) long after
+the code moved to `admin`/`operator`/`viewer`, and `docs/configuration.md`'s
+protection matrix was missing the overlay-pivot, port-forward and volume rows —
+in both cases because a security-relevant change shipped and only this file was
+updated. An operator never reads this file, so the copy that mattered was the one
+left stale.
+
+What stays here is the half an operator never needs: why a rule exists, what a
+test is defending, which invariants a change must not cross.
 
 ## Build / Test / Run
 
@@ -23,9 +38,30 @@ TEST_DATABASE_URL=postgres://user:pass@localhost:5432/testdb?sslmode=disable \
   go test -race -tags=integration ./...
 ```
 
+**On macOS, `go test ./internal/api` fails with `bind: invalid argument`** — on
+`main` too. Its tests listen on a unix socket under `t.TempDir()`, and macOS's
+long `TMPDIR` plus the test name passes the 104-byte socket-path limit. Run it
+with `TMPDIR=/tmp/<short>`; CI is Linux and never sees it.
+
+**Rehearsing against a local swarm** (macOS with colima; no image build): run
+the built binary natively with
+`PROXY_DOCKER_URL=unix://$HOME/.colima/default/docker.sock`,
+`PROXY_STORE=memory`, `PROXY_PROTECTED_STACK=<name>`, a throwaway CA and
+`PROXY_SEED_USERNAME=admin1 PROXY_SEED_ROLE=admin`. The management API on the
+external listener wants a known user's client cert even alongside the bearer
+token (`client certificate required` / `unknown user`), so create the other
+users over `/api/v1/users` presenting admin1's. Act as a user with the real
+docker CLI: `DOCKER_HOST=tcp://127.0.0.1:<port> DOCKER_TLS_VERIFY=1
+DOCKER_CERT_PATH=<dir with ca.pem, cert.pem, key.pem>`. Two traps in stock
+macOS `openssl` (LibreSSL) with an EC key: `x509 -req` signs with SHA-1 unless
+given `-sha256`, which Go rejects and curl reports only as `tlsv1 alert unknown
+ca`; and `req -x509` makes a v1 CA with no extensions, so give it
+`basicConstraints=critical,CA:TRUE` through an `-extfile`. Prefix the stacks and
+services you create, and remove them afterwards.
+
 ## Go Version & Build
 
-Go 1.26. No Makefile. GoReleaser handles binary releases with `-trimpath -s -w` ldflags and version injection (`internal/version`).
+Go 1.27. No Makefile. GoReleaser handles binary releases with `-trimpath -s -w` ldflags and version injection (`internal/version`).
 
 Version metadata is injected at build time via ldflags:
 - `-X swarm-rbac-proxy/internal/version.Version=...` — git tag
@@ -36,6 +72,7 @@ For local development, defaults are `dev`/`none`/`unknown`. See `RELEASING.md` f
 
 When updating the Go version, keep these in sync:
 - `go.mod` — `go` and `toolchain` directives
+- `Dockerfile` — the `golang:X.Y-alpine` build stage, the compiler of the published image. Dependabot bumps it on its own; pair that PR with the `go.mod` bump, or CI (which reads Go from `go.mod`) keeps testing a compiler the shipped binary does not use
 - `.devcontainer/Dockerfile` — `mcr.microsoft.com/devcontainers/go` image tag (tracks major.minor; patch versions are handled by `GOTOOLCHAIN=auto`)
 - `govulncheck` CI step — bump suppressed vuln IDs if the new toolchain resolves them, or add new ones if it introduces new unfixed stdlib vulns
 
@@ -43,7 +80,7 @@ When updating the Go version, keep these in sync:
 
 See [docs/configuration.md](docs/configuration.md) for all environment variables and config.json reference.
 
-Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables auto-generating client certs on user creation), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_BACKUP_DIR` (default-location backup dir for `swcproxy backup`/`/startbackup`; derived from the DB path when unset — set explicitly for postgres, which has no DB file), `PROXY_DATABASE_CONNECT_TIMEOUT` (server-only startup wait for postgres to become reachable, default 30s; CLI/migrate fail fast), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
+Key env vars: `PROXY_TLS_CERT`, `PROXY_TLS_KEY` (frontend TLS), `PROXY_TLS_CLIENT_CA` (frontend mTLS — enables client certificate authentication), `PROXY_TLS_CLIENT_CA_KEY` (CA private key — enables issuing client certs when a user redeems their onboard token at `GET /api/v1/onboard/{token}`), `PROXY_ADMIN_TOKEN` (management API bearer token; `PROXY_ADMIN_TOKEN_FILE` reads it from a file path — for Docker secrets mounted at `/run/secrets/...`), `PROXY_SEED_USERNAME` (bootstrap first user at startup), `PROXY_SEED_ROLE` (role for seed user, default "user"), `PROXY_EXTERNAL_URL` (external proxy URL for onboarding curl instructions), `PROXY_INTERNAL_LISTEN` (internal plain TCP listener address, e.g. "127.0.0.1:2375"), `PROXY_BACKUP_DIR` (default-location backup dir for `swcproxy backup`/`/startbackup`; derived from the DB path when unset — set explicitly for postgres, which has no DB file), `PROXY_DATABASE_CONNECT_TIMEOUT` (server-only startup wait for postgres to become reachable, default 30s; CLI/migrate fail fast), `PROXY_PROTECTED_STACK` (stack name to protect; auto-detected from container labels if unset), `PROXY_AGENT_MANAGER_TLS_BUNDLE` (consolidated single-PEM client cert+key+CA, the `internal-client` secret; supersedes the trio) or `PROXY_AGENT_MANAGER_TLS_CERT`/`PROXY_AGENT_MANAGER_TLS_KEY`/`PROXY_AGENT_MANAGER_TLS_CA` (mutual TLS to the agent-manager; the bundle or all three required when `PROXY_AGENT_MANAGER_URL` is `wss://`).
 
 ## Agent-manager Forwarding
 
@@ -70,16 +107,25 @@ with it (deny-wins).
   `RoleBinding` maps a user → role. A user's effective permission is the union
   of all bound roles' rules. **Default-deny.** Persisted in all three stores
   (`internal/store/rbac.go`).
-- **Built-in roles** `viewer`/`operator`/`admin` are seeded idempotently on
-  startup (`SeedDefaultRoles`) and never overwritten if edited. Legacy users are
-  migrated on startup (`MigrateLegacyRoles`): `User.Role` admin→admin, else
-  →operator (operator, not viewer, so an upgraded non-admin keeps the
-  non-protected create/update/exec it had pre-RBAC). `User.Role` is retained as the source for the protected-stack
+- **Built-in roles** `viewer`/`responder`/`operator`/`admin` are seeded
+  idempotently on startup (`SeedDefaultRoles`, per role by name, so a new
+  built-in reaches an existing DB) and never overwritten if edited. Every user
+  with no binding is bound on startup (`MigrateLegacyRoles`) via
+  `bindingRoleForUserRole`: a built-in `User.Role` → itself, else (legacy
+  `user`) →operator (operator, not viewer, so an upgraded non-admin keeps the
+  non-protected create/update/exec it had pre-RBAC). It runs every start, so it
+  must not map a viewer or responder to operator. `User.Role` is retained as the source for the protected-stack
   `isAdmin` gate (a separate axis from RBAC).
 - **Mapping**: `internal/api/rbacmap.go` maps each request to one
   `{resource, verb}` (e.g. `GET /services`→`services:list`,
   `POST /services/{id}/update`→`services:update`, `/v1/exec`→`exec:create`,
-  `GET /swarm`→`swarm:get`). Reads are authorized too. Unmapped/raw ops
+  `GET /swarm`→`swarm:get`, `GET /v1/containers`→`services:list` — the
+  read-only per-container health/ports inventory, which the agent-manager
+  scopes to swarm service-task containers, so its disclosure matches
+  `GET /tasks` (also `services:list`); non-GET `/v1/containers` falls through
+  to unmapped/admin-only; `GET /v1/license`→`system:get`, the agent-manager's
+  licence verdict, which every role may ask for and the proxy only routes).
+  Reads are authorized too. Unmapped/raw ops
   (`POST /containers/create`) map to the `unmapped` sentinel → admin-only.
 - **Stacks via label**: there is no `/stacks` Docker endpoint — a stack deploy
   is labeled `services`/`networks`/`configs`/`secrets` creates. A **mutating**
@@ -90,155 +136,87 @@ with it (deny-wins).
   resources, delete stacks (no `stacks:delete`), enumerate secrets, or touch the
   protected stack. Reads use the concrete resource only (no stacks-OR), so
   `viewer`'s `secrets:—` is not bypassable via a stack label.
+- **Update without create** (`operationalUpdateDenial`,
+  `internal/api/serviceupdate.go`; operator-facing in
+  [docs/rbac.md](docs/rbac.md#updating-a-service-you-cannot-create)): a full
+  service update is root-equivalent, so a caller without `create` on the same
+  candidates may only change Replicas/ForceUpdate or roll back.
+  Invariants: the spec comparison stays generic JSON, so an unknown, extra or
+  case-variant key counts as a change (the daemon's decoder is
+  case-insensitive); it must fail closed when the live spec cannot be read
+  (no socket client on a TCP backend); and an allowed request is forwarded
+  without its `/vX.Y` prefix, because the daemon strips fields an older API
+  lacks (seccomp, capabilities) from the body before applying it.
 - **Chain order** (external): `RequireClientCert` → `RBACMiddleware.Wrap` →
   `ExecGuard` → `ResourceGuard.Wrap` → proxy. RBAC is a no-op on the internal
   listener and when mTLS is off (no identity to authorize).
-- **Permission matrix** (verbs G=get L=list C=create U=update D=delete, *=all):
+- **Permission matrix**: the built-in role/verb table is
+  [docs/rbac.md § Permission matrix](docs/rbac.md#permission-matrix). It used to be
+  duplicated here byte-for-byte; a hand-synced table is exactly what drifted in
+  `docs/api.md` and `docs/configuration.md`, so it is a pointer now. The shape worth
+  keeping in mind while editing `internal/api/rbacmap.go`: `viewer` is read-only and
+  has no access at all to volumes, configs or secrets; `responder` is `viewer` plus
+  `services: update` and nothing else, for the mobile app — it stays non-root only
+  because #166's update-without-create limit applies to it, so it must never gain
+  create on services or stacks; `operator` adds create/update
+  on stacks and services plus `exec`/`port-forward` create; only `admin` reaches
+  secrets, swarm, roles/bindings and raw containers.
 
-  | resource | viewer | operator | admin |
-  |---|---|---|---|
-  | stacks | GL | GLCU | * |
-  | stack logs | GL | GL | * |
-  | services | GL | GLCU | * |
-  | nodes | GL | GL | * |
-  | networks | GL | GL | * |
-  | volumes | — | GL | * |
-  | configs | — | GL | * |
-  | secrets | — | — | * |
-  | exec/attach | — | C | * |
-  | port-forward | — | C | * |
-  | swarm | — | — | * |
-  | system (`_ping`/`version`/`info`) | GL | GL | GL |
-  | roles / bindings | — | — | * |
-  | containers (raw run) / unmapped (incl. `/events`) | — | — | * |
-
-- **Management**: `/api/v1/roles` and `/api/v1/bindings` (admin-token protected,
-  `internal/api/roles.go`, `bindings.go`) and the `swcproxy role`/`binding` CLI.
-  Last-admin lockout is enforced (`ErrLastAdmin`): the last admin binding cannot
-  be deleted, and a role update that would remove the last admin is refused.
+- **Management**: `/api/v1/users`, `/api/v1/roles` and `/api/v1/bindings`
+  (`internal/api/users.go`, `roles.go`, `bindings.go`) and the `swcproxy
+  user`/`role`/`binding` CLI. **Authorization** (`RequireAdminOrToken`,
+  `internal/api/adminauth.go`): the admin bearer token (`PROXY_ADMIN_TOKEN`) OR,
+  on the external listener, an **mTLS-authenticated admin** — a caller whose
+  effective permissions grant `*`/`*` (`store.UserIsAdmin`). The mTLS path is
+  what lets an admin manage users from the TUI (which carries a client cert but
+  no bearer token); the bearer path keeps CLI/bootstrap/internal-listener access.
+  The internal (loopback) listener stays bearer-only. The admin predicate is the
+  same one the lockout logic uses, so "who may manage" and "who counts as admin"
+  never diverge — and a future migration to a first-class `users` RBAC resource
+  only changes that predicate, not the wire contract.
+- **Last-admin lockout** is enforced (`ErrLastAdmin`) across every path that
+  could remove admin: the last admin binding cannot be deleted, a role update
+  that would remove the last admin is refused, and (new) deleting / disabling /
+  demoting the last admin user is refused. A user delete cascades the user's
+  bindings (`DeleteUserChecked`), and a user cannot delete/disable/demote
+  **themselves** (the issue #230 restriction).
 
 ## Stack Resource Protection
 
 When running inside a Docker Swarm stack, the proxy auto-detects its own stack name from container labels (`com.docker.stack.namespace`). Override with `PROXY_PROTECTED_STACK`.
 
-### Permission matrix
+**The full 21-row permission matrix and the rationale for every row now live in
+[docs/configuration.md](docs/configuration.md#permission-matrix).** They were kept
+here for a while and the operator doc carried a 6-row subset, which meant the rows
+that matter most to a reviewer — the overlay-pivot block, port-forward, volumes,
+the `dest_addr` rejection — existed only in a file operators do not read. Change
+the doc, not this section.
 
-| Operation | Internal listener | External admin | External user |
-|-----------|-------------------|----------------|---------------|
-| Read (GET) — any resource | allowed | allowed | allowed |
-| Create (POST .../create) — protected stack | allowed | blocked (403) | blocked (403) |
-| Create (POST .../create) — other stack | allowed | allowed | allowed |
-| Create service — `TaskTemplate.Networks` attaches to protected overlay | allowed | blocked (403) | blocked (403) |
-| Update (POST .../update) — protected stack | allowed | allowed | blocked (403) |
-| Update (POST .../update) — other stack | allowed | allowed | allowed |
-| Update service — attaches a non-protected service to the protected overlay | allowed | blocked (403) | blocked (403) |
-| Network connect/disconnect (POST /networks/{id}/{connect,disconnect}) — protected overlay | allowed | blocked (403) | blocked (403) |
-| Network connect/disconnect — other network | allowed | allowed | allowed |
-| Delete (DELETE .../{id}) — protected stack | allowed | blocked (403) | blocked (403) |
-| Delete (DELETE .../{id}) — other stack | allowed | allowed | allowed |
-| Exec/attach — protected stack container | allowed | allowed | blocked (403) |
-| Exec/attach — non-protected container | allowed | allowed | allowed |
-| Port-forward (`GET /v1/forward`) — protected stack task | allowed | blocked (403) | blocked (403) |
-| Port-forward (`GET /v1/forward`) — non-protected task | allowed | allowed | allowed |
-| Port-forward with `dest_addr` query param | allowed | blocked (400) | blocked (400) |
-| Volume read (`GET /v1/volumes...`) | allowed | allowed | allowed |
-| Volume mutate (create/delete/file delete/rename) — protected-stack volume | allowed | allowed | blocked (403) |
-| Volume mutate — non-protected volume | allowed | allowed | allowed |
-| Volume prune (`POST /v1/volumes/prune`) — bulk, node-wide | allowed | allowed | blocked (403) |
-| Swarm leave (POST /swarm/leave) | allowed | blocked (403) | blocked (403) |
-
-If auto-detection fails (e.g. running outside Docker) and `PROXY_PROTECTED_STACK` is not set, the guard is disabled and all operations are allowed.
-
-### Rationale
-
-- **Create blocked for all external users on protected stack**: prevents namespace pollution — injecting resources into the infrastructure namespace could interfere with stack operations (name collisions, label conflicts). Legitimate deployments use `docker stack deploy` via the internal listener.
-- **Update allowed for admins on protected stack**: routine operations (image deploys, scaling, secret rotation) require updating protected services through the proxy.
-- **Overlay-membership mutations blocked for every external role — including admin**: `TaskTemplate.Networks` attaches to the protected overlay on `create`/`update`, and `POST /networks/{id}/{connect,disconnect}` against the protected overlay, all return `403` regardless of role. An admin-cert compromise therefore cannot bootstrap a pivot onto `agent-net`. The only legitimate paths to mutate overlay membership are the host Docker socket on a manager node or the internal loopback listener (`PROXY_INTERNAL_LISTEN`). In-place updates of protected-stack services whose spec re-affirms the existing overlay attachment continue to work (pivot-only T1: the check fires only when the target service is not itself on the protected stack).
-- **Delete blocked for all external users on protected stack**: destructive — removing infrastructure services can make the cluster unmanageable. Only recoverable via direct container access (internal listener).
-- **Exec/attach admin-only for protected stack**: shell access to infrastructure containers enables privilege escalation (e.g. direct database access via `swcproxy` CLI). Regular users may exec into their own service containers freely. Admin `exec`/`attach` into an already-overlay-resident container is unaffected by the overlay-membership block above — the guard scope is membership, not traffic.
-- **Port-forward to protected stack blocked for every role — including admin**: raw-TCP relay through the proxy to an infrastructure container is an exfil channel that survives the per-request authorization model (a forwarded socket can be reused indefinitely). Symmetric to the T2 connect/disconnect block. Legitimate admin port-forwarding into infrastructure must use the host Docker socket or the internal listener.
-- **Port-forward `dest_addr` query rejected (400)**: the agent computes the destination from `container_id` itself; honouring a client-supplied IP would defeat the protected-stack `task_id` check. SSRF mitigation. Both `agent-manager` and `agent` reject `dest_addr` defensively.
-- **Swarm leave blocked for all external users**: destructive — tears down the entire cluster. Only via internal listener.
+What matters when changing code here: the guard keys on `admin` specifically, not
+on a role ranking, and three of the rules deny **every external role including
+admin** — overlay-membership mutation (T1/T2), port-forward to a protected-stack
+task, and `swarm/leave`. Those three are the anti-pivot boundary; if a change
+would let an admin certificate through any of them, it is a security change, not a
+convenience one. `internal/api/guard.go` (`bodyHasProtectedNetworkAttachment`) and
+`internal/api/volumeguard.go` (`guardVolume`, the prune gate) are where they live.
 
 ## Architecture
 
-```
-swarm-rbac-proxy/
-  main.go               — reverse proxy + dual listener routing (internal plain TCP + external mTLS), --version flag, internal-only /_swc/ control-plane (startbackup + version, branded 404) via mountControlPlane
-  main_test.go          — unit tests against mock Unix socket
-  integration_test.go   — TLS integration tests (plain→TLS, mTLS, upgrade through TLS, frontend mTLS)
-  .goreleaser.yml       — GoReleaser config: Linux binary releases (amd64/arm64) for proxy + swcproxy
-  Dockerfile            — multi-stage build (golang:1.26-alpine → alpine:3.23), version injection via build args + ldflags, OCI labels
-  welcome.sh            — container login banner with dynamic version display (COPY'd to /etc/profile.d/welcome.sh)
-  stack.yml             — Docker Swarm stack definition
-  cmd/
-    swcproxy/
-      main.go           — Admin CLI: version, user ls/add/delete/regenerate-token, audit ls (direct store access)
-      backup.go         — Admin CLI: backup/restore (delegates artifact assembly to internal/backup; optional CA bundle; default-location output resolution)
-      migrate.go        — Admin CLI: `migrate` (SQLite → PostgreSQL logical copy via store Export→Restore; fail-fast on the dest; db.migrated audit)
-      main_test.go      — CLI unit tests (flag parsing, helpers)
-      migrate_test.go   — `parseMigrateArgs` unit tests (no DB)
-      migrate_integration_test.go — `swcproxy migrate` e2e (//go:build integration; SQLite source → TEST_DATABASE_URL postgres dest)
-  internal/
-    backup/
-      backup.go         — Logical backup artifact (Doc/User/CA schema incl. roles+bindings, Create with token-redaction, Marshal/ToData/WriteToDir [O_EXCL, no overwrite]/DefaultDir/Filename), shared by the swcproxy CLI and the server's /startbackup handler
-      backup_test.go    — backup package unit tests (export, marshal, filename, dir perms, default dir)
-    version/
-      version.go        — Build-time version vars (Version/Commit/Date), shared by both binaries
-      version_test.go   — version package tests
-    certauth/
-      certauth.go       — CA loading, generation (GenerateCA), client certificate issuance (ECDSA P-256)
-      certauth_test.go  — unit tests (load, issue, serial uniqueness, round-trip)
-    config/
-      config.go         — Config struct, Load(path) merges JSON file + env vars + defaults
-      config_test.go    — config loading unit tests
-    log/
-      logger.go         — proxylog package: zap-based structured logging (Init/L/Sync/With)
-      logger_test.go    — logger unit tests (mode detection, level defaults, noop safety)
-    store/
-      store.go          — UserStore + AuditStore + BackupStore interfaces, User/AuditEntry/BackupData types, AuditAction constants, sentinel errors (BackupStore: Export → all tables incl. roles/bindings + token columns; Restore → verbatim, single transaction, replace clears all tables)
-      rbac.go           — RBACStore interface, Role/RoleBinding/PermissionRule types, resource/verb vocabulary, built-in roles, effective-permission resolver, seeding, legacy migration, last-admin lockout helpers
-      memory.go         — in-memory UserStore + AuditStore + RBACStore + BackupStore (dev/testing)
-      sqlite.go         — SQLite UserStore + AuditStore + RBACStore + BackupStore (modernc.org/sqlite, default, with migrations; rules stored as JSON)
-      postgres.go       — PostgreSQL UserStore + AuditStore + RBACStore + BackupStore (pgx/v5, with migrations; rules stored as JSONB). NewPostgresStoreWithRetry adds startup connection-wait (server-only; CLI fails fast)
-      contract_test.go  — shared contract tests for all store implementations (user + audit)
-      rbac_contract_test.go — shared RBAC contract tests (roles, bindings, resolver, seeding, migration, lockout)
-      memory_test.go    — memory store unit tests
-      sqlite_test.go    — SQLite store unit tests (contract + WAL)
-      postgres_test.go  — postgres integration tests (//go:build integration)
-      postgres_retry_test.go — NewPostgresStoreWithRetry fail-fast/timeout/cancel paths (no DB, fast suite)
-    api/
-      auth.go           — RequireToken middleware (bearer token validation)
-      auth_test.go      — auth middleware tests
-      mtls.go           — RequireClientCert middleware (mTLS client cert → user lookup)
-      mtls_test.go      — mTLS middleware unit tests
-      users.go          — UserHandler: POST/GET /api/v1/users, DELETE /api/v1/users/{username}
-      users_test.go     — handler tests using MemoryStore
-      roles.go          — RoleHandler: CRUD /api/v1/roles (admin-token protected)
-      bindings.go       — BindingHandler: list/create/delete /api/v1/bindings (admin-token protected)
-      rbac.go           — RBACMiddleware: per-role resource/verb authorization on the data plane (default-deny, stacks-label OR)
-      rbac_test.go      — RBAC middleware matrix tests (viewer/operator/admin × resources/verbs)
-      rbacmap.go        — mapRequest: HTTP {method,path} → {resource,verb}; stripDockerVersion shared helper
-      rbacmap_test.go   — request-mapping table tests
-      me.go             — MeHandler: GET /api/v1/me → caller's own {username, role} from mTLS cert
-      me_test.go        — me handler tests (admin/user/no-user/method)
-      onboard.go        — OnboardHandler: GET /api/v1/onboard/{token} → Docker-context tar
-      onboard_test.go   — onboard handler tests
-      guard.go          — ResourceGuard middleware: protects bootstrap stack from non-admin mutation; ExecGuard: admin-only exec/attach; resourceStackLabel/stackLabelFromBody label resolvers shared with RBAC
-      guard_test.go     — guard middleware tests (path parsing, admin check, back-query, body inspection)
-      volumeguard.go    — volume management policy: stack-scoped admin gate for /v1/volumes mutations, agent-manager back-query for ownership, success auditing
-      volumeguard_test.go — volume guard tests (GET allowed, protected/non-protected mutation, fail-closed, audit)
-      stackdetect.go    — DetectStackName: auto-discovers stack name from container labels via Docker API
-      stackdetect_test.go — stack detection tests
-```
+The code map and the request-chain description moved to
+**[docs/architecture.md](docs/architecture.md)**. `README.md` used to send
+contributors here for it, which is backwards: it is onboarding material, and the
+CI section right below it had already gone three workflows stale while it lived
+in a file nobody reviews.
 
-## Dual Listener
+Two invariants to hold while changing anything on the request path:
 
-When `PROXY_INTERNAL_LISTEN` is set, the proxy runs two listeners:
-- **Internal** (`PROXY_INTERNAL_LISTEN`, e.g. `127.0.0.1:2375`): plain TCP, no mTLS, for admin access inside the container. Bypasses all auth and resource guards.
-- **External** (`PROXY_LISTEN`, e.g. `:2376`): TLS with `VerifyClientCertIfGiven`. Proxy routes require client cert; onboard endpoint does not.
-
-**Design note**: `isInternalListener()` identifies internal requests by the presence of `ContextKeyInternal` in the request context, set by `MarkInternalRequest` middleware applied exclusively on the internal listener mux. This positive-signal approach ensures an auth bypass on the external listener cannot be misread as an internal request.
+- **The chain order is load-bearing**: `RequireClientCert → RBACMiddleware.Wrap →
+  ExecGuard → ResourceGuard.Wrap → proxy`. Moving a guard earlier changes what
+  identity it can see; moving one later changes what it can still refuse.
+- **Three rules deny every external role, admin included** — overlay-membership
+  mutation, port-forward to a protected-stack task, and `swarm/leave`. Those are
+  the anti-pivot boundary. A change that lets an admin certificate through any of
+  them is a security change, not a convenience one.
 
 ## Exec Guard Prerequisites
 
@@ -250,13 +228,15 @@ A back-query error (Docker daemon unreachable) causes fail-closed (503) rather t
 
 ## API Endpoints
 
-- `POST /api/v1/users` — Create user (`{"username":"alice","role":"admin"}` → 201 with user object; includes `certificate` bundle when `PROXY_TLS_CLIENT_CA_KEY` is set)
+- `POST /api/v1/users` — Create user (`{"username":"alice","role":"operator"}`; role ∈ {admin, operator, responder, viewer}, default operator) → 201 `{"user":{…},"onboard_token":"<hex>","onboard_url":"<external>/api/v1/onboard/<token>","expires_at":"<RFC 3339>"}`. Also creates the matching RBAC binding (admin→admin, operator→operator, responder→responder, viewer→viewer) so the legacy `User.Role` and the RBAC binding stay in sync. `expires_at` is the clock read before `SetOnboardToken` stamps the issue time, truncated to the second, plus the TTL from the config value the store's `SetTokenTTL` also gets (`routeDeps.onboardTokenTTL`), so it is never later than what `ConsumeOnboardToken` enforces. The private key is **not** returned — the proxy generates it when the token is redeemed at the onboard endpoint and returns it once in that tar.
 - `GET /api/v1/users` — List all users (200, always returns array)
-- `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found)
-- `GET|POST /api/v1/roles`, `GET|PUT|DELETE /api/v1/roles/{name}` — RBAC role CRUD (admin-token protected). Built-in roles can't be deleted (409); in-use roles can't be deleted (409); updates that would remove the last admin are refused (409)
-- `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-token protected). Deleting the last admin binding is refused (409)
+- `PATCH /api/v1/users/{username}` — Update user (`{"enabled":false}` and/or `{"role":"viewer"}`) → 200 with the updated user. Refuses self-disable / self-role-change (409) and any change that would remove the last admin (409); a role change replaces the user's bindings and updates `User.Role` atomically.
+- `POST /api/v1/users/{username}/regenerate-token` — Issue a fresh one-time onboard token → 200 `{"onboard_token":…,"onboard_url":…,"expires_at":…}` (404 if user not found)
+- `DELETE /api/v1/users/{username}` — Delete user (204 on success, 404 if not found). Refuses to delete the caller themselves (409) or the last admin (409), and cascades the user's role bindings.
+- `GET|POST /api/v1/roles`, `GET|PUT|DELETE /api/v1/roles/{name}` — RBAC role CRUD (admin-authorized: bearer token OR mTLS admin). Built-in roles can't be deleted (409); in-use roles can't be deleted (409); updates that would remove the last admin are refused (409)
+- `GET|POST /api/v1/bindings`, `DELETE /api/v1/bindings/{id}` — user→role bindings (admin-authorized). Deleting the last admin binding is refused (409)
 - `GET /api/v1/onboard/{token}` — One-time onboarding: consumes token, issues client cert, returns Docker-context-compatible tar (no auth required, token is the auth)
-- `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role"}`, derived from their mTLS client cert (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
+- `GET /api/v1/me` — Returns the authenticated caller's own `{"username","role","rules"}` — identity from their mTLS client cert, `rules` the effective RBAC rules (union of bound roles' rules via `store.GetEffectivePermissions`, `[]` when unbound; 500 on store error) (cert-authenticated via `RequireClientCert`, not the admin token). Lets a client learn its own role without attempting a mutating operation. Returns 401 on the internal listener / when no client identity is present. (Used by the CLI's proactive infra-update prompt to decide whether to offer an upgrade.)
 - `GET|POST /_swc/startbackup` (alias `/startbackup`) — **Internal listener only.** Triggers a database-only logical backup (never the CA, onboarding tokens always redacted), writes it to the default backup dir on the `proxy-data` volume (`<db-dir>/backup/swc-proxy-backup-<datetime>.json`; `-N` suffix on same-second collision), and returns `{"result":"success","file":...,"path":...}`. Audited as `backup.exported` (actor `internal`). See [docs/backup-restore.md](docs/backup-restore.md).
 - `GET /_swc/version` — **Internal listener only.** Reports build identity `{"version","commit","date"}`. Its presence (200 vs a Docker-fall-through 404 on an older build) is the "is this binary current?" signal.
 - The whole `/_swc/` control-plane namespace is gated by `mountControlPlane(mux, internal, …)` so it is absent from the external mux; unknown `/_swc/*` paths get a branded JSON 404 instead of falling through to the Docker proxy (PR #107).
@@ -292,19 +272,64 @@ file copy. The client CA lives in Docker secrets, **not** the database — see
 [docs/backup-restore.md](docs/backup-restore.md) for why a DB restore alone
 does not preserve user connections, and the `--include-ca` DR bundle.
 
+## Logging
+
+zap, via `internal/log` (package `proxylog`): `Init(mode, level)` for the
+server, `InitTo(w, mode, level)` for the `swcproxy` CLI so that command output
+on stdout (a `backup` JSON artifact) stays clean. `dev` mode is a console
+encoder, anything else is JSON; the level is `debug|info|warn|error`, defaulting
+to debug in dev and info in prod. `L()` returns a no-op logger if `Init` was
+never called, so a missed initialisation is silence rather than a nil panic.
+
+This already meets the ecosystem logging contract, and nothing here needs to
+change — the note exists so the next person does not "fix" it into slog for
+consistency's sake. What the daemons across the repos agree on is the contract,
+not the library:
+
+- structured key/value pairs, never a formatted sentence
+- an ISO-8601 timestamp, a level, and a message field
+- the level and the output format both selectable at deploy time
+- JSON available for whatever ships the logs, human-readable the default
+- one logger per process, on one stream
+
+One line per request goes through the same logger (`accessLog`, `accesslog.go`):
+method, path, status, bytes, duration, remote IP and the mTLS caller. A **served**
+request logs at **debug** and anything the proxy refused or could not complete
+logs at **info** — so the default level shows only failures, and a full request
+trace is one `PROXY_LOG_LEVEL=debug` away. The onboarding token is a path
+segment, so `redactPath` keeps it out of the log; it is the only path that is
+redacted, because Docker resource IDs and filters are what make a line useful.
+
+The standard library's own loggers are wired into this one too, via
+`proxylog.StdErrorLogger` — `http.Server.ErrorLog` on every listener and
+`httputil.ReverseProxy.ErrorLog`. Unset, they write to `log.Default()`, which is
+a second stream in a second format that `PROXY_LOG_LEVEL` cannot reach, and is
+how the proxy used to emit unstructured `http: proxy error: …` lines alongside
+its JSON.
+
+swarmcli-cd meets it with `log/slog` and `--log-level` / `--log-format` flags;
+swarmcli-agent meets it with `log/slog` and `AGENT_LOG_*` environment variables
+(it parses no flags). swarmcli and swarmcli-be stay on zap with lumberjack file
+rotation under `~/.local/state`, because a TUI cannot log to the terminal it
+owns — that is the one deliberate exception to "on one stream".
+
 ## Audit Log
 
-All business actions are persisted to an `audit_log` table (same database as users). Audited actions: `user.created`, `user.deleted`, `cert.issued`, `onboard.completed`, `guard.blocked`, `token.regenerated`, `volume.created`, `volume.deleted`, `volume.file.deleted`, `volume.file.renamed`, `volume.file.uploaded`, `volume.pruned` (the `volume.*` actions are recorded on **success**; volume denials use `guard.blocked` like every other guarded op), `rbac.denied` (a request rejected by the RBAC policy engine — distinct from `guard.blocked`, which marks protected-stack denials), the RBAC management mutations `role.created`, `role.updated`, `role.deleted`, `binding.created`, `binding.deleted`, the logical-backup actions `backup.exported`, `backup.restored`, and `db.migrated` (a completed `swcproxy migrate`, recorded on the destination store) — all recorded on success. Auth events (mTLS success/failure) are logged via zap only, not persisted.
+All business actions are persisted to an `audit_log` table (same database as users). **The full action vocabulary and the record shape are in [docs/rbac.md § Auditing](docs/rbac.md#auditing)** — that is where someone writing a SIEM rule will look, so add new actions there, not only here.
 
-Each entry records: id, timestamp, actor (username/"cli"/"internal"/"anonymous"; "internal" marks an action triggered via the internal listener, e.g. `/startbackup`), action, resource (`type:id` format), status ("success"/"denied"), detail, source\_ip.
+Two things to hold on to when adding an action: `rbac.denied` and `guard.blocked` are deliberately distinct (policy engine vs protected-stack guard, and volume denials use `guard.blocked`), and mTLS auth events go to zap only and are never persisted — so the table cannot answer an authentication question.
 
 The `AuditStore` interface (`internal/store/store.go`) is implemented by all three store backends. Recording is nil-safe — handlers pass `nil` in tests. Audit write failures are logged but never block requests.
 
 ## CI
 
-GitHub Actions (`.github/workflows/`):
-- `ci.yml`: three jobs — gofmt check, `go test -race`, golangci-lint (fast, no DB); Docker image build (depends on `ci`); PostgreSQL 17 integration tests.
+GitHub Actions — all six of `.github/workflows/`:
+- `ci.yml`: three jobs. `ci` (no DB) runs four steps — gofmt check, **`go mod tidy` + diff check**, `go test -race`, golangci-lint; `docker-build` builds the image and depends on `ci`; `integration` runs the PostgreSQL 17 suite.
 - `licence.yml`: SPDX license header check (`.go` and `.sh` files).
+- `check_labels.yml`: enforces the A/B/C label triple on every PR. It reads labels from the `pull_request` **event payload**, not the API, so a run queued from `opened` sees none and only a new event fixes it — never a job re-run.
+- `govulncheck.yml`: scheduled vulnerability scan.
+- `dependabot-tidy.yml`: keeps `go.sum` tidy on Dependabot PRs.
+- `release.yml`: see [Release](#release) below.
 
 ## Release
 
@@ -329,17 +354,16 @@ go build . && go test -race ./... && gofmt -l . && go vet ./... && golangci-lint
 
 ## Known Gaps
 
-Tracked issues from architecture audit:
+Only what is still open. Resolved audit findings (#55, #56, #57, #59, #60, #63)
+were struck through here for a while, which made this a changelog; the resulting
+behaviour is documented where it belongs — the inter-service mTLS chain that
+closed #63 is [docs/security.md § Overlay network
+trust](docs/security.md#overlay-network-trust), and `git log` is the record of
+the rest.
 
-- **#55**: `isExecPath` missed `GET /containers/{id}/attach/ws` (WebSocket attach) — fixed
-- **#56**: ~~`isInternalListener` uses absence of user context as signal~~ — fixed: now uses positive `ContextKeyInternal` flag set by `MarkInternalRequest`
-- **#57**: ~~Integration tests use `RequireAndVerifyClientCert` but production uses `VerifyClientCertIfGiven`~~ — fixed: all frontend tests now use `VerifyClientCertIfGiven`, added no-cert client tests
-- **#59**: ~~Exec guard silently disabled without mTLS~~ — fixed: always applied on external listener (fail-closed)
-- **#60**: ~~`ResourceGuard` fails open on back-query errors (including delete operations)~~ — fixed: deletes now fail closed (503) on back-query errors
-- **#62**: No certificate rotation mechanism (client certs expire after 1 year)
-- **#63**: ~~No inter-service authentication — accepted risk: overlay network isolation is sufficient~~ — **fixed**: the `rbac-proxy → agent-manager → agent` hops now use mutual TLS (bootstrap-issued internal-server / internal-client certs from the same CA). This both replaces the confidentiality the `encrypted: "true"` overlay used to provide and adds the inter-service authentication the overlay never had, so `agent-net` is now a plain overlay (an encrypted overlay's IPsec/ESP requirement broke worker-node shells on clusters that block IP-protocol-50). The T1/T2 overlay-pivot vectors remain closed by `ResourceGuard` for every external role including admin (legitimate overlay-membership mutations go through the host Docker socket or the internal listener); mTLS now additionally means a rogue workload that does reach `agent-net` cannot invoke the agent/agent-manager without a CA-signed client cert. See `docs/security.md` § "Overlay network trust".
-- **#64**: ~~Admin token not persisted across redeployments~~ — partially fixed: proxy now refuses to start when `PROXY_ADMIN_TOKEN` is empty and the user store contains ≥1 admin. Persistence across redeploys is still operator responsibility.
-- **#75**: Dockerfile runs as root — accepted risk: proxy requires Docker socket access, which is root-equivalent. Non-root would need root-start entrypoint for negligible benefit. Same reasoning as #63.
+- **#62**: no certificate rotation mechanism — client certs are valid for 1 year and there is no CRL or OCSP. Revocation means deleting the user, after which the proxy rejects the cert because its CN no longer matches an enabled user. Stated for operators in [docs/security.md § Certificate lifecycle](docs/security.md).
+- **#64** (partial): the proxy now refuses to start when `PROXY_ADMIN_TOKEN` is empty and the store holds ≥1 admin, but persisting the token across redeploys is still operator responsibility.
+- **#75**: the Dockerfile runs as root — accepted. The proxy needs Docker socket access, which is root-equivalent, so a non-root image would need a root-start entrypoint for negligible benefit.
 
 ## Dependencies
 

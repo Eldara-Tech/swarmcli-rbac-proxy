@@ -48,7 +48,7 @@ func RequireClientCert(s store.UserStore, next http.Handler) http.Handler {
 		}
 
 		cert := r.TLS.PeerCertificates[0]
-		username := extractIdentity(cert)
+		username := IdentityFromCert(cert)
 		if username == "" {
 			l().Warnw("certificate has no usable identity")
 			writeError(w, http.StatusUnauthorized, "certificate has no usable identity")
@@ -73,9 +73,13 @@ func RequireClientCert(s store.UserStore, next http.Handler) http.Handler {
 	})
 }
 
-// extractIdentity returns a username from the certificate.
+// IdentityFromCert returns a username from the certificate.
 // Preference: SAN email (if present), then Subject CN.
-func extractIdentity(cert *x509.Certificate) string {
+//
+// Exported because the identity a request carries is read outside the
+// authentication middleware too — the access log names the caller, and deriving
+// it a second time is how the two answers drift apart.
+func IdentityFromCert(cert *x509.Certificate) string {
 	if len(cert.EmailAddresses) > 0 {
 		return cert.EmailAddresses[0]
 	}

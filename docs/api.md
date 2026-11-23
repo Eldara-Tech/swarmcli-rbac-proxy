@@ -32,25 +32,49 @@ When `PROXY_ADMIN_TOKEN` is not set, the API is open (no authentication required
 ```bash
 curl -s -X POST http://localhost:2375/api/v1/users \
   -H "Content-Type: application/json" \
-  -d '{"username": "alice", "role": "user"}'
+  -d '{"username": "alice", "role": "operator"}'
 ```
 
-The `role` field is optional and defaults to `"user"`. Set to `"admin"` for admin access.
+The `role` field is optional and defaults to `"operator"`. It must be one of the
+four built-in roles — `admin`, `operator`, `responder`, `viewer` — and anything
+else is rejected with `400`. See [rbac.md](rbac.md) for what each one grants.
 
-Response (`201 Created`):
+`username` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`: it becomes the client
+certificate CN and appears in onboard URLs and audit records, so it is held to a
+conservative shell/URL/log-safe charset.
+
+Response (`201 Created`). The user is created **without credentials** — the
+response carries a single-use onboarding token instead, which the user redeems
+for their certificate bundle via [Onboard a user](#onboard-a-user):
 
 ```json
 {
-  "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
-  "username": "alice",
-  "role": "user",
-  "enabled": true,
-  "created_at": "2026-03-06T12:00:00Z",
-  "updated_at": "2026-03-06T12:00:00Z"
+  "user": {
+    "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "username": "alice",
+    "role": "operator",
+    "enabled": true,
+    "created_at": "2026-03-06T12:00:00Z",
+    "updated_at": "2026-03-06T12:00:00Z"
+  },
+  "onboard_token": "3f2b1c…",
+  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/3f2b1c…",
+  "expires_at": "2026-03-07T12:00:00Z"
 }
 ```
 
-When `PROXY_TLS_CLIENT_CA_KEY` is set, the response includes an auto-generated client certificate bundle (fields `certificate.cert_pem`, `certificate.key_pem`, `certificate.ca_pem`). The private key is generated in memory and never stored on the server — if lost, the user must be deleted and recreated. See [the walkthrough](getting-started.md#2-start-the-proxy-with-mtls) for a full example.
+`onboard_url` is present only when the proxy knows its own external address.
+`expires_at` (RFC 3339, UTC) is when the token stops being redeemable: the time
+it was issued plus `PROXY_ONBOARDING_TOKEN_TTL` (default `24h`, see
+[configuration.md](configuration.md)), rounded down to the second so it is never
+later than the real expiry. Proxies older than this field do not send it.
+
+The response carries no key or certificate. When `PROXY_TLS_CLIENT_CA_KEY` is
+set, the proxy generates the private key and signs the certificate when the
+token is redeemed, and returns both once in that response; the key is never
+stored on the server. See
+[the walkthrough](getting-started.md#2-start-the-proxy-with-mtls) for a full
+example.
 
 ### Error: duplicate username
 
@@ -81,13 +105,93 @@ Response (`200 OK`):
   {
     "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
     "username": "alice",
-    "role": "user",
+    "role": "operator",
     "enabled": true,
     "created_at": "2026-03-06T12:00:00Z",
     "updated_at": "2026-03-06T12:00:00Z"
   }
 ]
 ```
+
+The onboarding token and its issued/consumed timestamps are held on the record
+but never serialised, so they cannot leak through a list.
+
+## Update a user
+
+`PATCH /api/v1/users/{username}` changes the role, the enabled flag, or both.
+
+```bash
+curl -s -X PATCH http://localhost:2375/api/v1/users/alice \
+  -H "Content-Type: application/json" \
+  -d '{"role": "viewer", "enabled": false}'
+```
+
+Both fields are optional, but at least one must be present — an empty body is
+`400 nothing to update`. `role` is validated against the same four built-ins as
+create, deliberately: the protected-stack gate tests `User.Role == "admin"`, so an
+arbitrary string here would be misread rather than rejected.
+
+Two lockout guards return `409 Conflict`:
+
+- You cannot change **your own** role.
+- You cannot disable **yourself**.
+
+A third guard refuses to demote or disable the **last remaining admin**, so the
+instance can never be left without one. When a request sets both fields, the role
+lands first, so a combined change still applies even if the enable toggle is a
+no-op.
+
+## Regenerate an onboarding token
+
+`POST /api/v1/users/{username}/regenerate-token` issues a fresh single-use token,
+invalidating any previous one. Use it when a token was lost, leaked, or expired
+before the user redeemed it.
+
+```bash
+curl -s -X POST http://localhost:2375/api/v1/users/alice/regenerate-token
+```
+
+Response (`200 OK`) carries the token only — no user object, and `expires_at`
+as for create:
+
+```json
+{
+  "onboard_token": "9d4e7a…",
+  "onboard_url": "https://proxy.example.com:2376/api/v1/onboard/9d4e7a…",
+  "expires_at": "2026-03-07T12:00:00Z"
+}
+```
+
+`404` if the user does not exist.
+
+## Who am I
+
+`GET /api/v1/me` returns the identity the proxy resolved from the caller's client
+certificate, plus its effective RBAC rules — the union of the rules of every role
+bound to the caller, exactly what the proxy evaluates on each request. It is the
+cheapest way for a client to discover what it may do.
+
+```bash
+curl -s --cert alice.crt --key alice.key https://localhost:2376/api/v1/me
+```
+
+```json
+{
+  "username": "alice",
+  "role": "operator",
+  "rules": [
+    { "resources": ["services", "nodes"], "verbs": ["get", "list"] }
+  ]
+}
+```
+
+`rules` is always present, and is `[]` when the caller has no bindings; bindings
+to a deleted role are skipped. `role` is the legacy single role and is kept for
+backwards compatibility. A failure to read the bindings returns `500`.
+
+It requires an mTLS identity, so it answers only on the external listener — a
+request on the internal listener, which carries no client certificate, is
+rejected rather than answered with an empty identity.
 
 ## Delete a user
 
@@ -110,8 +214,8 @@ Response (`404 Not Found`):
 The proxy authorizes every proxied Docker/agent request against the caller's
 **roles**. A role is a named set of permission rules (`{resources, verbs}` with
 `*` wildcards); a **binding** maps a user to a role. The built-in roles
-`viewer`, `operator`, and `admin` are seeded on startup. These management
-endpoints are admin-token protected like the user API.
+`viewer`, `responder`, `operator`, and `admin` are seeded on startup. These
+management endpoints are admin-token protected like the user API.
 
 ### List / inspect roles
 
@@ -193,6 +297,16 @@ Response (`410 Gone`):
 {"message": "token already consumed"}
 ```
 
+## Control plane (`/_swc/`)
+
+The proxy reserves `/_swc/` on the **internal** listener for its own endpoints, so
+they can never be shadowed by, or fall through to, the Docker API — `GET
+/_swc/version` for build identity and `/_swc/startbackup` to trigger a
+database-only backup. An unknown path under the prefix returns a branded JSON
+404 rather than reaching Docker. Full usage, including why a `404` on
+`/_swc/version` means a stale build, is in
+[backup-restore.md](backup-restore.md#trigger-over-the-internal-listener).
+
 ## Agent-manager forwarding
 
 When `PROXY_AGENT_MANAGER_URL` is set, all `/v1/*` requests are forwarded to the configured backend. This feature is designed for use with [SwarmCLI](https://swarmcli.io/) (coming soon) and is not intended for standalone use. Both HTTP and WebSocket upgrade (hijack) connections are supported. See [configuration.md](configuration.md#agent-manager-forwarding) for details.
@@ -221,6 +335,8 @@ proxy maps each request to a `{resource, verb}` (e.g. `GET /services` →
 it with `403` unless one of the caller's roles grants it. Stack-labeled
 mutations (resources carrying `com.docker.stack.namespace`) are additionally
 authorized under the `stacks` resource, so a role with `stacks:create` can
-deploy a full stack. Unmapped or raw operations (e.g. `POST /containers/create`)
+deploy a full stack. A role with `services:update` but no matching `create`
+may only scale, restart or roll back a service
+([rbac.md](rbac.md#updating-a-service-you-cannot-create)). Unmapped or raw operations (e.g. `POST /containers/create`)
 require the `admin` role. RBAC denials are audited as `rbac.denied`. The
 internal listener bypasses RBAC entirely.

@@ -17,7 +17,7 @@ Docker CLI ──mTLS──> swarmcli-rbac-proxy ──> Docker daemon (unix soc
 ## Features
 
 - **mTLS client certificates** -- each user gets a unique certificate; no shared credentials
-- **Role-based access control** -- dynamic, Kubernetes-style roles and per-user bindings with default-deny; built-in `viewer`/`operator`/`admin` plus custom roles ([guide](docs/rbac.md))
+- **Role-based access control** -- dynamic, Kubernetes-style roles and per-user bindings with default-deny; built-in `viewer`/`responder`/`operator`/`admin` plus custom roles ([guide](docs/rbac.md))
 - **Infrastructure stack protection** -- auto-detects the proxy's own Swarm stack and blocks external users from creating or deleting its services, secrets, networks, and configs
 - **Exec/attach guard** -- non-admin users cannot exec into protected containers
 - **Automated certificate issuance** -- generates client certificates on user creation (no manual openssl)
@@ -121,7 +121,7 @@ swcproxy binding rm <id>             # remove a binding (last-admin protected)
 swcproxy audit ls --limit 10
 ```
 
-Roles, bindings, and the built-in `viewer`/`operator`/`admin` permission matrix
+Roles, bindings, and the built-in `viewer`/`responder`/`operator`/`admin` permission matrix
 are covered in the [roles & permissions guide](docs/rbac.md). Custom roles are
 defined via the management API ([docs/api.md](docs/api.md#rbac-roles-and-bindings)).
 
@@ -134,10 +134,12 @@ When a user is created, `swcproxy` prints the `curl` command to share with the u
 - [Configuration reference](docs/configuration.md) — environment variables, JSON config, listener topology, stack protection
 - [API reference](docs/api.md) — management API endpoints with curl examples
 - [Security model](docs/security.md) — threat model, authentication layers, certificate lifecycle
+- [Architecture](docs/architecture.md) — the request chain, the dual listener, and the code map
+- [Troubleshooting](docs/troubleshooting.md) — symptoms in the proxy's output and what they mean
 
 ## Development
 
-- [Architecture and build commands](CLAUDE.md)
+- [Build and test commands](CLAUDE.md)
 - [Contributing guidelines](CONTRIBUTING.md)
 
 ## License
