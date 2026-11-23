@@ -161,11 +161,15 @@ bindings and silently promoting a legacy `user` to `operator`.
 
 ```bash
 docker exec -i "$(docker ps -q -f name=rbac_proxy)" \
-  swcproxy restore -i /data/proxy-backup.json
+  swcproxy restore -i /data/proxy-backup.json --force
 ```
 
 `restore` refuses to overwrite a non-empty store unless you pass `--force`,
 which atomically replaces the existing users, audit log, roles and bindings.
+A store the proxy has started on is never empty: on first start it seeds the
+built-in roles, and the `PROXY_SEED_USERNAME` user when set. So a restore
+through `docker exec` always needs `--force`; without it, `restore` stops with
+`store already has N users` or `role already exists`.
 
 ### Full cluster rebuild (database + CA bundle)
 
@@ -173,12 +177,13 @@ After the proxy stack is redeployed on a fresh Swarm with an empty volume:
 
 ```bash
 docker exec -i "$(docker ps -q -f name=rbac_proxy)" \
-  swcproxy restore -i /data/proxy-dr.json --ca-out /data/ca
+  swcproxy restore -i /data/proxy-dr.json --force --ca-out /data/ca
 ```
 
-Because the bundle carries CA material, `--ca-out` is required. `restore`
-writes `ca-cert.pem` and `ca-key.pem` (mode 0600) and prints the exact
-commands to recreate the Swarm secrets and redeploy:
+`--force` is needed for the reason above: the redeployed proxy has already
+seeded the empty volume. Because the bundle carries CA material, `--ca-out` is
+required. `restore` writes `ca-cert.pem` and `ca-key.pem` (mode 0600) and
+prints the exact commands to recreate the Swarm secrets and redeploy:
 
 ```bash
 docker secret rm rbac_client_ca rbac_client_ca_key
